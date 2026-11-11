@@ -1,5 +1,3 @@
-<img src="assets/icon.svg" width="64" height="64" alt="">
-
 # spared
 
 **An open-source host for Rust web apps with SQLite.** Each app and its database run in their own Wasm sandbox.
