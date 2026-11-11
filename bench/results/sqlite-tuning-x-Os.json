@@ -1,0 +1,944 @@
+{
+ "lever": "x-Os",
+ "timing": [
+  {
+   "batch": "final-core-truncate",
+   "journal_mode": "TRUNCATE",
+   "cpus": "3",
+   "rows": 100000,
+   "reps": 7,
+   "statistic": "median",
+   "loadavg_limit_before_each_run": 0.3,
+   "engine_knobs": null,
+   "extra_sql": null,
+   "native_comparator": "nat-rec-ts0",
+   "native_binary": "n-rec-ts0",
+   "wasm_binary": "x-Os",
+   "ratio": {
+    "insert_bulk": 2.25,
+    "point_select": 2.16,
+    "index_agg": 2.12,
+    "scan": 1.9,
+    "update_bulk": 1.831,
+    "durable_insert_200": 1.183
+   },
+   "geomean": 1.867,
+   "wasm_us": {
+    "insert_bulk": 88847,
+    "point_select": 80154,
+    "index_agg": 2334,
+    "scan": 10755,
+    "update_bulk": 108314,
+    "durable_insert_200": 160095
+   },
+   "native_us": {
+    "insert_bulk": 39494,
+    "point_select": 37111,
+    "index_agg": 1101,
+    "scan": 5660,
+    "update_bulk": 59153,
+    "durable_insert_200": 135299
+   },
+   "baseline_geomean_same_batch": 2.01,
+   "wasm_runs": {
+    "insert_bulk": [
+     100436,
+     91647,
+     78186,
+     86198,
+     82846,
+     90882,
+     88847
+    ],
+    "point_select": [
+     99676,
+     90115,
+     79345,
+     97146,
+     77995,
+     78759,
+     80154
+    ],
+    "index_agg": [
+     2483,
+     2352,
+     2222,
+     2611,
+     2334,
+     2322,
+     2220
+    ],
+    "scan": [
+     10755,
+     11344,
+     10502,
+     11571,
+     10697,
+     10689,
+     10816
+    ],
+    "update_bulk": [
+     108314,
+     125506,
+     131145,
+     126295,
+     104752,
+     108235,
+     108093
+    ],
+    "durable_insert_200": [
+     164950,
+     160457,
+     160095,
+     174099,
+     138180,
+     132398,
+     118066
+    ]
+   },
+   "native_runs": {
+    "insert_bulk": [
+     48088,
+     36552,
+     48741,
+     37128,
+     36067,
+     39494,
+     39906
+    ],
+    "point_select": [
+     36663,
+     37439,
+     44389,
+     34874,
+     35193,
+     37111,
+     38073
+    ],
+    "index_agg": [
+     1259,
+     1101,
+     1073,
+     1046,
+     1104,
+     1125,
+     1018
+    ],
+    "scan": [
+     5660,
+     6102,
+     5766,
+     5343,
+     5498,
+     6283,
+     5245
+    ],
+    "update_bulk": [
+     61907,
+     59865,
+     59153,
+     53859,
+     51806,
+     52951,
+     60882
+    ],
+    "durable_insert_200": [
+     135299,
+     120690,
+     115164,
+     113831,
+     140176,
+     137052,
+     149600
+    ]
+   }
+  },
+  {
+   "batch": "final-core-wal-cpu0-contended",
+   "journal_mode": "WAL",
+   "cpus": "0",
+   "rows": 100000,
+   "reps": 7,
+   "statistic": "median",
+   "loadavg_limit_before_each_run": 0.3,
+   "engine_knobs": null,
+   "extra_sql": null,
+   "native_comparator": "nat-rec-ts0",
+   "native_binary": "n-rec-ts0",
+   "wasm_binary": "x-Os",
+   "ratio": {
+    "insert_bulk": 2.208,
+    "point_select": 2.514,
+    "index_agg": 2.14,
+    "scan": 1.816,
+    "update_bulk": 1.871,
+    "durable_insert_200": 0.969
+   },
+   "geomean": 1.842,
+   "wasm_us": {
+    "insert_bulk": 87304,
+    "point_select": 103700,
+    "index_agg": 2352,
+    "scan": 11263,
+    "update_bulk": 110504,
+    "durable_insert_200": 37344
+   },
+   "native_us": {
+    "insert_bulk": 39547,
+    "point_select": 41253,
+    "index_agg": 1099,
+    "scan": 6202,
+    "update_bulk": 59073,
+    "durable_insert_200": 38524
+   },
+   "baseline_geomean_same_batch": 2.276,
+   "wasm_runs": {
+    "insert_bulk": [
+     94862,
+     77309,
+     80194,
+     88274,
+     80793,
+     87304,
+     90147
+    ],
+    "point_select": [
+     104043,
+     96413,
+     106415,
+     101902,
+     103612,
+     103700,
+     133050
+    ],
+    "index_agg": [
+     3067,
+     2443,
+     2290,
+     2235,
+     3128,
+     2333,
+     2352
+    ],
+    "scan": [
+     11263,
+     10910,
+     11389,
+     10204,
+     12245,
+     10686,
+     11591
+    ],
+    "update_bulk": [
+     110408,
+     105904,
+     110504,
+     112424,
+     116738,
+     108255,
+     114018
+    ],
+    "durable_insert_200": [
+     41173,
+     37344,
+     40818,
+     33827,
+     39121,
+     35323,
+     33611
+    ]
+   },
+   "native_runs": {
+    "insert_bulk": [
+     37422,
+     37311,
+     68544,
+     42270,
+     37710,
+     39547,
+     76043
+    ],
+    "point_select": [
+     41435,
+     40111,
+     41487,
+     39068,
+     41253,
+     40723,
+     78447
+    ],
+    "index_agg": [
+     964,
+     1275,
+     1099,
+     1036,
+     1555,
+     1034,
+     1197
+    ],
+    "scan": [
+     6202,
+     6010,
+     8104,
+     5605,
+     6658,
+     6027,
+     18102
+    ],
+    "update_bulk": [
+     54223,
+     57672,
+     81133,
+     59073,
+     64206,
+     58169,
+     122171
+    ],
+    "durable_insert_200": [
+     29004,
+     38524,
+     44939,
+     38926,
+     30602,
+     25572,
+     799959
+    ]
+   }
+  },
+  {
+   "batch": "final-core-wal",
+   "journal_mode": "WAL",
+   "cpus": "3",
+   "rows": 100000,
+   "reps": 7,
+   "statistic": "median",
+   "loadavg_limit_before_each_run": 0.3,
+   "engine_knobs": null,
+   "extra_sql": null,
+   "native_comparator": "nat-rec-ts0",
+   "native_binary": "n-rec-ts0",
+   "wasm_binary": "x-Os",
+   "ratio": {
+    "insert_bulk": 2.051,
+    "point_select": 2.875,
+    "index_agg": 2.322,
+    "scan": 1.977,
+    "update_bulk": 1.981,
+    "durable_insert_200": 1.38
+   },
+   "geomean": 2.049,
+   "wasm_us": {
+    "insert_bulk": 91235,
+    "point_select": 111894,
+    "index_agg": 2505,
+    "scan": 11195,
+    "update_bulk": 112625,
+    "durable_insert_200": 32854
+   },
+   "native_us": {
+    "insert_bulk": 44489,
+    "point_select": 38916,
+    "index_agg": 1079,
+    "scan": 5663,
+    "update_bulk": 56859,
+    "durable_insert_200": 23812
+   },
+   "baseline_geomean_same_batch": 2.24,
+   "wasm_runs": {
+    "insert_bulk": [
+     84095,
+     126037,
+     90957,
+     98272,
+     108957,
+     85972,
+     91235
+    ],
+    "point_select": [
+     127801,
+     104718,
+     108660,
+     119003,
+     133328,
+     111894,
+     102528
+    ],
+    "index_agg": [
+     4074,
+     2291,
+     2560,
+     2370,
+     2505,
+     2302,
+     5703
+    ],
+    "scan": [
+     18437,
+     10809,
+     10483,
+     10570,
+     13441,
+     12415,
+     11195
+    ],
+    "update_bulk": [
+     131047,
+     102664,
+     107576,
+     119016,
+     122223,
+     112625,
+     104121
+    ],
+    "durable_insert_200": [
+     42863,
+     34341,
+     29685,
+     32854,
+     45693,
+     30758,
+     24890
+    ]
+   },
+   "native_runs": {
+    "insert_bulk": [
+     54437,
+     35392,
+     46552,
+     42997,
+     35644,
+     44489,
+     46838
+    ],
+    "point_select": [
+     63211,
+     36185,
+     37897,
+     38877,
+     38916,
+     43309,
+     52570
+    ],
+    "index_agg": [
+     2205,
+     937,
+     1031,
+     1079,
+     1126,
+     1058,
+     1099
+    ],
+    "scan": [
+     5702,
+     5000,
+     7875,
+     5663,
+     5283,
+     5841,
+     5478
+    ],
+    "update_bulk": [
+     60639,
+     59483,
+     53338,
+     59528,
+     55679,
+     56859,
+     55121
+    ],
+    "durable_insert_200": [
+     21978,
+     21429,
+     25934,
+     27903,
+     29984,
+     22879,
+     23812
+    ]
+   }
+  },
+  {
+   "batch": "final-opt-wal",
+   "journal_mode": "WAL",
+   "cpus": "3",
+   "rows": 100000,
+   "reps": 9,
+   "statistic": "median",
+   "loadavg_limit_before_each_run": 0.3,
+   "engine_knobs": null,
+   "extra_sql": null,
+   "native_comparator": "nat-rec-ts0",
+   "native_binary": "n-rec-ts0",
+   "wasm_binary": "x-Os",
+   "ratio": {
+    "insert_bulk": 2.314,
+    "point_select": 2.693,
+    "index_agg": 2.35,
+    "scan": 2.198,
+    "update_bulk": 1.841,
+    "durable_insert_200": 1.094
+   },
+   "geomean": 2.004,
+   "wasm_us": {
+    "insert_bulk": 90973,
+    "point_select": 115131,
+    "index_agg": 2554,
+    "scan": 13001,
+    "update_bulk": 113307,
+    "durable_insert_200": 28018
+   },
+   "native_us": {
+    "insert_bulk": 39308,
+    "point_select": 42746,
+    "index_agg": 1087,
+    "scan": 5916,
+    "update_bulk": 61544,
+    "durable_insert_200": 25607
+   },
+   "baseline_geomean_same_batch": null,
+   "wasm_runs": {
+    "insert_bulk": [
+     76046,
+     97768,
+     81909,
+     100517,
+     82844,
+     86825,
+     90973,
+     101134,
+     101745
+    ],
+    "point_select": [
+     100180,
+     117260,
+     106307,
+     104483,
+     135061,
+     115131,
+     104341,
+     123595,
+     122752
+    ],
+    "index_agg": [
+     4491,
+     2304,
+     2554,
+     2367,
+     4622,
+     2293,
+     2421,
+     2570,
+     5645
+    ],
+    "scan": [
+     16771,
+     15894,
+     13889,
+     12310,
+     11004,
+     10734,
+     13001,
+     10674,
+     14213
+    ],
+    "update_bulk": [
+     113307,
+     126898,
+     113258,
+     134557,
+     100026,
+     111185,
+     106310,
+     134702,
+     127015
+    ],
+    "durable_insert_200": [
+     23246,
+     36208,
+     24204,
+     28018,
+     26974,
+     35071,
+     27545,
+     28150,
+     28958
+    ]
+   },
+   "native_runs": {
+    "insert_bulk": [
+     42559,
+     51439,
+     44377,
+     39099,
+     37028,
+     35247,
+     37985,
+     39308,
+     40238
+    ],
+    "point_select": [
+     39316,
+     48138,
+     44997,
+     41739,
+     42746,
+     58934,
+     48167,
+     38427,
+     42329
+    ],
+    "index_agg": [
+     1066,
+     1140,
+     1083,
+     1108,
+     1069,
+     1202,
+     1087,
+     1100,
+     1053
+    ],
+    "scan": [
+     5520,
+     5621,
+     5938,
+     7734,
+     6082,
+     5916,
+     5887,
+     8536,
+     5842
+    ],
+    "update_bulk": [
+     66123,
+     61544,
+     67346,
+     69266,
+     57874,
+     77380,
+     57777,
+     54373,
+     54236
+    ],
+    "durable_insert_200": [
+     29102,
+     30798,
+     25607,
+     25599,
+     27951,
+     22535,
+     21214,
+     28183,
+     22147
+    ]
+   }
+  },
+  {
+   "batch": "final-unpinned-truncate",
+   "journal_mode": "TRUNCATE",
+   "cpus": "0-3",
+   "rows": 100000,
+   "reps": 7,
+   "statistic": "median",
+   "loadavg_limit_before_each_run": 0.3,
+   "engine_knobs": null,
+   "extra_sql": null,
+   "native_comparator": "nat-rec-ts0",
+   "native_binary": "n-rec-ts0",
+   "wasm_binary": "x-Os",
+   "ratio": {
+    "insert_bulk": 2.274,
+    "point_select": 2.178,
+    "index_agg": 2.21,
+    "scan": 1.766,
+    "update_bulk": 2.049,
+    "durable_insert_200": 1.181
+   },
+   "geomean": 1.898,
+   "wasm_us": {
+    "insert_bulk": 96091,
+    "point_select": 89333,
+    "index_agg": 2338,
+    "scan": 10663,
+    "update_bulk": 118065,
+    "durable_insert_200": 207434
+   },
+   "native_us": {
+    "insert_bulk": 42256,
+    "point_select": 41022,
+    "index_agg": 1058,
+    "scan": 6038,
+    "update_bulk": 57626,
+    "durable_insert_200": 175695
+   },
+   "baseline_geomean_same_batch": 3.386,
+   "wasm_runs": {
+    "insert_bulk": [
+     107998,
+     92222,
+     99677,
+     96091,
+     92612,
+     97879,
+     80756
+    ],
+    "point_select": [
+     89333,
+     108141,
+     85081,
+     103445,
+     85400,
+     90677,
+     84837
+    ],
+    "index_agg": [
+     2338,
+     2198,
+     2839,
+     2542,
+     2278,
+     2615,
+     2296
+    ],
+    "scan": [
+     10945,
+     9980,
+     13318,
+     11156,
+     10276,
+     10663,
+     10381
+    ],
+    "update_bulk": [
+     118065,
+     122360,
+     149160,
+     160141,
+     100699,
+     115558,
+     104953
+    ],
+    "durable_insert_200": [
+     207434,
+     217180,
+     231919,
+     228432,
+     187709,
+     181902,
+     187152
+    ]
+   },
+   "native_runs": {
+    "insert_bulk": [
+     51751,
+     38938,
+     40195,
+     44602,
+     42256,
+     39624,
+     43566
+    ],
+    "point_select": [
+     39616,
+     42902,
+     41022,
+     48363,
+     41298,
+     40505,
+     36879
+    ],
+    "index_agg": [
+     1050,
+     1058,
+     1057,
+     1064,
+     1052,
+     1493,
+     1060
+    ],
+    "scan": [
+     6038,
+     7853,
+     5261,
+     6254,
+     5544,
+     8366,
+     5405
+    ],
+    "update_bulk": [
+     54048,
+     65656,
+     52652,
+     59518,
+     57626,
+     55513,
+     60840
+    ],
+    "durable_insert_200": [
+     175695,
+     198407,
+     193691,
+     155775,
+     181666,
+     156454,
+     139913
+    ]
+   }
+  },
+  {
+   "batch": "final-unpinned-wal",
+   "journal_mode": "WAL",
+   "cpus": "0-3",
+   "rows": 100000,
+   "reps": 7,
+   "statistic": "median",
+   "loadavg_limit_before_each_run": 0.3,
+   "engine_knobs": null,
+   "extra_sql": null,
+   "native_comparator": "nat-rec-ts0",
+   "native_binary": "n-rec-ts0",
+   "wasm_binary": "x-Os",
+   "ratio": {
+    "insert_bulk": 2.082,
+    "point_select": 2.357,
+    "index_agg": 2.071,
+    "scan": 1.77,
+    "update_bulk": 1.861,
+    "durable_insert_200": 1.022
+   },
+   "geomean": 1.802,
+   "wasm_us": {
+    "insert_bulk": 89714,
+    "point_select": 102154,
+    "index_agg": 2347,
+    "scan": 10778,
+    "update_bulk": 113745,
+    "durable_insert_200": 40815
+   },
+   "native_us": {
+    "insert_bulk": 43080,
+    "point_select": 43337,
+    "index_agg": 1133,
+    "scan": 6088,
+    "update_bulk": 61106,
+    "durable_insert_200": 39923
+   },
+   "baseline_geomean_same_batch": 3.583,
+   "wasm_runs": {
+    "insert_bulk": [
+     87031,
+     89714,
+     91416,
+     78878,
+     97479,
+     101144,
+     78079
+    ],
+    "point_select": [
+     101671,
+     102154,
+     97082,
+     101804,
+     104598,
+     102726,
+     115701
+    ],
+    "index_agg": [
+     2276,
+     2410,
+     2426,
+     2347,
+     2266,
+     2199,
+     2394
+    ],
+    "scan": [
+     11916,
+     15969,
+     12054,
+     10778,
+     10192,
+     10588,
+     10766
+    ],
+    "update_bulk": [
+     114974,
+     122679,
+     106073,
+     106826,
+     115440,
+     112543,
+     113745
+    ],
+    "durable_insert_200": [
+     33268,
+     44771,
+     40815,
+     35342,
+     43675,
+     40370,
+     44089
+    ]
+   },
+   "native_runs": {
+    "insert_bulk": [
+     43080,
+     35765,
+     54356,
+     38952,
+     37721,
+     46660,
+     57038
+    ],
+    "point_select": [
+     43337,
+     41840,
+     54978,
+     57724,
+     39769,
+     56603,
+     41732
+    ],
+    "index_agg": [
+     1052,
+     1133,
+     2436,
+     1042,
+     1300,
+     1065,
+     1137
+    ],
+    "scan": [
+     5436,
+     6088,
+     6702,
+     5345,
+     6899,
+     5635,
+     7858
+    ],
+    "update_bulk": [
+     68795,
+     60097,
+     58978,
+     61106,
+     57412,
+     69641,
+     68445
+    ],
+    "durable_insert_200": [
+     24726,
+     32519,
+     43261,
+     47349,
+     34466,
+     39923,
+     41453
+    ]
+   }
+  }
+ ],
+ "memory": [],
+ "wasm_bytes": 1293810,
+ "cwasm_bytes": 4380112
+}

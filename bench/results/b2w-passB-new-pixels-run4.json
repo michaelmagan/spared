@@ -1,0 +1,1 @@
+{"body_len":44,"body_len_changed":0,"errors":0,"first_byte_us":{"max":3788,"mean":2414,"min":2179,"p50":2418,"p90":2552,"p99":2912},"full_body_us":{"max":3790,"mean":2416,"min":2180,"p50":2419,"p90":2554,"p99":2914},"host":"workloads.localhost","path":"/w/pixels","requests":200,"server_cpu_us_per_request":2320,"server_pids":[1361],"wall_s":0.484116974,"warmup":20}

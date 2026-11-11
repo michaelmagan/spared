@@ -1,0 +1,202 @@
+{
+ "steady_requests_per_app": 100,
+ "binary_sha256": "620d9f7e5eb461067e08af17316aaa087445b4232e0e98e3dd146763bd9ab394",
+ "target": "workerd-distinct",
+ "system": "workerd",
+ "kind": "distinct",
+ "n": 200,
+ "run": 3,
+ "page_cache_dropped_before_start": true,
+ "server_cpu": 0,
+ "cmd": [
+  "bench/work/curve/bin/workerd",
+  "serve",
+  "config.capnp"
+ ],
+ "apps": {
+  "count": 200,
+  "unique_sha256": 200,
+  "js_bytes_total": 3844068
+ },
+ "ready_s": 0.258,
+ "first_wall_s": 1.406,
+ "steady_wall_s": 14.455,
+ "requests": 20000,
+ "errors": 0,
+ "snapshots_kb": {
+  "startup": {
+   "pids": 1,
+   "threads": 4,
+   "VmRSS": 464056,
+   "RssAnon": 420236,
+   "RssFile": 43820,
+   "RssShmem": 0,
+   "Pss": 462145,
+   "Pss_Anon": 420240,
+   "Pss_File": 41905,
+   "Pss_Shmem": 0,
+   "Shared_Clean": 2248,
+   "Shared_Dirty": 0,
+   "Private_Clean": 40772,
+   "Private_Dirty": 421040,
+   "cgroup_kb": {
+    "usage": 444996,
+    "rss": 420552,
+    "cache": 15792,
+    "mapped_file": 5756,
+    "shmem": 0,
+    "active_file": 1092,
+    "inactive_file": 14700
+   },
+   "dev_shm_used_kb": 0,
+   "breakdown_kb": {
+    "anon": {
+     "maps": 2457,
+     "rss": 418908,
+     "pss": 418908,
+     "anon": 418908
+    },
+    "server_binary": {
+     "maps": 6,
+     "rss": 42416,
+     "pss": 42416,
+     "anon": 1824
+    },
+    "data_files": {
+     "maps": 30,
+     "rss": 960,
+     "pss": 960,
+     "anon": 0
+    },
+    "shared_libs": {
+     "maps": 35,
+     "rss": 2504,
+     "pss": 586,
+     "anon": 80
+    },
+    "other_special": {
+     "maps": 5,
+     "rss": 88,
+     "pss": 84,
+     "anon": 84
+    }
+   }
+  },
+  "first": {
+   "pids": 1,
+   "threads": 4,
+   "VmRSS": 589208,
+   "RssAnon": 528644,
+   "RssFile": 60564,
+   "RssShmem": 0,
+   "Pss": 587293,
+   "Pss_Anon": 528644,
+   "Pss_File": 58649,
+   "Pss_Shmem": 0,
+   "Shared_Clean": 2248,
+   "Shared_Dirty": 0,
+   "Private_Clean": 45516,
+   "Private_Dirty": 541444,
+   "cgroup_kb": {
+    "usage": 577136,
+    "rss": 528644,
+    "cache": 36108,
+    "mapped_file": 17864,
+    "shmem": 0,
+    "active_file": 3512,
+    "inactive_file": 32596
+   },
+   "dev_shm_used_kb": 0,
+   "breakdown_kb": {
+    "anon": {
+     "maps": 2457,
+     "rss": 526656,
+     "pss": 526656,
+     "anon": 526656
+    },
+    "server_binary": {
+     "maps": 6,
+     "rss": 47160,
+     "pss": 47160,
+     "anon": 1824
+    },
+    "data_files": {
+     "maps": 400,
+     "rss": 12800,
+     "pss": 12800,
+     "anon": 0
+    },
+    "shared_libs": {
+     "maps": 35,
+     "rss": 2504,
+     "pss": 586,
+     "anon": 80
+    },
+    "other_special": {
+     "maps": 5,
+     "rss": 88,
+     "pss": 84,
+     "anon": 84
+    }
+   }
+  },
+  "steady": {
+   "pids": 1,
+   "threads": 4,
+   "VmRSS": 1119412,
+   "RssAnon": 1056924,
+   "RssFile": 62488,
+   "RssShmem": 0,
+   "Pss": 1117495,
+   "Pss_Anon": 1056924,
+   "Pss_File": 60571,
+   "Pss_Shmem": 0,
+   "Shared_Clean": 2252,
+   "Shared_Dirty": 0,
+   "Private_Clean": 49868,
+   "Private_Dirty": 1067292,
+   "cgroup_kb": {
+    "usage": 1107984,
+    "rss": 1056924,
+    "cache": 37764,
+    "mapped_file": 15432,
+    "shmem": 0,
+    "active_file": 3872,
+    "inactive_file": 33892
+   },
+   "dev_shm_used_kb": 0,
+   "breakdown_kb": {
+    "anon": {
+     "maps": 2663,
+     "rss": 1054932,
+     "pss": 1054932,
+     "anon": 1054932
+    },
+    "server_binary": {
+     "maps": 6,
+     "rss": 51512,
+     "pss": 51512,
+     "anon": 1824
+    },
+    "data_files": {
+     "maps": 323,
+     "rss": 10336,
+     "pss": 10336,
+     "anon": 0
+    },
+    "shared_libs": {
+     "maps": 35,
+     "rss": 2508,
+     "pss": 588,
+     "anon": 80
+    },
+    "other_special": {
+     "maps": 5,
+     "rss": 92,
+     "pss": 88,
+     "anon": 88
+    }
+   }
+  }
+ }
+}

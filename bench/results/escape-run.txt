@@ -1,0 +1,32 @@
+CONTROL-OK   control: own data file is readable :: READ 4
+DENIED       read another app's file via ../ traversal :: ERR PermissionDenied
+DENIED       read another app's file via deeper ../../ :: ERR PermissionDenied
+DENIED       read another app's file by absolute host path :: ERR NotFound
+DENIED       read another app's file via relative symlink in own dir :: ERR PermissionDenied
+DENIED       read another app's file via absolute symlink in own dir :: ERR PermissionDenied
+DENIED       read /etc/passwd :: ERR NotFound
+DENIED       read /proc/self/environ :: ERR NotFound
+DENIED       write outside the data dir (/escape.txt) :: ERR NotFound
+DENIED       write another app via ../ :: ERR PermissionDenied
+CONTROL-OK   control: 4 MB allocation under a 32 MB cap works :: ALLOC_OK 4194304
+DENIED       512 MB allocation under a 32 MB memory cap :: ALLOC_FAIL None
+DENIED       infinite loop under a 200 ms CPU cap :: stopped after 249 ms: Some("error while executing at wasm backtrace:\n    0:   0x1e52 - fs_probe-af6c65e1858a4685.wasm!fs_probe[31cc89f6d27c7003]::main\n    1:   0x1746 - fs_probe-af6c65e1858a4685.wasm!std[85c6cda83d22a5b5]::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>\n    2:   0x3c70 - fs_probe-af6c65e1858a4685.wasm!__main_void\n    3:   0x172e - fs_probe-af6c65e1858a4685.wasm!_start: wasm trap: interrupt")
+DENIED       raw TCP socket without a grant (import refused at load) :: Some("refused: ungranted imports [\"wasi:sockets/network@0.2.9\", \"wasi:sockets/instance-network@0.2.9\", \"wasi:sockets/udp@0.2.9\", \"wasi:sockets/udp-create-socket@0.2.9\", \"wasi:sockets/tcp@0.2.9\", \"wasi:sockets/tcp-create-socket@0.2.9\", \"wasi:sockets/ip-name-lookup@0.2.9\"]")
+DENIED       raw TCP socket even with fetch granted (sockets never grantable) :: Some("refused: ungranted imports [\"wasi:sockets/network@0.2.9\", \"wasi:sockets/instance-network@0.2.9\", \"wasi:sockets/udp@0.2.9\", \"wasi:sockets/udp-create-socket@0.2.9\", \"wasi:sockets/tcp@0.2.9\", \"wasi:sockets/tcp-create-socket@0.2.9\", \"wasi:sockets/ip-name-lookup@0.2.9\"]")
+DENIED       outbound fetch without a fetch grant (import refused at load) :: Some("refused: ungranted imports [\"wasi:http/outgoing-handler@0.2.12\"]")
+CONTROL-OK   control: fetch to a granted public host succeeds :: http://example.com/ STATUS 200
+CONTROL-OK   control: HTTPS fetch to a granted public host verifies TLS and succeeds :: https://example.com/ STATUS 200
+DENIED       fetch cloud metadata 169.254.169.254 :: http://169.254.169.254/latest/meta-data/ ERR ErrorCode::DestinationIpProhibited
+DENIED       fetch loopback 127.0.0.1 on a live local listener :: http://127.0.0.1:33753/ ERR ErrorCode::DestinationIpProhibited
+DENIED       fetch localhost by name :: http://localhost:33753/ ERR ErrorCode::DestinationIpProhibited
+DENIED       fetch private 10.0.0.1 :: http://10.0.0.1/ ERR ErrorCode::DestinationIpProhibited
+DENIED       fetch private 192.168.1.1 :: http://192.168.1.1/ ERR ErrorCode::DestinationIpProhibited
+DENIED       fetch private 172.16.0.1 :: http://172.16.0.1/ ERR ErrorCode::DestinationIpProhibited
+DENIED       fetch carrier-grade NAT 100.64.0.1 :: http://100.64.0.1/ ERR ErrorCode::DestinationIpProhibited
+DENIED       fetch IPv6 loopback [::1] :: http://[::1]:33753/ ERR ErrorCode::DestinationIpProhibited
+DENIED       fetch IPv4-mapped IPv6 metadata [::ffff:169.254.169.254] :: http://[::ffff:169.254.169.254]/ ERR ErrorCode::DestinationIpProhibited
+DENIED       fetch metadata as a decimal integer 2852039166 :: http://2852039166/ ERR ErrorCode::DestinationIpProhibited
+DENIED       fetch metadata as hex 0xa9fea9fe :: http://0xa9fea9fe/ ERR ErrorCode::DestinationIpProhibited
+DENIED       fetch host not on the allowlist (example.com) :: http://example.com/ ERR ErrorCode::HttpRequestDenied
+DENIED       no connection ever reached the local listener :: 0 connections
+31 cases, 0 failures

@@ -1,0 +1,1 @@
+{"body_len":104,"body_len_changed":0,"errors":0,"first_byte_us":{"max":60233,"mean":13346,"min":11807,"p50":12325,"p90":14455,"p99":24685},"full_body_us":{"max":60236,"mean":13348,"min":11809,"p50":12327,"p90":14457,"p99":24687},"host":"workloads.localhost","path":"/w/sha256","requests":200,"server_cpu_us_per_request":12423,"server_pids":[1361],"wall_s":2.67038987,"warmup":20}

@@ -1,0 +1,48 @@
+{
+ "lever": "mem-m-O2",
+ "timing": [],
+ "memory": [
+  {
+   "file": "mem16-m-O2.json",
+   "apps_hot": 16,
+   "engine_knobs": null,
+   "distinct_sha256": 16,
+   "wasm_bytes": 2073404,
+   "cwasm_bytes": 6632776,
+   "kb_per_hot_app_growth": {
+    "rss": 4854,
+    "anon": 306,
+    "file": 4548,
+    "pss": 4810,
+    "pss_anon": 306,
+    "pss_file": 4504
+   },
+   "kb_total": {
+    "before_touch": {
+     "rss": 26040,
+     "anon": 5144,
+     "file": 20896,
+     "pss": 23821,
+     "pss_anon": 5144,
+     "pss_file": 18677
+    },
+    "after_1_hot": {
+     "rss": 33848,
+     "anon": 5492,
+     "file": 28356,
+     "pss": 31465,
+     "pss_anon": 5492,
+     "pss_file": 25973
+    },
+    "after_n_hot": {
+     "rss": 103716,
+     "anon": 10048,
+     "file": 93668,
+     "pss": 100793,
+     "pss_anon": 10048,
+     "pss_file": 90745
+    }
+   }
+  }
+ ]
+}

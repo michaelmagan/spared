@@ -1,0 +1,184 @@
+noop       MATCH
+sha256     MATCH
+json       MATCH
+sql-agg    MATCH
+sql-write  MATCH
+markdown   MATCH
+sieve      MATCH
+nbody      MATCH
+pixels     MATCH
+sort       MATCH
+wordfreq   MATCH
+html       MATCH
+gzip       MATCH (allowed to differ: gzip_b64, out_len)
+regex      MATCH
+pbkdf2     MATCH
+all outputs match
+run 1 spared   noop       p50       71 us  p99      322 us  cpu       60 us  load 0.29
+run 1 spared   sha256     p50    13734 us  p99    18772 us  cpu    13469 us  load 0.29
+run 1 spared   json       p50     1975 us  p99     5175 us  cpu     1897 us  load 0.29
+run 1 spared   sql-agg    p50    16071 us  p99    22739 us  cpu    15820 us  load 0.29
+run 1 spared   sql-write  p50    10693 us  p99    19153 us  cpu     9051 us  load 0.28
+run 1 spared   markdown   p50      857 us  p99     1742 us  cpu      802 us  load 0.28
+run 1 spared   sieve      p50    10937 us  p99    15257 us  cpu    10806 us  load 0.28
+run 1 spared   nbody      p50    15260 us  p99    26729 us  cpu    15214 us  load 0.27
+run 1 spared   pixels     p50     2538 us  p99     5404 us  cpu     2474 us  load 0.28
+run 1 spared   sort       p50    14782 us  p99    21941 us  cpu    14541 us  load 0.28
+run 1 spared   wordfreq   p50    20986 us  p99    24694 us  cpu    20807 us  load 0.28
+run 1 spared   html       p50     2878 us  p99     7799 us  cpu     2864 us  load 0.29
+run 1 spared   gzip       p50    33921 us  p99    43726 us  cpu    33814 us  load 0.29
+run 1 spared   regex      p50    14784 us  p99    24604 us  cpu    14815 us  load 0.28
+run 1 spared   pbkdf2     p50    18301 us  p99    23532 us  cpu    18168 us  load 0.27
+run 1 workerd  noop       p50      117 us  p99      432 us  cpu      118 us  load 0.25
+run 1 workerd  sha256     p50     3563 us  p99     6313 us  cpu     3437 us  load 0.25
+run 1 workerd  json       p50     1546 us  p99     4790 us  cpu     1550 us  load 0.25
+run 1 workerd  sql-agg    p50    64853 us  p99    90042 us  cpu    63495 us  load 0.25
+run 1 workerd  sql-write  p50    40764 us  p99   107749 us  cpu    40554 us  load 0.27
+run 1 workerd  markdown   p50     4190 us  p99    12429 us  cpu     4528 us  load 0.28
+run 1 workerd  sieve      p50     9150 us  p99    15601 us  cpu     9061 us  load 0.28
+run 1 workerd  nbody      p50    18550 us  p99    25911 us  cpu    18348 us  load 0.28
+run 1 workerd  pixels     p50     7594 us  p99    13963 us  cpu     6594 us  load 0.29
+run 1 workerd  sort       p50    90609 us  p99   117027 us  cpu    89249 us  load 0.29
+run 1 workerd  wordfreq   p50    45278 us  p99    73690 us  cpu    45005 us  load 0.27
+run 1 workerd  html       p50     4938 us  p99     7226 us  cpu     4824 us  load 0.27
+run 1 workerd  gzip       p50    22191 us  p99    35048 us  cpu    21877 us  load 0.27
+run 1 workerd  regex      p50    23270 us  p99    29552 us  cpu    22788 us  load 0.28
+run 1 workerd  pbkdf2     p50     6866 us  p99    12948 us  cpu     6751 us  load 0.29
+run 2 workerd  noop       p50      106 us  p99      399 us  cpu      108 us  load 0.29
+run 2 workerd  sha256     p50     3476 us  p99     5834 us  cpu     3397 us  load 0.29
+run 2 workerd  json       p50     1438 us  p99     4591 us  cpu     1436 us  load 0.29
+run 2 workerd  sql-agg    p50    61267 us  p99   106570 us  cpu    61073 us  load 0.29
+run 2 workerd  sql-write  p50    40638 us  p99   108752 us  cpu    40952 us  load 0.28
+run 2 workerd  markdown   p50     4238 us  p99    11024 us  cpu     4580 us  load 0.28
+run 2 workerd  sieve      p50     9295 us  p99    17207 us  cpu     9213 us  load 0.28
+run 2 workerd  nbody      p50    18327 us  p99    28885 us  cpu    18169 us  load 0.29
+run 2 workerd  pixels     p50     7106 us  p99     9843 us  cpu     6209 us  load 0.29
+run 2 workerd  sort       p50    87482 us  p99    93331 us  cpu    87194 us  load 0.29
+run 2 workerd  wordfreq   p50    45440 us  p99    61520 us  cpu    43667 us  load 0.27
+run 2 workerd  html       p50     5317 us  p99     9042 us  cpu     5248 us  load 0.27
+run 2 workerd  gzip       p50    21894 us  p99    29829 us  cpu    21773 us  load 0.27
+run 2 workerd  regex      p50    22981 us  p99    30818 us  cpu    22954 us  load 0.29
+run 2 workerd  pbkdf2     p50     6912 us  p99    13361 us  cpu     6742 us  load 0.27
+run 2 spared   noop       p50       69 us  p99      159 us  cpu       53 us  load 0.27
+run 2 spared   sha256     p50    13801 us  p99    19148 us  cpu    13609 us  load 0.27
+run 2 spared   json       p50     1973 us  p99     3964 us  cpu     1893 us  load 0.29
+run 2 spared   sql-agg    p50    15684 us  p99    25616 us  cpu    15539 us  load 0.29
+run 2 spared   sql-write  p50    12132 us  p99    20806 us  cpu     9600 us  load 0.29
+run 2 spared   markdown   p50      871 us  p99     1599 us  cpu      803 us  load 0.27
+run 2 spared   sieve      p50    11245 us  p99    15386 us  cpu    11079 us  load 0.27
+run 2 spared   nbody      p50    14535 us  p99    21446 us  cpu    14511 us  load 0.29
+run 2 spared   pixels     p50     2665 us  p99     6739 us  cpu     2609 us  load 0.29
+run 2 spared   sort       p50    14593 us  p99    17286 us  cpu    14407 us  load 0.29
+run 2 spared   wordfreq   p50    21580 us  p99    37283 us  cpu    21382 us  load 0.28
+run 2 spared   html       p50     2780 us  p99     4008 us  cpu     2695 us  load 0.28
+run 2 spared   gzip       p50    34324 us  p99    44583 us  cpu    34176 us  load 0.28
+run 2 spared   regex      p50    14504 us  p99    22703 us  cpu    14462 us  load 0.27
+run 2 spared   pbkdf2     p50    18564 us  p99    29447 us  cpu    18434 us  load 0.27
+run 3 spared   noop       p50       71 us  p99      241 us  cpu       57 us  load 0.27
+run 3 spared   sha256     p50    13888 us  p99    17329 us  cpu    13767 us  load 0.27
+run 3 spared   json       p50     2110 us  p99     6315 us  cpu     2061 us  load 0.27
+run 3 spared   sql-agg    p50    16050 us  p99    28650 us  cpu    15922 us  load 0.27
+run 3 spared   sql-write  p50    11482 us  p99    19969 us  cpu     9499 us  load 0.28
+run 3 spared   markdown   p50      830 us  p99     1293 us  cpu      774 us  load 0.27
+run 3 spared   sieve      p50    11187 us  p99    13303 us  cpu    11058 us  load 0.27
+run 3 spared   nbody      p50    14556 us  p99    18552 us  cpu    14430 us  load 0.27
+run 3 spared   pixels     p50     2471 us  p99     3112 us  cpu     2378 us  load 0.29
+run 3 spared   sort       p50    14484 us  p99    21160 us  cpu    14250 us  load 0.29
+run 3 spared   wordfreq   p50    21179 us  p99    30636 us  cpu    20943 us  load 0.28
+run 3 spared   html       p50     2618 us  p99     3932 us  cpu     2526 us  load 0.29
+run 3 spared   gzip       p50    34608 us  p99    60611 us  cpu    34064 us  load 0.29
+run 3 spared   regex      p50    14040 us  p99    21182 us  cpu    13736 us  load 0.28
+run 3 spared   pbkdf2     p50    18538 us  p99    28585 us  cpu    18230 us  load 0.28
+run 3 workerd  noop       p50      108 us  p99      556 us  cpu      112 us  load 0.29
+run 3 workerd  sha256     p50     3432 us  p99     6656 us  cpu     3338 us  load 0.29
+run 3 workerd  json       p50     1419 us  p99     4087 us  cpu     1438 us  load 0.29
+run 3 workerd  sql-agg    p50    62594 us  p99    83487 us  cpu    61168 us  load 0.29
+run 3 workerd  sql-write  p50    37983 us  p99    89069 us  cpu    38834 us  load 0.29
+run 3 workerd  markdown   p50     4205 us  p99    16990 us  cpu     4484 us  load 0.29
+run 3 workerd  sieve      p50     8806 us  p99    16673 us  cpu     8777 us  load 0.29
+run 3 workerd  nbody      p50    18032 us  p99    27204 us  cpu    17945 us  load 0.29
+run 3 workerd  pixels     p50     7293 us  p99    13115 us  cpu     6279 us  load 0.29
+run 3 workerd  sort       p50    90073 us  p99   104483 us  cpu    89522 us  load 0.29
+run 3 workerd  wordfreq   p50    45163 us  p99    94047 us  cpu    46605 us  load 0.29
+run 3 workerd  html       p50     5011 us  p99     7874 us  cpu     4949 us  load 0.29
+run 3 workerd  gzip       p50    21094 us  p99    25829 us  cpu    20890 us  load 0.29
+run 3 workerd  regex      p50    22251 us  p99    30180 us  cpu    22028 us  load 0.29
+run 3 workerd  pbkdf2     p50     6600 us  p99     9518 us  cpu     6428 us  load 0.29
+run 4 workerd  noop       p50       97 us  p99      492 us  cpu      102 us  load 0.27
+run 4 workerd  sha256     p50     3243 us  p99     5074 us  cpu     3179 us  load 0.27
+run 4 workerd  json       p50     1193 us  p99     3187 us  cpu     1228 us  load 0.27
+run 4 workerd  sql-agg    p50    57276 us  p99    73773 us  cpu    57245 us  load 0.27
+run 4 workerd  sql-write  p50    37276 us  p99    92269 us  cpu    38644 us  load 0.28
+run 4 workerd  markdown   p50     3926 us  p99     9400 us  cpu     4190 us  load 0.28
+run 4 workerd  sieve      p50     8639 us  p99    11554 us  cpu     8606 us  load 0.28
+run 4 workerd  nbody      p50    17334 us  p99    24252 us  cpu    17147 us  load 0.28
+run 4 workerd  pixels     p50     4826 us  p99    10747 us  cpu     5224 us  load 0.29
+run 4 workerd  sort       p50    83513 us  p99    97614 us  cpu    83227 us  load 0.29
+run 4 workerd  wordfreq   p50    40250 us  p99    52159 us  cpu    40635 us  load 0.27
+run 4 workerd  html       p50     4726 us  p99     7494 us  cpu     4745 us  load 0.27
+run 4 workerd  gzip       p50    20053 us  p99    29319 us  cpu    20011 us  load 0.27
+run 4 workerd  regex      p50    21231 us  p99    26941 us  cpu    20967 us  load 0.28
+run 4 workerd  pbkdf2     p50     6178 us  p99     8673 us  cpu     6161 us  load 0.29
+run 4 spared   noop       p50       69 us  p99      136 us  cpu       53 us  load 0.29
+run 4 spared   sha256     p50    12323 us  p99    14283 us  cpu    12363 us  load 0.29
+run 4 spared   json       p50     1784 us  p99     2141 us  cpu     1731 us  load 0.28
+run 4 spared   sql-agg    p50    14606 us  p99    18443 us  cpu    14459 us  load 0.28
+run 4 spared   sql-write  p50     9647 us  p99    17363 us  cpu     8225 us  load 0.27
+run 4 spared   markdown   p50      731 us  p99      984 us  cpu      696 us  load 0.27
+run 4 spared   sieve      p50    10032 us  p99    14119 us  cpu    10034 us  load 0.27
+run 4 spared   nbody      p50    13706 us  p99    19122 us  cpu    13679 us  load 0.29
+run 4 spared   pixels     p50     2506 us  p99     2728 us  cpu     2390 us  load 0.29
+run 4 spared   sort       p50    13270 us  p99    16263 us  cpu    13444 us  load 0.29
+run 4 spared   wordfreq   p50    19730 us  p99    27621 us  cpu    19603 us  load 0.27
+run 4 spared   html       p50     2422 us  p99     2802 us  cpu     2377 us  load 0.29
+run 4 spared   gzip       p50    30944 us  p99    36638 us  cpu    31122 us  load 0.29
+run 4 spared   regex      p50    12645 us  p99    17613 us  cpu    12786 us  load 0.28
+run 4 spared   pbkdf2     p50    16187 us  p99    25624 us  cpu    16360 us  load 0.28
+run 5 spared   noop       p50       69 us  p99      133 us  cpu       53 us  load 0.28
+run 5 spared   sha256     p50    11947 us  p99    14056 us  cpu    12027 us  load 0.28
+run 5 spared   json       p50     1637 us  p99     2428 us  cpu     1642 us  load 0.28
+run 5 spared   sql-agg    p50    13776 us  p99    20110 us  cpu    13936 us  load 0.28
+run 5 spared   sql-write  p50     9322 us  p99    11928 us  cpu     8066 us  load 0.28
+run 5 spared   markdown   p50      712 us  p99      873 us  cpu      679 us  load 0.28
+run 5 spared   sieve      p50    10145 us  p99    12477 us  cpu    10148 us  load 0.28
+run 5 spared   nbody      p50    12934 us  p99    15546 us  cpu    13030 us  load 0.28
+run 5 spared   pixels     p50     2221 us  p99     3292 us  cpu     2229 us  load 0.29
+run 5 spared   sort       p50    12957 us  p99    16930 us  cpu    13138 us  load 0.29
+run 5 spared   wordfreq   p50    18701 us  p99    32081 us  cpu    18704 us  load 0.29
+run 5 spared   html       p50     2344 us  p99     4037 us  cpu     2344 us  load 0.28
+run 5 spared   gzip       p50    30154 us  p99    40822 us  cpu    30451 us  load 0.28
+run 5 spared   regex      p50    12933 us  p99    17126 us  cpu    13075 us  load 0.28
+run 5 spared   pbkdf2     p50    16364 us  p99    19329 us  cpu    16579 us  load 0.28
+run 5 workerd  noop       p50       93 us  p99      306 us  cpu       93 us  load 0.27
+run 5 workerd  sha256     p50     2971 us  p99     3563 us  cpu     2984 us  load 0.27
+run 5 workerd  json       p50     1228 us  p99     4223 us  cpu     1234 us  load 0.28
+run 5 workerd  sql-agg    p50    54150 us  p99    78415 us  cpu    55158 us  load 0.28
+run 5 workerd  sql-write  p50    33913 us  p99   102801 us  cpu    35846 us  load 0.28
+run 5 workerd  markdown   p50     3646 us  p99    15224 us  cpu     4452 us  load 0.28
+run 5 workerd  sieve      p50     7964 us  p99    10107 us  cpu     8051 us  load 0.28
+run 5 workerd  nbody      p50    15917 us  p99    19405 us  cpu    16007 us  load 0.28
+run 5 workerd  pixels     p50     4181 us  p99     6139 us  cpu     4185 us  load 0.28
+run 5 workerd  sort       p50    78374 us  p99    89966 us  cpu    78982 us  load 0.28
+run 5 workerd  wordfreq   p50    36502 us  p99    45368 us  cpu    37041 us  load 0.29
+run 5 workerd  html       p50     4377 us  p99     7828 us  cpu     4381 us  load 0.27
+run 5 workerd  gzip       p50    19070 us  p99    24835 us  cpu    19263 us  load 0.28
+run 5 workerd  regex      p50    20225 us  p99    23832 us  cpu    20520 us  load 0.29
+run 5 workerd  pbkdf2     p50     5893 us  p99     7091 us  cpu     5912 us  load 0.29
+quiet wait used: 1925s of 5400s
+| workload | spared p50 ms | workerd p50 ms | ratio (workerd/spared) | spared p99 ms | workerd p99 ms | spared CPU ms | workerd CPU ms | quiet |
+|---|---|---|---|---|---|---|---|---|
+| sort | 14.48 | 87.48 | 6.04 | 17.29 | 97.61 | 14.25 | 87.19 | yes |
+| markdown | 0.83 | 4.19 | 5.05 | 1.29 | 12.43 | 0.77 | 4.48 | yes |
+| sql-agg | 15.68 | 61.27 | 3.91 | 22.74 | 83.49 | 15.54 | 61.07 | yes |
+| sql-write | 10.69 | 37.98 | 3.55 | 19.15 | 102.80 | 9.05 | 38.83 | yes |
+| pixels | 2.51 | 7.11 | 2.84 | 3.29 | 10.75 | 2.39 | 6.21 | yes |
+| wordfreq | 20.99 | 45.16 | 2.15 | 30.64 | 61.52 | 20.81 | 43.67 | yes |
+| html | 2.62 | 4.94 | 1.89 | 4.01 | 7.83 | 2.53 | 4.82 | yes |
+| regex | 14.04 | 22.25 | 1.58 | 21.18 | 29.55 | 13.74 | 22.03 | yes |
+| noop | 0.07 | 0.11 | 1.54 | 0.16 | 0.43 | 0.05 | 0.11 | yes |
+| nbody | 14.54 | 18.03 | 1.24 | 19.12 | 25.91 | 14.43 | 17.95 | yes |
+| sieve | 10.94 | 8.81 | 0.81 | 14.12 | 15.60 | 10.81 | 8.78 | yes |
+| json | 1.97 | 1.42 | 0.72 | 3.96 | 4.22 | 1.89 | 1.44 | yes |
+| gzip | 33.92 | 21.09 | 0.62 | 43.73 | 29.32 | 33.81 | 20.89 | yes |
+| pbkdf2 | 18.30 | 6.60 | 0.36 | 25.62 | 9.52 | 18.17 | 6.43 | yes |
+| sha256 | 13.73 | 3.43 | 0.25 | 17.33 | 5.83 | 13.47 | 3.34 | yes |

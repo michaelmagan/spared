@@ -1,0 +1,1 @@
+{"body_len":82,"body_len_changed":0,"errors":0,"first_byte_us":{"max":23153,"mean":13643,"min":12771,"p50":13285,"p90":14674,"p99":19362},"full_body_us":{"max":23155,"mean":13645,"min":12773,"p50":13287,"p90":14676,"p99":19364},"host":"workloads.localhost","path":"/w/sort","requests":200,"server_cpu_us_per_request":13233,"server_pids":[1828],"wall_s":2.729541386,"warmup":20}

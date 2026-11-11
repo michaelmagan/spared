@@ -1,0 +1,251 @@
+# CI: format, lint, unit tests, release build, guest components, sandbox escape suite,
+# a short crash test and the end-to-end smoke test.
+#
+# Run the same steps locally (Linux x86_64; wasi-sdk 25 unpacked somewhere):
+#
+#   cargo fmt --all --check
+#   cargo clippy -p spared --all-targets --locked -- -D warnings
+#   cargo clippy -p spared --all-targets --locked --features lab -- -D warnings
+#   cargo test -p spared --locked
+#   cargo test -p spared --locked --features lab
+#   cargo build --release --locked -p spared
+#   cargo build --release --locked -p spared --features lab --target-dir target/lab   # the lab binary: escape suite, crash test
+#   rustup target add wasm32-wasip2
+#   export WASI=/path/to/wasi-sdk-25.0-x86_64-linux     # bench/env.sh reads $WASI
+#   export WASI_SDK_PATH=$WASI                          # scripts/e2e.sh and `spared test` read this
+#   source bench/env.sh
+#   for d in probes/sqlite-probe probes/escape-probe probes/hostile-app apps/shared-list apps/demo-spared; do
+#     (cd "$d" && cargo build --release --target wasm32-wasip2)
+#   done
+#   target/lab/release/spared escape-test --probes probes/escape-probe/target/wasm32-wasip2/release --root bench/work/escape
+#     # on a network that intercepts TLS, prefix with SPARED_EXTRA_CA_FILE=/path/to/ca-bundle.crt (the HTTPS control)
+#     # (the suite rewrites bench/results/escape.json; `git checkout` it afterwards)
+#   bench/crash-test.sh 20      # overwrites bench/results/crash-test.json; `git checkout` it afterwards
+#   scripts/build-examples.sh
+#   scripts/e2e.sh              # ends with scripts/server-test.py (needs examples/dist and probes/hostile-app)
+#   cargo deny check            # needs cargo-deny; uses deny.toml
+#
+#   sh scripts/test-try.sh && sh scripts/test-install.sh && python3 -I scripts/check-links.py
+#   python3 -I scripts/notices.py --check     # THIRD-PARTY-NOTICES matches Cargo.lock
+#
+# Actions are pinned to full commit SHAs; the comment after each names the release. Dependabot
+# (.github/dependabot.yml) proposes the updates. The jobs run on ubuntu-latest (x86_64) only.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Weekly advisory check, so an advisory published after the last push is still seen.
+  schedule:
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  WASI_SDK_VERSION: "25"
+  WASI_SDK_URL: https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-25/wasi-sdk-25.0-x86_64-linux.tar.gz
+  WASI_SDK_SHA256: 52640dde13599bf127a95499e61d6d640256119456d1af8897ab6725bcf3d89c
+
+jobs:
+  test:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install --target wasm32-wasip2
+          rustc --version
+          cargo --version
+
+      - name: Cache cargo and build outputs
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+            probes/sqlite-probe/target
+            probes/escape-probe/target
+            probes/hostile-app/target
+            target/examples
+            apps/shared-list/target
+            apps/demo-spared/target
+            ~/.cache/spared-e2e-target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'probes/*/Cargo.lock', 'apps/*/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: Cache wasi-sdk
+        id: wasi-sdk-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/wasi-sdk
+          key: wasi-sdk-${{ runner.os }}-${{ env.WASI_SDK_SHA256 }}
+
+      - name: Download wasi-sdk
+        if: steps.wasi-sdk-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$HOME/wasi-sdk"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/wasi-sdk.tar.gz" "$WASI_SDK_URL"
+          echo "$WASI_SDK_SHA256  $RUNNER_TEMP/wasi-sdk.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/wasi-sdk.tar.gz" -C "$HOME/wasi-sdk"
+
+      - name: Point the build at wasi-sdk
+        run: |
+          sdk="$HOME/wasi-sdk/wasi-sdk-25.0-x86_64-linux"
+          test -x "$sdk/bin/clang"
+          echo "WASI=$sdk" >> "$GITHUB_ENV"
+          echo "WASI_SDK_PATH=$sdk" >> "$GITHUB_ENV"
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy -p spared --all-targets --locked -- -D warnings
+
+      - name: Clippy (lab build)
+        run: cargo clippy -p spared --all-targets --locked --features lab -- -D warnings
+
+      - name: Unit tests
+        run: cargo test -p spared --locked
+
+      - name: Unit tests (lab build)
+        run: cargo test -p spared --locked --features lab
+
+      - name: Build host (release)
+        run: cargo build --release --locked -p spared
+
+      - name: Build lab host (release)
+        # The escape suite and the crash test need commands a release build does not have. The lab
+        # binary goes in its own target directory so it never replaces the release binary.
+        run: cargo build --release --locked -p spared --features lab --target-dir target/lab
+
+      - name: Installer, try-it script, SBOM and link checks
+        run: |
+          sh scripts/test-try.sh
+          sh scripts/test-install.sh
+          python3 -I scripts/sbom.py Cargo.lock 0.0.0 > "$RUNNER_TEMP/sbom.json"
+          python3 -I -c 'import json, sys; b = json.load(open(sys.argv[1])); assert b["bomFormat"] == "CycloneDX" and len(b["components"]) > 50' "$RUNNER_TEMP/sbom.json"
+          python3 -I scripts/check-links.py
+          python3 -I scripts/notices.py --check
+
+      - name: Build guest probes and example apps (wasm32-wasip2)
+        run: |
+          source bench/env.sh
+          for d in probes/sqlite-probe probes/escape-probe probes/hostile-app apps/shared-list apps/demo-spared; do
+            echo "::group::build $d"
+            (cd "$d" && cargo build --release --target wasm32-wasip2)
+            echo "::endgroup::"
+          done
+
+      - name: Sandbox escape suite
+        # SPARED_EXTRA_CA_FILE is only for networks that intercept TLS; GitHub runners do not.
+        # The HTTPS control inside the suite needs outbound network access.
+        run: |
+          target/lab/release/spared escape-test \
+            --probes probes/escape-probe/target/wasm32-wasip2/release \
+            --root bench/work/escape
+
+      - name: Crash test (20 trials)
+        # bench/crash-test.sh always exits 0 and prints a JSON summary, so check the counts here.
+        run: |
+          bench/crash-test.sh 20 | tee "$RUNNER_TEMP/crash.json"
+          grep -q '"integrity_failures":0,"trials_with_lost_commits":0' "$RUNNER_TEMP/crash.json"
+
+      - name: Build example apps (examples/dist)
+        run: scripts/build-examples.sh
+
+      - name: End-to-end smoke test and server integration test
+        run: CARGO_TARGET_DIR="$HOME/.cache/spared-e2e-target" scripts/e2e.sh
+
+  templates:
+    # Optional: not a required check. Builds and exercises every `spared new --template`.
+    if: github.event_name != 'schedule'
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install --target wasm32-wasip2
+
+      - name: Cache cargo and build outputs
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+            ~/.cache/spared-templates-target
+          key: templates-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            templates-${{ runner.os }}-
+
+      - name: Download wasi-sdk
+        run: |
+          mkdir -p "$HOME/wasi-sdk"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/wasi-sdk.tar.gz" "$WASI_SDK_URL"
+          echo "$WASI_SDK_SHA256  $RUNNER_TEMP/wasi-sdk.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/wasi-sdk.tar.gz" -C "$HOME/wasi-sdk"
+          echo "WASI_SDK_PATH=$HOME/wasi-sdk/wasi-sdk-25.0-x86_64-linux" >> "$GITHUB_ENV"
+
+      - name: Build host (release)
+        run: cargo build --release -p spared
+
+      - name: Template tests
+        run: CARGO_TARGET_DIR="$HOME/.cache/spared-templates-target" python3 -I scripts/templates-test.py
+
+  deny:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: cargo-deny (licenses, advisories, bans, sources)
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          manifest-path: ./Cargo.toml
+          command: check
+
+  advisories:
+    # Weekly (and on manual dispatch): RustSec advisories for the host and for a guest app's lock
+    # file (apps/shared-list pins the same guest dependencies as `spared new`: rusqlite, wstd).
+    # A failure here means a dependency needs an update; for wasmtime, a version change makes the host recompile stored components from the original wasm (see docs/design.md).
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        manifest: [./Cargo.toml, ./apps/shared-list/Cargo.toml]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: cargo-deny advisories
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          manifest-path: ${{ matrix.manifest }}
+          command: check advisories

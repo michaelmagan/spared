@@ -1,0 +1,16 @@
+[package]
+name = "sqlite-probe"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[dependencies]
+rusqlite = { version = "0.41", features = ["bundled"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(sqlite_nomutex)'] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

@@ -1,0 +1,217 @@
+# Release: on a tag v*, build spared for four targets, build the example components, and publish
+# a GitHub release with spared-<version>-<target>.tar.gz, the example .wasm files, an SBOM
+# (spared-<version>.cdx.json, CycloneDX), LICENSE, NOTICE, THIRD-PARTY-NOTICES and SHA256SUMS, with
+# generated release notes. Each tarball also holds LICENSE, NOTICE and THIRD-PARTY-NOTICES. Every
+# tarball and .wasm gets a build-provenance attestation, and the tarballs an SBOM attestation
+# (verify with: gh attestation verify spared-<version>-<target>.tar.gz --repo <owner>/spared).
+# Tags containing '-' (v0.0.1-preview) are marked prerelease. scripts/install.sh downloads the
+# tarball for its platform by these names and checks it against SHA256SUMS.
+#
+# The tag must be v<version in Cargo.toml>: the binary reports the Cargo.toml version, and the
+# first job fails when the two differ.
+#
+# Run the same steps locally (builds the host for your own platform only):
+#
+#   VERSION=0.0.1-preview; TARGET=$(rustc -vV | sed -n 's/^host: //p')
+#   cargo build --release --locked -p spared --target "$TARGET"
+#   mkdir -p "dist/spared-$VERSION-$TARGET" && cp "target/$TARGET/release/spared" LICENSE NOTICE THIRD-PARTY-NOTICES "dist/spared-$VERSION-$TARGET/"
+#   tar -C dist -czf "dist/spared-$VERSION-$TARGET.tar.gz" "spared-$VERSION-$TARGET"
+#   python3 -I scripts/sbom.py Cargo.lock "$VERSION" > "dist/spared-$VERSION.cdx.json"
+#   cp LICENSE NOTICE THIRD-PARTY-NOTICES dist/
+#   (cd dist && sha256sum spared-*.tar.gz spared-*.cdx.json LICENSE NOTICE THIRD-PARTY-NOTICES > SHA256SUMS)     # shasum -a 256 on macOS
+#   # Example components (needs wasi-sdk 25, see ci.yml):
+#   source bench/env.sh && for a in shared-list demo-spared; do
+#     (cd apps/$a && cargo build --release --target wasm32-wasip2); done
+#   # Each tarball unpacks to spared-<version>-<target>/ holding spared, LICENSE, NOTICE and
+#   # THIRD-PARTY-NOTICES; scripts/install.sh uses only the spared file.
+#   # scripts/install.sh reads this layout: SPARED_RELEASE_BASE=<URL serving dist/> sh scripts/install.sh
+#   # scripts/test-install.sh tests the installer against a local copy of it.
+#
+# Linux builds run on ubuntu-22.04 (x86_64 and arm64), so the binaries need glibc 2.35 or newer.
+# Actions are pinned to full commit SHAs; the comment after each names the release.
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  WASI_SDK_URL: https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-25/wasi-sdk-25.0-x86_64-linux.tar.gz
+  WASI_SDK_SHA256: 52640dde13599bf127a95499e61d6d640256119456d1af8897ab6725bcf3d89c
+
+jobs:
+  version:
+    name: tag matches Cargo.toml
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Compare the tag with the workspace version
+        run: |
+          cargo_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          if [ "v$cargo_version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $cargo_version (expected tag v$cargo_version)"
+            exit 1
+          fi
+
+  host:
+    name: host ${{ matrix.target }}
+    needs: version
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04-arm
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install --target "${{ matrix.target }}"
+
+      - name: Build
+        env:
+          SPARED_GIT_SHA: ${{ github.sha }}
+        run: cargo build --release --locked -p spared --target "${{ matrix.target }}"
+
+      - name: Package
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          name="spared-$version-$TARGET"
+          mkdir -p "dist/$name"
+          cp "target/$TARGET/release/spared" LICENSE NOTICE THIRD-PARTY-NOTICES "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          for f in LICENSE NOTICE THIRD-PARTY-NOTICES; do test -s "dist/$name/$f"; done
+          # The packaged binary must run on this runner and report the released version.
+          "dist/$name/spared" --version
+          "dist/$name/spared" --version | grep -qF "spared $version"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: spared-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  examples:
+    needs: version
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install --target wasm32-wasip2
+
+      - name: Cache wasi-sdk
+        id: wasi-sdk-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/wasi-sdk
+          key: wasi-sdk-${{ runner.os }}-${{ env.WASI_SDK_SHA256 }}
+
+      - name: Download wasi-sdk
+        if: steps.wasi-sdk-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$HOME/wasi-sdk"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/wasi-sdk.tar.gz" "$WASI_SDK_URL"
+          echo "$WASI_SDK_SHA256  $RUNNER_TEMP/wasi-sdk.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/wasi-sdk.tar.gz" -C "$HOME/wasi-sdk"
+
+      - name: Build example components
+        run: |
+          export WASI="$HOME/wasi-sdk/wasi-sdk-25.0-x86_64-linux"
+          source bench/env.sh
+          mkdir -p dist
+          for app in shared-list demo-spared; do
+            (cd "apps/$app" && cargo build --release --locked --target wasm32-wasip2)
+            cp "apps/$app/target/wasm32-wasip2/release/$app.wasm" "dist/$app.wasm"
+          done
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: examples
+          path: dist/*.wasm
+          if-no-files-found: error
+
+  publish:
+    needs: [host, examples]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: SBOM (CycloneDX, from Cargo.lock)
+        id: sbom
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          python3 -I scripts/sbom.py Cargo.lock "$version" > "artifacts/spared-$version.cdx.json"
+          echo "path=artifacts/spared-$version.cdx.json" >> "$GITHUB_OUTPUT"
+
+      - name: Licenses and notices (the example .wasm files are separate downloads)
+        run: cp LICENSE NOTICE THIRD-PARTY-NOTICES artifacts/
+
+      - name: Checksums
+        working-directory: artifacts
+        run: |
+          ls -l
+          sha256sum -- *.tar.gz *.wasm *.cdx.json LICENSE NOTICE THIRD-PARTY-NOTICES > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            artifacts/*.tar.gz
+            artifacts/*.wasm
+
+      - name: Attest the SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: artifacts/*.tar.gz
+          sbom-path: ${{ steps.sbom.outputs.path }}
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        working-directory: artifacts
+        run: |
+          flags=""
+          case "$GITHUB_REF_NAME" in *-*) flags="--prerelease" ;; esac
+          # shellcheck disable=SC2086  # flags is empty or a single word
+          gh release create "$GITHUB_REF_NAME" $flags --verify-tag --title "$GITHUB_REF_NAME" --generate-notes -- *.tar.gz *.wasm *.cdx.json LICENSE NOTICE THIRD-PARTY-NOTICES SHA256SUMS

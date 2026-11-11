@@ -1,0 +1,326 @@
+{
+ "binary_sha256": "7d06cd9f65a8efdf0702e80489ceb55b7becaa31e98821c83869a91d1d6e9232",
+ "target": "spared-distinct",
+ "system": "spared",
+ "kind": "distinct",
+ "n": 200,
+ "run": 1,
+ "page_cache_dropped_before_start": true,
+ "server_cpu": 0,
+ "cmd": [
+  "bench/work/curve/bin/spared",
+  "serve",
+  "--data-dir",
+  "bench/work/curve/spared-data",
+  "--listen",
+  "127.0.0.1:18080",
+  "--admin-listen",
+  "127.0.0.1:18081",
+  "--idle-secs",
+  "600"
+ ],
+ "apps": {
+  "count": 200,
+  "unique_sha256": 200,
+  "wasm_bytes_total": 445575524,
+  "cwasm_bytes_unique_total": 1403391112
+ },
+ "ready_s": 0.827,
+ "first_wall_s": 4.723,
+ "steady_wall_s": 18.27,
+ "idle_method": "admin evict of every app, then no requests",
+ "requests": 20000,
+ "errors": 0,
+ "snapshots_kb": {
+  "startup": {
+   "pids": 1,
+   "threads": 3,
+   "VmRSS": 152212,
+   "RssAnon": 49052,
+   "RssFile": 103160,
+   "RssShmem": 0,
+   "Pss": 150112,
+   "Pss_Anon": 49052,
+   "Pss_File": 101060,
+   "Pss_Shmem": 0,
+   "Shared_Clean": 2276,
+   "Shared_Dirty": 0,
+   "Private_Clean": 100884,
+   "Private_Dirty": 49052,
+   "cgroup_kb": {
+    "usage": 245564,
+    "rss": 49052,
+    "cache": 192404,
+    "mapped_file": 91732,
+    "shmem": 0,
+    "active_file": 1532,
+    "inactive_file": 190872
+   },
+   "dev_shm_used_kb": 0,
+   "breakdown_kb": {
+    "server_binary": {
+     "maps": 4,
+     "rss": 12544,
+     "pss": 12544,
+     "anon": 836
+    },
+    "anon": {
+     "maps": 19,
+     "rss": 48084,
+     "pss": 48084,
+     "anon": 48084
+    },
+    "components": {
+     "maps": 600,
+     "rss": 89176,
+     "pss": 89176,
+     "anon": 0
+    },
+    "shared_libs": {
+     "maps": 20,
+     "rss": 2328,
+     "pss": 227,
+     "anon": 56
+    },
+    "other_special": {
+     "maps": 5,
+     "rss": 80,
+     "pss": 76,
+     "anon": 76
+    }
+   }
+  },
+  "first": {
+   "pids": 1,
+   "threads": 6,
+   "VmRSS": 920704,
+   "RssAnon": 113460,
+   "RssFile": 807244,
+   "RssShmem": 0,
+   "Pss": 915179,
+   "Pss_Anon": 113460,
+   "Pss_File": 801719,
+   "Pss_Shmem": 0,
+   "Shared_Clean": 9052,
+   "Shared_Dirty": 0,
+   "Private_Clean": 798192,
+   "Private_Dirty": 113460,
+   "cgroup_kb": {
+    "usage": 1058764,
+    "rss": 113460,
+    "cache": 934308,
+    "mapped_file": 788108,
+    "shmem": 0,
+    "active_file": 3228,
+    "inactive_file": 931080
+   },
+   "dev_shm_used_kb": 0,
+   "breakdown_kb": {
+    "server_binary": {
+     "maps": 4,
+     "rss": 16744,
+     "pss": 16740,
+     "anon": 836
+    },
+    "anon": {
+     "maps": 1216,
+     "rss": 109448,
+     "pss": 109448,
+     "anon": 109448
+    },
+    "components": {
+     "maps": 800,
+     "rss": 791856,
+     "pss": 788596,
+     "anon": 3044
+    },
+    "shared_libs": {
+     "maps": 20,
+     "rss": 2576,
+     "pss": 314,
+     "anon": 56
+    },
+    "other_special": {
+     "maps": 5,
+     "rss": 80,
+     "pss": 76,
+     "anon": 76
+    }
+   }
+  },
+  "steady": {
+   "pids": 1,
+   "threads": 8,
+   "VmRSS": 933932,
+   "RssAnon": 114312,
+   "RssFile": 819620,
+   "RssShmem": 0,
+   "Pss": 928407,
+   "Pss_Anon": 114312,
+   "Pss_File": 814095,
+   "Pss_Shmem": 0,
+   "Shared_Clean": 9052,
+   "Shared_Dirty": 0,
+   "Private_Clean": 810568,
+   "Private_Dirty": 114312,
+   "cgroup_kb": {
+    "usage": 1063144,
+    "rss": 114312,
+    "cache": 938056,
+    "mapped_file": 800484,
+    "shmem": 0,
+    "active_file": 3228,
+    "inactive_file": 934828
+   },
+   "dev_shm_used_kb": 0,
+   "breakdown_kb": {
+    "server_binary": {
+     "maps": 4,
+     "rss": 16744,
+     "pss": 16740,
+     "anon": 836
+    },
+    "anon": {
+     "maps": 1228,
+     "rss": 110300,
+     "pss": 110300,
+     "anon": 110300
+    },
+    "components": {
+     "maps": 800,
+     "rss": 804232,
+     "pss": 800972,
+     "anon": 3044
+    },
+    "shared_libs": {
+     "maps": 20,
+     "rss": 2576,
+     "pss": 314,
+     "anon": 56
+    },
+    "other_special": {
+     "maps": 5,
+     "rss": 80,
+     "pss": 76,
+     "anon": 76
+    }
+   }
+  },
+  "idle15": {
+   "pids": 1,
+   "threads": 3,
+   "VmRSS": 865160,
+   "RssAnon": 73020,
+   "RssFile": 792140,
+   "RssShmem": 0,
+   "Pss": 862807,
+   "Pss_Anon": 73020,
+   "Pss_File": 789787,
+   "Pss_Shmem": 0,
+   "Shared_Clean": 2652,
+   "Shared_Dirty": 0,
+   "Private_Clean": 789488,
+   "Private_Dirty": 73020,
+   "cgroup_kb": {
+    "usage": 1018992,
+    "rss": 73020,
+    "cache": 938056,
+    "mapped_file": 776144,
+    "shmem": 0,
+    "active_file": 3232,
+    "inactive_file": 934824
+   },
+   "dev_shm_used_kb": 0,
+   "breakdown_kb": {
+    "server_binary": {
+     "maps": 4,
+     "rss": 16744,
+     "pss": 16740,
+     "anon": 836
+    },
+    "anon": {
+     "maps": 41,
+     "rss": 72052,
+     "pss": 72052,
+     "anon": 72052
+    },
+    "components": {
+     "maps": 600,
+     "rss": 773588,
+     "pss": 773588,
+     "anon": 0
+    },
+    "shared_libs": {
+     "maps": 20,
+     "rss": 2696,
+     "pss": 346,
+     "anon": 56
+    },
+    "other_special": {
+     "maps": 5,
+     "rss": 80,
+     "pss": 76,
+     "anon": 76
+    }
+   }
+  },
+  "idle65": {
+   "pids": 1,
+   "threads": 3,
+   "VmRSS": 865160,
+   "RssAnon": 73020,
+   "RssFile": 792140,
+   "RssShmem": 0,
+   "Pss": 862809,
+   "Pss_Anon": 73020,
+   "Pss_File": 789789,
+   "Pss_Shmem": 0,
+   "Shared_Clean": 2652,
+   "Shared_Dirty": 0,
+   "Private_Clean": 789488,
+   "Private_Dirty": 73020,
+   "cgroup_kb": {
+    "usage": 1018992,
+    "rss": 73020,
+    "cache": 938056,
+    "mapped_file": 776144,
+    "shmem": 0,
+    "active_file": 3232,
+    "inactive_file": 934824
+   },
+   "dev_shm_used_kb": 0,
+   "breakdown_kb": {
+    "server_binary": {
+     "maps": 4,
+     "rss": 16744,
+     "pss": 16740,
+     "anon": 836
+    },
+    "anon": {
+     "maps": 41,
+     "rss": 72052,
+     "pss": 72052,
+     "anon": 72052
+    },
+    "components": {
+     "maps": 600,
+     "rss": 773588,
+     "pss": 773588,
+     "anon": 0
+    },
+    "shared_libs": {
+     "maps": 20,
+     "rss": 2696,
+     "pss": 347,
+     "anon": 56
+    },
+    "other_special": {
+     "maps": 5,
+     "rss": 80,
+     "pss": 76,
+     "anon": 76
+    }
+   }
+  }
+ }
+}

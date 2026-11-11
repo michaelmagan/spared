@@ -1,0 +1,17 @@
+# Weekly update pull requests for the host's Rust dependencies (wasmtime, hyper, rustls, the
+# bundled SQLite in rusqlite) and for the GitHub Actions the workflows use.
+# A wasmtime update changes the compiled-component format: the host recompiles stored components from the original wasm (see docs/design.md).
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      wasmtime:
+        patterns: ["wasmtime*", "wasi-*", "cranelift*"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

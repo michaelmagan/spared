@@ -1,0 +1,18 @@
+target/
+probes/*/target/
+*.cwasm
+bench/work/
+.claude/
+apps/*/target/
+__pycache__/
+*.pyc
+examples/dist/
+apps/demo-celld/.celld/
+# Server data and secrets: never commit.
+.spared-data/
+.spared/
+data/
+.env
+.env.*
+*.pem
+*.key

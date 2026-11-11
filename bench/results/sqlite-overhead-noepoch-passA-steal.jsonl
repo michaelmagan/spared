@@ -1,0 +1,1 @@
+{"suite": "sqlite-overhead-noepoch", "segment": "sqlite-overhead-noepoch", "start": "2026-11-10T23:28:05Z", "end": "2026-11-10T23:28:11Z", "loadavg1_at_start": 0.25, "steal_jiffies_before": 157453, "steal_jiffies_after": 157491, "steal_delta": 38, "all_cpu_jiffies_delta": 2051, "steal_pct": 1.853}

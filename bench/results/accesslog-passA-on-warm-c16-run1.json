@@ -1,0 +1,1 @@
+{"conc":16,"detail":{"measured_wall_s":2.735536639},"errors":0,"first_byte_us":{"max":14883,"mean":2184,"p50":2015,"p99":5704},"full_body_us":{"max":14883,"mean":2185,"p50":2016,"p99":5705},"mode":"warm","requests":20000,"style":"spared","wall_s":3.373875405}

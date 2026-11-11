@@ -1,0 +1,1190 @@
+{
+ "method": "median across runs of each run's p50/p99 (full body, microseconds) and server CPU per request (schedstat, all threads); ratio = workerd/spared",
+ "workloads": [
+  {
+   "workload": "sort",
+   "spared": {
+    "runs": 5,
+    "requests_per_run": 200,
+    "p50_us_runs": [
+     14782,
+     14593,
+     14484,
+     13270,
+     12957
+    ],
+    "p99_us_runs": [
+     21941,
+     17286,
+     21160,
+     16263,
+     16930
+    ],
+    "cpu_us_runs": [
+     14541,
+     14407,
+     14250,
+     13444,
+     13138
+    ],
+    "p50_us": 14484,
+    "p99_us": 17286,
+    "cpu_us_per_request": 14250,
+    "errors": 0,
+    "all_quiet": true,
+    "loadavg1_before": [
+     0.28,
+     0.29,
+     0.29,
+     0.29,
+     0.29
+    ]
+   },
+   "workerd": {
+    "runs": 5,
+    "requests_per_run": 200,
+    "p50_us_runs": [
+     90609,
+     87482,
+     90073,
+     83513,
+     78374
+    ],
+    "p99_us_runs": [
+     117027,
+     93331,
+     104483,
+     97614,
+     89966
+    ],
+    "cpu_us_runs": [
+     89249,
+     87194,
+     89522,
+     83227,
+     78982
+    ],
+    "p50_us": 87482,
+    "p99_us": 97614,
+    "cpu_us_per_request": 87194,
+    "errors": 0,
+    "all_quiet": true,
+    "loadavg1_before": [
+     0.29,
+     0.29,
+     0.29,
+     0.29,
+     0.28
+    ]
+   },
+   "ratio_workerd_over_spared_p50": 6.04,
+   "ratio_workerd_over_spared_cpu": 6.12
+  },
+  {
+   "workload": "markdown",
+   "spared": {
+    "runs": 5,
+    "requests_per_run": 200,
+    "p50_us_runs": [
+     857,
+     871,
+     830,
+     731,
+     712
+    ],
+    "p99_us_runs": [
+     1742,
+     1599,
+     1293,
+     984,
+     873
+    ],
+    "cpu_us_runs": [
+     802,
+     803,
+     774,
+     696,
+     679
+    ],
+    "p50_us": 830,
+    "p99_us": 1293,
+    "cpu_us_per_request": 774,
+    "errors": 0,
+    "all_quiet": true,
+    "loadavg1_before": [
+     0.28,
+     0.27,
+     0.27,
+     0.27,
+     0.28
+    ]
+   },
+   "workerd": {
+    "runs": 5,
+    "requests_per_run": 200,
+    "p50_us_runs": [
+     4190,
+     4238,
+     4205,
+     3926,
+     3646
+    ],
+    "p99_us_runs": [
+     12429,
+     11024,
+     16990,
+     9400,
+     15224
+    ],
+    "cpu_us_runs": [
+     4528,
+     4580,
+     4484,
+     4190,
+     4452
+    ],
+    "p50_us": 4190,
+    "p99_us": 12429,
+    "cpu_us_per_request": 4484,
+    "errors": 0,
+    "all_quiet": true,
+    "loadavg1_before": [
+     0.28,
+     0.28,
+     0.29,
+     0.28,
+     0.28
+    ]
+   },
+   "ratio_workerd_over_spared_p50": 5.05,
+   "ratio_workerd_over_spared_cpu": 5.79
+  },
+  {
+   "workload": "sql-agg",
+   "spared": {
+    "runs": 5,
+    "requests_per_run": 200,
+    "p50_us_runs": [
+     16071,
+     15684,
+     16050,
+     14606,
+     13776
+    ],
+    "p99_us_runs": [
+     22739,
+     25616,
+     28650,
+     18443,
+     20110
+    ],
+    "cpu_us_runs": [
+     15820,
+     15539,
+     15922,
+     14459,
+     13936
+    ],
+    "p50_us": 15684,
+    "p99_us": 22739,
+    "cpu_us_per_request": 15539,
+    "errors": 0,
+    "all_quiet": true,
+    "loadavg1_before": [
+     0.29,
+     0.29,
+     0.27,
+     0.28,
+     0.28
+    ]
+   },
+   "workerd": {
+    "runs": 5,
+    "requests_per_run": 200,
+    "p50_us_runs": [
+     64853,
+     61267,
+     62594,
+     57276,
+     54150
+    ],
+    "p99_us_runs": [
+     90042,
+     106570,
+     83487,
+     73773,
+     78415
+    ],
+    "cpu_us_runs": [
+     63495,
+     61073,
+     61168,
+     57245,
+     55158
+    ],
+    "p50_us": 61267,
+    "p99_us": 83487,
+    "cpu_us_per_request": 61073,
+    "errors": 0,
+    "all_quiet": true,
+    "loadavg1_before": [
+     0.25,
+     0.29,
+     0.29,
+     0.27,
+     0.28
+    ]
+   },
+   "ratio_workerd_over_spared_p50": 3.91,
+   "ratio_workerd_over_spared_cpu": 3.93
+  },
+  {
+   "workload": "sql-write",
+   "spared": {
+    "runs": 5,
+    "requests_per_run": 200,
+    "p50_us_runs": [
+     10693,
+     12132,
+     11482,
+     9647,
+     9322
+    ],
+    "p99_us_runs": [
+     19153,
+     20806,
+     19969,
+     17363,
+     11928
+    ],
+    "cpu_us_runs": [
+     9051,
+     9600,
+     9499,
+     8225,
+     8066
+    ],
+    "p50_us": 10693,
+    "p99_us": 19153,
+    "cpu_us_per_request": 9051,
+    "errors": 0,
+    "all_quiet": true,
+    "loadavg1_before": [
+     0.28,
+     0.29,
+     0.28,
+     0.27,
+     0.28
+    ]
+   },
+   "workerd": {
+    "runs": 5,
+    "requests_per_run": 200,
+    "p50_us_runs": [
+     40764,
+     40638,
+     37983,
+     37276,
+     33913
+    ],
+    "p99_us_runs": [
+     107749,
+     108752,
+     89069,
+     92269,
+     102801
+    ],
+    "cpu_us_runs": [
+     40554,
+     40952,
+     38834,
+     38644,
+     35846
+    ],
+    "p50_us": 37983,
+    "p99_us": 102801,
+    "cpu_us_per_request": 38834,
+    "errors": 0,
+    "all_quiet": true,
+    "loadavg1_before": [
+     0.27,
+     0.28,
+     0.29,
+     0.28,
+     0.28
+    ]
+   },
+   "ratio_workerd_over_spared_p50": 3.55,
+   "ratio_workerd_over_spared_cpu": 4.29
+  },
+  {
+   "workload": "pixels",
+   "spared": {
+    "runs": 5,
+    "requests_per_run": 200,
+    "p50_us_runs": [
+     2538,
+     2665,
+     2471,
+     2506,
+     2221
+    ],
+    "p99_us_runs": [
+     5404,
+     6739,
+     3112,
+     2728,
+     3292
+    ],
+    "cpu_us_runs": [
+     2474,
+     2609,
+     2378,
+     2390,
+     2229
+    ],
+    "p50_us": 2506,
+    "p99_us": 3292,
+    "cpu_us_per_request": 2390,
+    "errors": 0,
+    "all_quiet": true,
+    "loadavg1_before": [
+     0.28,
+     0.29,
+     0.29,
+     0.29,
+     0.29
+    ]
+   },
+   "workerd": {
+    "runs": 5,
+    "requests_per_run": 200,
+    "p50_us_runs": [
+     7594,
+     7106,
+     7293,
+     4826,
+     4181
+    ],
+    "p99_us_runs": [
+     13963,
+     9843,
+     13115,
+     10747,
+     6139
+    ],
+    "cpu_us_runs": [
+     6594,
+     6209,
+     6279,
+     5224,
+     4185
+    ],
+    "p50_us": 7106,
+    "p99_us": 10747,
+    "cpu_us_per_request": 6209,
+    "errors": 0,
+    "all_quiet": true,
+    "loadavg1_before": [
+     0.29,
+     0.29,
+     0.29,
+     0.29,
+     0.28
+    ]
+   },
+   "ratio_workerd_over_spared_p50": 2.84,
+   "ratio_workerd_over_spared_cpu": 2.6
+  },
+  {
+   "workload": "wordfreq",
+   "spared": {
+    "runs": 5,
+    "requests_per_run": 200,
+    "p50_us_runs": [
+     20986,
+     21580,
+     21179,
+     19730,
+     18701
+    ],
+    "p99_us_runs": [
+     24694,
+     37283,
+     30636,
+     27621,
+     32081
+    ],
+    "cpu_us_runs": [
+     20807,
+     21382,
+     20943,
+     19603,
+     18704
+    ],
+    "p50_us": 20986,
+    "p99_us": 30636,
+    "cpu_us_per_request": 20807,
+    "errors": 0,
+    "all_quiet": true,
+    "loadavg1_before": [
+     0.28,
+     0.28,
+     0.28,
+     0.27,
+     0.29
+    ]
+   },
+   "workerd": {
+    "runs": 5,
+    "requests_per_run": 200,
+    "p50_us_runs": [
+     45278,
+     45440,
+     45163,
+     40250,
+     36502
+    ],
+    "p99_us_runs": [
+     73690,
+     61520,
+     94047,
+     52159,
+     45368
+    ],
+    "cpu_us_runs": [
+     45005,
+     43667,
+     46605,
+     40635,
+     37041
+    ],
+    "p50_us": 45163,
+    "p99_us": 61520,
+    "cpu_us_per_request": 43667,
+    "errors": 0,
+    "all_quiet": true,
+    "loadavg1_before": [
+     0.27,
+     0.27,
+     0.29,
+     0.27,
+     0.29
+    ]
+   },
+   "ratio_workerd_over_spared_p50": 2.15,
+   "ratio_workerd_over_spared_cpu": 2.1
+  },
+  {
+   "workload": "html",
+   "spared": {
+    "runs": 5,
+    "requests_per_run": 200,
+    "p50_us_runs": [
+     2878,
+     2780,
+     2618,
+     2422,
+     2344
+    ],
+    "p99_us_runs": [
+     7799,
+     4008,
+     3932,
+     2802,
+     4037
+    ],
+    "cpu_us_runs": [
+     2864,
+     2695,
+     2526,
+     2377,
+     2344
+    ],
+    "p50_us": 2618,
+    "p99_us": 4008,
+    "cpu_us_per_request": 2526,
+    "errors": 0,
+    "all_quiet": true,
+    "loadavg1_before": [
+     0.29,
+     0.28,
+     0.29,
+     0.29,
+     0.28
+    ]
+   },
+   "workerd": {
+    "runs": 5,
+    "requests_per_run": 200,
+    "p50_us_runs": [
+     4938,
+     5317,
+     5011,
+     4726,
+     4377
+    ],
+    "p99_us_runs": [
+     7226,
+     9042,
+     7874,
+     7494,
+     7828
+    ],
+    "cpu_us_runs": [
+     4824,
+     5248,
+     4949,
+     4745,
+     4381
+    ],
+    "p50_us": 4938,
+    "p99_us": 7828,
+    "cpu_us_per_request": 4824,
+    "errors": 0,
+    "all_quiet": true,
+    "loadavg1_before": [
+     0.27,
+     0.27,
+     0.29,
+     0.27,
+     0.27
+    ]
+   },
+   "ratio_workerd_over_spared_p50": 1.89,
+   "ratio_workerd_over_spared_cpu": 1.91
+  },
+  {
+   "workload": "regex",
+   "spared": {
+    "runs": 5,
+    "requests_per_run": 200,
+    "p50_us_runs": [
+     14784,
+     14504,
+     14040,
+     12645,
+     12933
+    ],
+    "p99_us_runs": [
+     24604,
+     22703,
+     21182,
+     17613,
+     17126
+    ],
+    "cpu_us_runs": [
+     14815,
+     14462,
+     13736,
+     12786,
+     13075
+    ],
+    "p50_us": 14040,
+    "p99_us": 21182,
+    "cpu_us_per_request": 13736,
+    "errors": 0,
+    "all_quiet": true,
+    "loadavg1_before": [
+     0.28,
+     0.27,
+     0.28,
+     0.28,
+     0.28
+    ]
+   },
+   "workerd": {
+    "runs": 5,
+    "requests_per_run": 200,
+    "p50_us_runs": [
+     23270,
+     22981,
+     22251,
+     21231,
+     20225
+    ],
+    "p99_us_runs": [
+     29552,
+     30818,
+     30180,
+     26941,
+     23832
+    ],
+    "cpu_us_runs": [
+     22788,
+     22954,
+     22028,
+     20967,
+     20520
+    ],
+    "p50_us": 22251,
+    "p99_us": 29552,
+    "cpu_us_per_request": 22028,
+    "errors": 0,
+    "all_quiet": true,
+    "loadavg1_before": [
+     0.28,
+     0.29,
+     0.29,
+     0.28,
+     0.29
+    ]
+   },
+   "ratio_workerd_over_spared_p50": 1.58,
+   "ratio_workerd_over_spared_cpu": 1.6
+  },
+  {
+   "workload": "noop",
+   "spared": {
+    "runs": 5,
+    "requests_per_run": 2000,
+    "p50_us_runs": [
+     71,
+     69,
+     71,
+     69,
+     69
+    ],
+    "p99_us_runs": [
+     322,
+     159,
+     241,
+     136,
+     133
+    ],
+    "cpu_us_runs": [
+     60,
+     53,
+     57,
+     53,
+     53
+    ],
+    "p50_us": 69,
+    "p99_us": 159,
+    "cpu_us_per_request": 53,
+    "errors": 0,
+    "all_quiet": true,
+    "loadavg1_before": [
+     0.29,
+     0.27,
+     0.27,
+     0.29,
+     0.28
+    ]
+   },
+   "workerd": {
+    "runs": 5,
+    "requests_per_run": 2000,
+    "p50_us_runs": [
+     117,
+     106,
+     108,
+     97,
+     93
+    ],
+    "p99_us_runs": [
+     432,
+     399,
+     556,
+     492,
+     306
+    ],
+    "cpu_us_runs": [
+     118,
+     108,
+     112,
+     102,
+     93
+    ],
+    "p50_us": 106,
+    "p99_us": 432,
+    "cpu_us_per_request": 108,
+    "errors": 0,
+    "all_quiet": true,
+    "loadavg1_before": [
+     0.25,
+     0.29,
+     0.29,
+     0.27,
+     0.27
+    ]
+   },
+   "ratio_workerd_over_spared_p50": 1.54,
+   "ratio_workerd_over_spared_cpu": 2.04
+  },
+  {
+   "workload": "nbody",
+   "spared": {
+    "runs": 5,
+    "requests_per_run": 200,
+    "p50_us_runs": [
+     15260,
+     14535,
+     14556,
+     13706,
+     12934
+    ],
+    "p99_us_runs": [
+     26729,
+     21446,
+     18552,
+     19122,
+     15546
+    ],
+    "cpu_us_runs": [
+     15214,
+     14511,
+     14430,
+     13679,
+     13030
+    ],
+    "p50_us": 14535,
+    "p99_us": 19122,
+    "cpu_us_per_request": 14430,
+    "errors": 0,
+    "all_quiet": true,
+    "loadavg1_before": [
+     0.27,
+     0.29,
+     0.27,
+     0.29,
+     0.28
+    ]
+   },
+   "workerd": {
+    "runs": 5,
+    "requests_per_run": 200,
+    "p50_us_runs": [
+     18550,
+     18327,
+     18032,
+     17334,
+     15917
+    ],
+    "p99_us_runs": [
+     25911,
+     28885,
+     27204,
+     24252,
+     19405
+    ],
+    "cpu_us_runs": [
+     18348,
+     18169,
+     17945,
+     17147,
+     16007
+    ],
+    "p50_us": 18032,
+    "p99_us": 25911,
+    "cpu_us_per_request": 17945,
+    "errors": 0,
+    "all_quiet": true,
+    "loadavg1_before": [
+     0.28,
+     0.29,
+     0.29,
+     0.28,
+     0.28
+    ]
+   },
+   "ratio_workerd_over_spared_p50": 1.24,
+   "ratio_workerd_over_spared_cpu": 1.24
+  },
+  {
+   "workload": "sieve",
+   "spared": {
+    "runs": 5,
+    "requests_per_run": 200,
+    "p50_us_runs": [
+     10937,
+     11245,
+     11187,
+     10032,
+     10145
+    ],
+    "p99_us_runs": [
+     15257,
+     15386,
+     13303,
+     14119,
+     12477
+    ],
+    "cpu_us_runs": [
+     10806,
+     11079,
+     11058,
+     10034,
+     10148
+    ],
+    "p50_us": 10937,
+    "p99_us": 14119,
+    "cpu_us_per_request": 10806,
+    "errors": 0,
+    "all_quiet": true,
+    "loadavg1_before": [
+     0.28,
+     0.27,
+     0.27,
+     0.27,
+     0.28
+    ]
+   },
+   "workerd": {
+    "runs": 5,
+    "requests_per_run": 200,
+    "p50_us_runs": [
+     9150,
+     9295,
+     8806,
+     8639,
+     7964
+    ],
+    "p99_us_runs": [
+     15601,
+     17207,
+     16673,
+     11554,
+     10107
+    ],
+    "cpu_us_runs": [
+     9061,
+     9213,
+     8777,
+     8606,
+     8051
+    ],
+    "p50_us": 8806,
+    "p99_us": 15601,
+    "cpu_us_per_request": 8777,
+    "errors": 0,
+    "all_quiet": true,
+    "loadavg1_before": [
+     0.28,
+     0.28,
+     0.29,
+     0.28,
+     0.28
+    ]
+   },
+   "ratio_workerd_over_spared_p50": 0.81,
+   "ratio_workerd_over_spared_cpu": 0.81
+  },
+  {
+   "workload": "json",
+   "spared": {
+    "runs": 5,
+    "requests_per_run": 200,
+    "p50_us_runs": [
+     1975,
+     1973,
+     2110,
+     1784,
+     1637
+    ],
+    "p99_us_runs": [
+     5175,
+     3964,
+     6315,
+     2141,
+     2428
+    ],
+    "cpu_us_runs": [
+     1897,
+     1893,
+     2061,
+     1731,
+     1642
+    ],
+    "p50_us": 1973,
+    "p99_us": 3964,
+    "cpu_us_per_request": 1893,
+    "errors": 0,
+    "all_quiet": true,
+    "loadavg1_before": [
+     0.29,
+     0.29,
+     0.27,
+     0.28,
+     0.28
+    ]
+   },
+   "workerd": {
+    "runs": 5,
+    "requests_per_run": 200,
+    "p50_us_runs": [
+     1546,
+     1438,
+     1419,
+     1193,
+     1228
+    ],
+    "p99_us_runs": [
+     4790,
+     4591,
+     4087,
+     3187,
+     4223
+    ],
+    "cpu_us_runs": [
+     1550,
+     1436,
+     1438,
+     1228,
+     1234
+    ],
+    "p50_us": 1419,
+    "p99_us": 4223,
+    "cpu_us_per_request": 1436,
+    "errors": 0,
+    "all_quiet": true,
+    "loadavg1_before": [
+     0.25,
+     0.29,
+     0.29,
+     0.27,
+     0.28
+    ]
+   },
+   "ratio_workerd_over_spared_p50": 0.72,
+   "ratio_workerd_over_spared_cpu": 0.76
+  },
+  {
+   "workload": "gzip",
+   "spared": {
+    "runs": 5,
+    "requests_per_run": 200,
+    "p50_us_runs": [
+     33921,
+     34324,
+     34608,
+     30944,
+     30154
+    ],
+    "p99_us_runs": [
+     43726,
+     44583,
+     60611,
+     36638,
+     40822
+    ],
+    "cpu_us_runs": [
+     33814,
+     34176,
+     34064,
+     31122,
+     30451
+    ],
+    "p50_us": 33921,
+    "p99_us": 43726,
+    "cpu_us_per_request": 33814,
+    "errors": 0,
+    "all_quiet": true,
+    "loadavg1_before": [
+     0.29,
+     0.28,
+     0.29,
+     0.29,
+     0.28
+    ]
+   },
+   "workerd": {
+    "runs": 5,
+    "requests_per_run": 200,
+    "p50_us_runs": [
+     22191,
+     21894,
+     21094,
+     20053,
+     19070
+    ],
+    "p99_us_runs": [
+     35048,
+     29829,
+     25829,
+     29319,
+     24835
+    ],
+    "cpu_us_runs": [
+     21877,
+     21773,
+     20890,
+     20011,
+     19263
+    ],
+    "p50_us": 21094,
+    "p99_us": 29319,
+    "cpu_us_per_request": 20890,
+    "errors": 0,
+    "all_quiet": true,
+    "loadavg1_before": [
+     0.27,
+     0.27,
+     0.29,
+     0.27,
+     0.28
+    ]
+   },
+   "ratio_workerd_over_spared_p50": 0.62,
+   "ratio_workerd_over_spared_cpu": 0.62
+  },
+  {
+   "workload": "pbkdf2",
+   "spared": {
+    "runs": 5,
+    "requests_per_run": 200,
+    "p50_us_runs": [
+     18301,
+     18564,
+     18538,
+     16187,
+     16364
+    ],
+    "p99_us_runs": [
+     23532,
+     29447,
+     28585,
+     25624,
+     19329
+    ],
+    "cpu_us_runs": [
+     18168,
+     18434,
+     18230,
+     16360,
+     16579
+    ],
+    "p50_us": 18301,
+    "p99_us": 25624,
+    "cpu_us_per_request": 18168,
+    "errors": 0,
+    "all_quiet": true,
+    "loadavg1_before": [
+     0.27,
+     0.27,
+     0.28,
+     0.28,
+     0.28
+    ]
+   },
+   "workerd": {
+    "runs": 5,
+    "requests_per_run": 200,
+    "p50_us_runs": [
+     6866,
+     6912,
+     6600,
+     6178,
+     5893
+    ],
+    "p99_us_runs": [
+     12948,
+     13361,
+     9518,
+     8673,
+     7091
+    ],
+    "cpu_us_runs": [
+     6751,
+     6742,
+     6428,
+     6161,
+     5912
+    ],
+    "p50_us": 6600,
+    "p99_us": 9518,
+    "cpu_us_per_request": 6428,
+    "errors": 0,
+    "all_quiet": true,
+    "loadavg1_before": [
+     0.29,
+     0.27,
+     0.29,
+     0.29,
+     0.29
+    ]
+   },
+   "ratio_workerd_over_spared_p50": 0.36,
+   "ratio_workerd_over_spared_cpu": 0.35
+  },
+  {
+   "workload": "sha256",
+   "spared": {
+    "runs": 5,
+    "requests_per_run": 200,
+    "p50_us_runs": [
+     13734,
+     13801,
+     13888,
+     12323,
+     11947
+    ],
+    "p99_us_runs": [
+     18772,
+     19148,
+     17329,
+     14283,
+     14056
+    ],
+    "cpu_us_runs": [
+     13469,
+     13609,
+     13767,
+     12363,
+     12027
+    ],
+    "p50_us": 13734,
+    "p99_us": 17329,
+    "cpu_us_per_request": 13469,
+    "errors": 0,
+    "all_quiet": true,
+    "loadavg1_before": [
+     0.29,
+     0.27,
+     0.27,
+     0.29,
+     0.28
+    ]
+   },
+   "workerd": {
+    "runs": 5,
+    "requests_per_run": 200,
+    "p50_us_runs": [
+     3563,
+     3476,
+     3432,
+     3243,
+     2971
+    ],
+    "p99_us_runs": [
+     6313,
+     5834,
+     6656,
+     5074,
+     3563
+    ],
+    "cpu_us_runs": [
+     3437,
+     3397,
+     3338,
+     3179,
+     2984
+    ],
+    "p50_us": 3432,
+    "p99_us": 5834,
+    "cpu_us_per_request": 3338,
+    "errors": 0,
+    "all_quiet": true,
+    "loadavg1_before": [
+     0.25,
+     0.29,
+     0.29,
+     0.27,
+     0.27
+    ]
+   },
+   "ratio_workerd_over_spared_p50": 0.25,
+   "ratio_workerd_over_spared_cpu": 0.25
+  }
+ ]
+}

@@ -1,0 +1,13 @@
+name = "__NAME__"
+
+[grants]
+data = false
+# Outbound HTTPS is allowed only to the hosts listed here, and keep it in step with HOST in
+# src/main.rs. "*.example.com" would match subdomains only. Private addresses are refused anyway.
+fetch = ["example.com"]
+
+[limits]
+memory_mb = 64
+cpu_ms = 1000
+deadline_ms = 5000
+max_outbound = 10

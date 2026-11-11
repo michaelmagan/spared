@@ -1,0 +1,6 @@
+# EXPERIMENTAL TLS front for the VPS targets in docs/deploy.md. Replace the hostnames with a
+# domain whose DNS points at this machine. Caddy gets the certificate itself.
+# Apps answer at https://spared.example.com/_/<app>/ through the path form the image turns on.
+spared.example.com {
+	reverse_proxy 127.0.0.1:8080
+}

@@ -1,0 +1,1 @@
+{"body_len":214,"body_len_changed":0,"errors":0,"first_byte_us":{"max":32090,"mean":20227,"min":18045,"p50":19558,"p90":23174,"p99":29746},"full_body_us":{"max":32092,"mean":20229,"min":18046,"p50":19560,"p90":23176,"p99":29748},"host":"workloads.localhost","path":"/w/wordfreq","requests":200,"server_cpu_us_per_request":19415,"server_pids":[666],"wall_s":4.046438058,"warmup":20}

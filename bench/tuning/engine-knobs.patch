@@ -1,0 +1,76 @@
+--- a/crates/spared/src/main.rs
++++ b/crates/spared/src/main.rs
+@@ -164,6 +164,73 @@
+     let mut c = Config::new();
+     c.epoch_interruption(std::env::var_os("SPARED_NO_EPOCH").is_none());
+     c.cranelift_opt_level(wasmtime::OptLevel::Speed);
++    // EXPERIMENT-ONLY knobs (not committed): SPARED_TUNE="k=v,k=v".
++    if let Ok(t) = std::env::var("SPARED_TUNE") {
++        for kv in t.split(',').filter(|s| !s.is_empty()) {
++            let (k, v) = kv.split_once('=').unwrap_or((kv, "1"));
++            let on = v != "0" && v != "false";
++            match k {
++                "opt" => {
++                    c.cranelift_opt_level(match v {
++                        "none" => wasmtime::OptLevel::None,
++                        "size" => wasmtime::OptLevel::SpeedAndSize,
++                        _ => wasmtime::OptLevel::Speed,
++                    });
++                }
++                "regalloc" => {
++                    unsafe { c.cranelift_flag_set("regalloc_algorithm", v) };
++                }
++                "lazy_table" => {
++                    c.table_lazy_init(on);
++                }
++                "inlining" => {
++                    c.compiler_inlining(match v {
++                        "yes" => wasmtime::Inlining::Yes,
++                        "no" => wasmtime::Inlining::No,
++                        _ => wasmtime::Inlining::InterModuleAndIntraGc,
++                    });
++                }
++                "may_move" => {
++                    c.memory_may_move(on);
++                }
++                "reservation" => {
++                    c.memory_reservation(v.parse().unwrap());
++                }
++                "guard" => {
++                    c.memory_guard_size(v.parse().unwrap());
++                }
++                "cow" => {
++                    c.memory_init_cow(on);
++                }
++                "addrmap" => {
++                    c.generate_address_map(on);
++                }
++                "unwind" => {
++                    c.native_unwind_info(on);
++                }
++                "backtrace" => {
++                    c.wasm_backtrace(on);
++                }
++                "signals" => {
++                    c.signals_based_traps(on);
++                }
++                "relaxed_simd" => {
++                    c.wasm_relaxed_simd(on);
++                }
++                "winch" => {
++                    c.strategy(wasmtime::Strategy::Winch);
++                }
++                "nan_canon" => {
++                    c.cranelift_nan_canonicalization(on);
++                }
++                _ => {
++                    // cl.<flag>=<value> sets a raw Cranelift flag.
++                    let f = k.strip_prefix("cl.").expect("unknown SPARED_TUNE key");
++                    unsafe { c.cranelift_flag_set(f, v) };
++                }
++            }
++        }
++    }
+     Engine::new(&c)
+ }
+ 

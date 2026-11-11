@@ -1,0 +1,56 @@
+[package]
+name = "spared"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description.workspace = true
+publish.workspace = true
+
+[dependencies]
+wasmtime = "50.0.1"
+wasmtime-wasi = "50.0.1"
+clap = { version = "4", features = ["derive", "env"] }
+serde_json = "1"
+wasmtime-wasi-http = "50.0.1"
+tokio = { version = "1.54.1", features = ["rt", "rt-multi-thread", "macros", "time", "net", "io-util"] }
+hyper = { version = "1", features = ["client", "http1", "server"] }
+http-body-util = "0.1.5"
+bytes = "1.12.1"
+toml = "1.2.1"
+serde = { version = "1.0.229", features = ["derive"] }
+http = "1.5.0"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+webpki-roots = "1"
+http-body = "1"
+base64 = "0.23.1"
+rusqlite = { version = "0.41", features = ["bundled"], optional = true }
+libc = "0.2"
+wasmparser = "0.261.0"
+sha2 = "0.11.1"
+
+[features]
+default = []
+# Test-lab commands and their dependencies (a native SQLite for the request-cost comparison).
+# Off by default and never part of a release build; see CONTRIBUTING.md.
+lab = ["dep:rusqlite"]
+
+[dev-dependencies]
+# Already in Cargo.lock (wasmtime needs it); the lifecycle tests write their guest components as text.
+wat = "1.263.0"
+
+[lints.clippy]
+# Allowed lints, each with a reason. Everything else is denied in CI (-D warnings).
+# collapsible_if: rewriting nested `if` + `if let` as let-chains changes several lines in each of
+# five places (cli.rs, escape.rs, server.rs) and the nested form reads fine; not worth the churn.
+collapsible_if = "allow"
+# too_many_arguments: bench3b::run takes 8 positional values straight from the clap subcommand.
+# It is a benchmark entry point, not API; bundling them into a struct adds nothing.
+too_many_arguments = "allow"
+# large_enum_variant: `Cmd` is built once at startup from the command line, and `Serve` carries one
+# field per operator flag. Boxing it would add a wrapper type for no runtime benefit.
+large_enum_variant = "allow"
+# result_large_err: the server's handlers return the finished HTTP response as the `Err` variant,
+# so the error is the response and is built once per rejected request.
+result_large_err = "allow"

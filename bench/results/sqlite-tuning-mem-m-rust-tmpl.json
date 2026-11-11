@@ -1,0 +1,48 @@
+{
+ "lever": "mem-m-rust-tmpl",
+ "timing": [],
+ "memory": [
+  {
+   "file": "mem16-m-rust-tmpl.json",
+   "apps_hot": 16,
+   "engine_knobs": null,
+   "distinct_sha256": 16,
+   "wasm_bytes": 2289762,
+   "cwasm_bytes": 7330008,
+   "kb_per_hot_app_growth": {
+    "rss": 4973,
+    "anon": 317,
+    "file": 4655,
+    "pss": 4820,
+    "pss_anon": 317,
+    "pss_file": 4503
+   },
+   "kb_total": {
+    "before_touch": {
+     "rss": 27668,
+     "anon": 5492,
+     "file": 22176,
+     "pss": 25527,
+     "pss_anon": 5492,
+     "pss_file": 20035
+    },
+    "after_1_hot": {
+     "rss": 35460,
+     "anon": 5860,
+     "file": 29600,
+     "pss": 33085,
+     "pss_anon": 5860,
+     "pss_file": 27225
+    },
+    "after_n_hot": {
+     "rss": 107236,
+     "anon": 10568,
+     "file": 96668,
+     "pss": 102655,
+     "pss_anon": 10568,
+     "pss_file": 92087
+    }
+   }
+  }
+ ]
+}

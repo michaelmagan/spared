@@ -1,0 +1,1 @@
+{"target": "workerd", "run": 3, "before_kb": {"rss": 49232, "anon": 9020, "file": 40212}, "after_1_hot_kb": {"rss": 53616, "anon": 9444, "file": 44172}, "after_50_hot_kb": {"rss": 72768, "anon": 22816, "file": 49952}, "rss_kb_before": 49232, "rss_kb_after_1_hot": 53616, "rss_kb_after_50_hot": 72768, "kb_per_hot_app": 470, "anon_kb_per_hot_app": 275, "file_kb_per_hot_app": 194}

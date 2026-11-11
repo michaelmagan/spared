@@ -1,0 +1,40 @@
+# cargo-deny configuration for the host workspace (Cargo.toml at the repo root).
+# Run locally: cargo install cargo-deny --locked && cargo deny check
+# Guest crates under apps/ and probes/ are separate workspaces and are not checked here.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+# instant is unmaintained. It comes only through apps/shared-list (wstd 0.6.8 -> futures-lite 1.13 ->
+# fastrand 1.9 -> instant 0.1.13) and is not in the host binary.
+ignore = [
+  { id = "RUSTSEC-2024-0384", reason = "unmaintained, not a vulnerability; guest-only, via wstd 0.6.8 in apps/shared-list" },
+]
+
+[licenses]
+version = 2
+# The licenses listed in THIRD_PARTY.md. Add one here only after reading it, then update THIRD_PARTY.md.
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "Unlicense",
+  "CDLA-Permissive-2.0", # webpki-roots (Mozilla root certificate data)
+  "Zlib", # foldhash (via hashbrown, wasmtime)
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "allow"
+wildcards = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

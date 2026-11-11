@@ -1,0 +1,306 @@
+{
+  "cases": [
+    {
+      "control": true,
+      "detail": "READ 4",
+      "pass": true,
+      "test": "control: own data file is readable"
+    },
+    {
+      "control": false,
+      "detail": "ERR PermissionDenied",
+      "pass": true,
+      "test": "read another app's file via ../ traversal"
+    },
+    {
+      "control": false,
+      "detail": "ERR PermissionDenied",
+      "pass": true,
+      "test": "read another app's file via deeper ../../"
+    },
+    {
+      "control": false,
+      "detail": "ERR NotFound",
+      "pass": true,
+      "test": "read another app's file by absolute host path"
+    },
+    {
+      "control": false,
+      "detail": "ERR PermissionDenied",
+      "pass": true,
+      "test": "read another app's file via relative symlink in own dir"
+    },
+    {
+      "control": false,
+      "detail": "ERR PermissionDenied",
+      "pass": true,
+      "test": "read another app's file via absolute symlink in own dir"
+    },
+    {
+      "control": false,
+      "detail": "ERR NotFound",
+      "pass": true,
+      "test": "read /etc/passwd"
+    },
+    {
+      "control": false,
+      "detail": "ERR NotFound",
+      "pass": true,
+      "test": "read /proc/self/environ"
+    },
+    {
+      "control": false,
+      "detail": "ERR NotFound",
+      "pass": true,
+      "test": "write outside the data dir (/escape.txt)"
+    },
+    {
+      "control": false,
+      "detail": "ERR PermissionDenied",
+      "pass": true,
+      "test": "write another app via ../"
+    },
+    {
+      "control": true,
+      "detail": "ALLOC_OK 4194304",
+      "pass": true,
+      "test": "control: 4 MB allocation under a 32 MB cap works"
+    },
+    {
+      "control": false,
+      "detail": "ALLOC_FAIL None",
+      "pass": true,
+      "test": "512 MB allocation under a 32 MB memory cap"
+    },
+    {
+      "control": false,
+      "detail": "stopped after 305 ms: Some(\"error while executing at wasm backtrace:\\n    0:   0x1e47 - fs_probe-d59f001766a8dc87.wasm!fs_probe[cee5f9832d1b3b67]::main\\n    1:   0x1768 - fs_probe-d59f001766a8dc87.wasm!std[b824c4e46a9b9730]::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>\\n    2:   0x3d08 - fs_probe-d59f001766a8dc87.wasm!__main_void\\n    3:   0x1750 - fs_probe-d59f001766a8dc87.wasm!_start: wasm trap: interrupt\")",
+      "pass": true,
+      "test": "infinite loop under a 200 ms CPU cap"
+    },
+    {
+      "control": false,
+      "detail": "DONE 4 write: No space left on device (os error 51) (4194304 bytes, 5 entries) None",
+      "pass": true,
+      "test": "data cap: renaming each file onto itself does not credit its size back"
+    },
+    {
+      "control": false,
+      "detail": "DONE 59 create: Quota exceeded (os error 19) (0 bytes, 60 entries) None",
+      "pass": true,
+      "test": "entry cap: renaming each file onto itself does not credit its entry back"
+    },
+    {
+      "control": false,
+      "detail": "DONE 120 (4194304 bytes, 5 entries) None",
+      "pass": true,
+      "test": "data cap: unlinking a hard link does not credit the file's size back"
+    },
+    {
+      "control": false,
+      "detail": "DONE 4 grow (4194304 bytes, 5 entries) None",
+      "pass": true,
+      "test": "data cap: a stream opened before a truncate is charged for what it writes"
+    },
+    {
+      "control": false,
+      "detail": "HELD 3 stream: ErrorCode { code: 6, name: \"quota\", message: \"Storage quota exceeded, similar to `EDQUOT` in POSIX.\" } (0 bytes, 4 entries) None",
+      "pass": true,
+      "test": "descriptor cap: write streams kept after their descriptor is dropped are counted"
+    },
+    {
+      "control": false,
+      "detail": "HELD 3 stream: ErrorCode { code: 6, name: \"quota\", message: \"Storage quota exceeded, similar to `EDQUOT` in POSIX.\" } (0 bytes, 4 entries) None",
+      "pass": true,
+      "test": "descriptor cap: so are read streams"
+    },
+    {
+      "control": true,
+      "detail": "DONE 2",
+      "pass": true,
+      "test": "control: files within the caps are written and renamed"
+    },
+    {
+      "control": false,
+      "detail": "Some(\"refused: ungranted imports [\\\"wasi:sockets/network@0.2.12\\\", \\\"wasi:sockets/instance-network@0.2.12\\\", \\\"wasi:sockets/udp@0.2.12\\\", \\\"wasi:sockets/udp-create-socket@0.2.12\\\", \\\"wasi:sockets/tcp@0.2.12\\\", \\\"wasi:sockets/tcp-create-socket@0.2.12\\\", \\\"wasi:sockets/ip-name-lookup@0.2.12\\\"]\")",
+      "pass": true,
+      "test": "raw TCP socket without a grant (import refused at load)"
+    },
+    {
+      "control": false,
+      "detail": "Some(\"refused: ungranted imports [\\\"wasi:sockets/network@0.2.12\\\", \\\"wasi:sockets/instance-network@0.2.12\\\", \\\"wasi:sockets/udp@0.2.12\\\", \\\"wasi:sockets/udp-create-socket@0.2.12\\\", \\\"wasi:sockets/tcp@0.2.12\\\", \\\"wasi:sockets/tcp-create-socket@0.2.12\\\", \\\"wasi:sockets/ip-name-lookup@0.2.12\\\"]\")",
+      "pass": true,
+      "test": "raw TCP socket even with fetch granted (sockets never grantable)"
+    },
+    {
+      "control": false,
+      "detail": "Some(\"refused: ungranted imports [\\\"wasi:http/outgoing-handler@0.2.12\\\"]\")",
+      "pass": true,
+      "test": "outbound fetch without a fetch grant (import refused at load)"
+    },
+    {
+      "control": true,
+      "detail": "http://example.com/ STATUS 200",
+      "pass": true,
+      "test": "control: fetch to a granted public host succeeds"
+    },
+    {
+      "control": true,
+      "detail": "https://example.com/ STATUS 200",
+      "pass": true,
+      "test": "control: HTTPS fetch to a granted public host verifies TLS and succeeds"
+    },
+    {
+      "control": false,
+      "detail": "http://169.254.169.254/latest/meta-data/ ERR ErrorCode::DestinationIpProhibited",
+      "pass": true,
+      "test": "fetch cloud metadata 169.254.169.254"
+    },
+    {
+      "control": false,
+      "detail": "http://127.0.0.1:35139/ ERR ErrorCode::DestinationIpProhibited",
+      "pass": true,
+      "test": "fetch loopback 127.0.0.1 on a live local listener"
+    },
+    {
+      "control": false,
+      "detail": "http://localhost:35139/ ERR ErrorCode::DestinationIpProhibited",
+      "pass": true,
+      "test": "fetch localhost by name"
+    },
+    {
+      "control": false,
+      "detail": "http://10.0.0.1/ ERR ErrorCode::DestinationIpProhibited",
+      "pass": true,
+      "test": "fetch private 10.0.0.1"
+    },
+    {
+      "control": false,
+      "detail": "http://192.168.1.1/ ERR ErrorCode::DestinationIpProhibited",
+      "pass": true,
+      "test": "fetch private 192.168.1.1"
+    },
+    {
+      "control": false,
+      "detail": "http://172.16.0.1/ ERR ErrorCode::DestinationIpProhibited",
+      "pass": true,
+      "test": "fetch private 172.16.0.1"
+    },
+    {
+      "control": false,
+      "detail": "http://100.64.0.1/ ERR ErrorCode::DestinationIpProhibited",
+      "pass": true,
+      "test": "fetch carrier-grade NAT 100.64.0.1"
+    },
+    {
+      "control": false,
+      "detail": "http://[::1]:35139/ ERR ErrorCode::DestinationIpProhibited",
+      "pass": true,
+      "test": "fetch IPv6 loopback [::1]"
+    },
+    {
+      "control": false,
+      "detail": "http://[::ffff:169.254.169.254]/ ERR ErrorCode::DestinationIpProhibited",
+      "pass": true,
+      "test": "fetch IPv4-mapped IPv6 metadata [::ffff:169.254.169.254]"
+    },
+    {
+      "control": false,
+      "detail": "http://168.63.129.16/ ERR ErrorCode::DestinationIpProhibited",
+      "pass": true,
+      "test": "fetch Azure platform endpoint 168.63.129.16"
+    },
+    {
+      "control": false,
+      "detail": "http://2852039166/ ERR ErrorCode::DestinationIpProhibited",
+      "pass": true,
+      "test": "fetch metadata as a decimal integer 2852039166"
+    },
+    {
+      "control": false,
+      "detail": "http://0xa9fea9fe/ ERR ErrorCode::DestinationIpProhibited",
+      "pass": true,
+      "test": "fetch metadata as hex 0xa9fea9fe"
+    },
+    {
+      "control": false,
+      "detail": "http://example.com/ ERR ErrorCode::HttpRequestDenied",
+      "pass": true,
+      "test": "fetch host not on the allowlist (example.com)"
+    },
+    {
+      "control": false,
+      "detail": "http://127.1:35139/ ERR ErrorCode::DestinationIpProhibited",
+      "pass": true,
+      "test": "fetch loopback in short form 127.1 on the live listener's port"
+    },
+    {
+      "control": false,
+      "detail": "http://0.0.0.0:35139/ ERR ErrorCode::DestinationIpProhibited",
+      "pass": true,
+      "test": "fetch 0.0.0.0 on the live listener's port"
+    },
+    {
+      "control": false,
+      "detail": "http://localhost.:35139/ ERR ErrorCode::DestinationIpProhibited",
+      "pass": true,
+      "test": "fetch localhost with a trailing dot"
+    },
+    {
+      "control": false,
+      "detail": "http://LOCALHOST:35139/ ERR ErrorCode::DestinationIpProhibited",
+      "pass": true,
+      "test": "fetch LOCALHOST in upper case"
+    },
+    {
+      "control": false,
+      "detail": "http://[::127.0.0.1]:35139/ ERR ErrorCode::DestinationIpProhibited",
+      "pass": true,
+      "test": "fetch IPv4-compatible IPv6 loopback [::127.0.0.1]"
+    },
+    {
+      "control": false,
+      "detail": "http://[::ffff:7f00:1]:35139/ ERR ErrorCode::DestinationIpProhibited",
+      "pass": true,
+      "test": "fetch IPv4-mapped IPv6 loopback in hex [::ffff:7f00:1]"
+    },
+    {
+      "control": false,
+      "detail": "http://[64:ff9b::a9fe:a9fe]/ ERR ErrorCode::DestinationIpProhibited",
+      "pass": true,
+      "test": "fetch NAT64 form of the metadata address [64:ff9b::a9fe:a9fe]"
+    },
+    {
+      "control": false,
+      "detail": "http://evil.test:x@example.com/ ERR authority rejected by wasi-http Some(\"evil.test:x@example.com\")",
+      "pass": true,
+      "test": "fetch userinfo naming an unlisted host before an allowed one"
+    },
+    {
+      "control": false,
+      "detail": "http://example.com@127.0.0.1:35139/ ERR ErrorCode::HttpRequestUriInvalid",
+      "pass": true,
+      "test": "fetch userinfo in front of loopback"
+    },
+    {
+      "control": true,
+      "detail": "http://EXAMPLE.com/ STATUS 200",
+      "pass": true,
+      "test": "control: upper-case host matches a lower-case grant"
+    },
+    {
+      "control": true,
+      "detail": "http://example.com./ STATUS 200",
+      "pass": true,
+      "test": "control: trailing-dot host matches the grant"
+    },
+    {
+      "control": false,
+      "detail": "0 connections",
+      "pass": true,
+      "test": "no connection ever reached the local listener"
+    }
+  ],
+  "failures": 0,
+  "total": 50
+}

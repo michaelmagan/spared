@@ -1,0 +1,1 @@
+{"body_len":11,"body_len_changed":0,"errors":0,"first_byte_us":{"max":3153,"mean":74,"min":55,"p50":66,"p90":83,"p99":192},"full_body_us":{"max":3155,"mean":75,"min":56,"p50":67,"p90":83,"p99":193},"host":"workloads.localhost","path":"/w/noop","requests":2000,"server_cpu_us_per_request":51,"server_pids":[31482],"wall_s":0.153566219,"warmup":20}

@@ -1,0 +1,48 @@
+{
+ "lever": "mem-clone50",
+ "timing": [],
+ "memory": [
+  {
+   "file": "mem-clone50.json",
+   "apps_hot": 50,
+   "engine_knobs": null,
+   "distinct_sha256": 50,
+   "wasm_bytes": 2201255,
+   "cwasm_bytes": 6968344,
+   "kb_per_hot_app_growth": {
+    "rss": 4051,
+    "anon": 301,
+    "file": 3750,
+    "pss": 3911,
+    "pss_anon": 301,
+    "pss_file": 3610
+   },
+   "kb_total": {
+    "before_touch": {
+     "rss": 67184,
+     "anon": 13232,
+     "file": 53952,
+     "pss": 64966,
+     "pss_anon": 13232,
+     "pss_file": 51734
+    },
+    "after_1_hot": {
+     "rss": 74856,
+     "anon": 13568,
+     "file": 61288,
+     "pss": 72318,
+     "pss_anon": 13568,
+     "pss_file": 58750
+    },
+    "after_n_hot": {
+     "rss": 269780,
+     "anon": 28296,
+     "file": 241484,
+     "pss": 260561,
+     "pss_anon": 28296,
+     "pss_file": 232265
+    }
+   }
+  }
+ ]
+}

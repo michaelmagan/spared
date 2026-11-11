@@ -1,0 +1,5 @@
+ Server Version: 29.9.2
+ Runtimes: io.containerd.runc.v2 runc runsc
+ Default Runtime: runc
+runsc version release-20261102.0
+spec: 1.2.1

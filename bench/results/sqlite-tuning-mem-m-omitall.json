@@ -1,0 +1,48 @@
+{
+ "lever": "mem-m-omitall",
+ "timing": [],
+ "memory": [
+  {
+   "file": "mem16-m-omitall.json",
+   "apps_hot": 16,
+   "engine_knobs": null,
+   "distinct_sha256": 16,
+   "wasm_bytes": 1630577,
+   "cwasm_bytes": 5123600,
+   "kb_per_hot_app_growth": {
+    "rss": 3950,
+    "anon": 285,
+    "file": 3664,
+    "pss": 3837,
+    "pss_anon": 285,
+    "pss_file": 3552
+   },
+   "kb_total": {
+    "before_touch": {
+     "rss": 25080,
+     "anon": 4824,
+     "file": 20256,
+     "pss": 22944,
+     "pss_anon": 4824,
+     "pss_file": 18120
+    },
+    "after_1_hot": {
+     "rss": 32624,
+     "anon": 5156,
+     "file": 27468,
+     "pss": 30252,
+     "pss_anon": 5156,
+     "pss_file": 25096
+    },
+    "after_n_hot": {
+     "rss": 88284,
+     "anon": 9396,
+     "file": 78888,
+     "pss": 84351,
+     "pss_anon": 9396,
+     "pss_file": 74955
+    }
+   }
+  }
+ ]
+}

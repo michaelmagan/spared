@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = ["crates/spared"]
+exclude = ["probes/sqlite-probe", "probes/escape-probe", "probes/hostile-app", "apps/shared-list", "apps/demo-spared", "apps/demo-spin", "apps/bench3b-host", "apps/bench3b-sandbox", "apps/workloads-spared", "apps/demo-native"]
+
+[workspace.package]
+edition = "2024"
+license = "Apache-2.0"
+version = "0.0.1-preview"
+repository = "https://github.com/michaelmagan/spared"
+description = "An open-source host for Rust web apps with SQLite. Each app and its database run in their own Wasm sandbox."
+publish = false

@@ -1,0 +1,1 @@
+{"suite": "wake", "segment": "wake", "start": "2026-11-10T23:28:32Z", "end": "2026-11-10T23:29:38Z", "loadavg1_at_start": 0.28, "steal_jiffies_before": 157497, "steal_jiffies_after": 157634, "steal_delta": 137, "all_cpu_jiffies_delta": 26666, "steal_pct": 0.514}

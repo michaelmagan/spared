@@ -1,0 +1,7 @@
+ Server Version: 29.9.2
+ Storage Driver: overlayfs
+ Cgroup Driver: cgroupfs
+ Cgroup Version: 1
+ Runtimes: io.containerd.runc.v2 runc
+ Default Runtime: runc
+ Security Options:

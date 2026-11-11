@@ -1,0 +1,116 @@
+{
+ "target": "container",
+ "n": 1,
+ "rep": 1,
+ "images": "spared-ctr-dist:v0..0 (one distinct static binary per container)",
+ "server_cpu": "0",
+ "docker_version": "29.9.2",
+ "daemons_before_kb": {
+  "VmRSS": 168672,
+  "RssAnon": 65100,
+  "RssFile": 103572,
+  "Pss": 165832,
+  "Pss_Anon": 65100,
+  "Pss_File": 100732,
+  "pids": 2
+ },
+ "start_to_first_byte_us": [
+  185827
+ ],
+ "snapshots_kb": {
+  "first": {
+   "app": {
+    "VmRSS": 3724,
+    "RssAnon": 344,
+    "RssFile": 3380,
+    "Pss": 3720,
+    "Pss_Anon": 344,
+    "Pss_File": 3376,
+    "pids": 1
+   },
+   "shim": {
+    "VmRSS": 11316,
+    "RssAnon": 3844,
+    "RssFile": 7472,
+    "Pss": 11308,
+    "Pss_Anon": 3844,
+    "Pss_File": 7464,
+    "pids": 1
+   },
+   "shim_names": [
+    "containerd-shim"
+   ],
+   "proxy": {
+    "VmRSS": 5536,
+    "RssAnon": 1560,
+    "RssFile": 3976,
+    "Pss": 4137,
+    "Pss_Anon": 1560,
+    "Pss_File": 2577,
+    "pids": 1
+   },
+   "daemons": {
+    "VmRSS": 168692,
+    "RssAnon": 65120,
+    "RssFile": 103572,
+    "Pss": 165894,
+    "Pss_Anon": 65120,
+    "Pss_File": 100774,
+    "pids": 2
+   },
+   "cgroup_sum_kb": {
+    "usage": 824,
+    "rss": 344,
+    "cache": 12,
+    "mapped_file": 0
+   }
+  },
+  "idle15": {
+   "app": {
+    "VmRSS": 3724,
+    "RssAnon": 344,
+    "RssFile": 3380,
+    "Pss": 3720,
+    "Pss_Anon": 344,
+    "Pss_File": 3376,
+    "pids": 1
+   },
+   "shim": {
+    "VmRSS": 11316,
+    "RssAnon": 3844,
+    "RssFile": 7472,
+    "Pss": 11308,
+    "Pss_Anon": 3844,
+    "Pss_File": 7464,
+    "pids": 1
+   },
+   "shim_names": [
+    "containerd-shim"
+   ],
+   "proxy": {
+    "VmRSS": 5536,
+    "RssAnon": 1560,
+    "RssFile": 3976,
+    "Pss": 4097,
+    "Pss_Anon": 1560,
+    "Pss_File": 2537,
+    "pids": 1
+   },
+   "daemons": {
+    "VmRSS": 168692,
+    "RssAnon": 65120,
+    "RssFile": 103572,
+    "Pss": 165814,
+    "Pss_Anon": 65120,
+    "Pss_File": 100694,
+    "pids": 2
+   },
+   "cgroup_sum_kb": {
+    "usage": 824,
+    "rss": 344,
+    "cache": 12,
+    "mapped_file": 0
+   }
+  }
+ }
+}

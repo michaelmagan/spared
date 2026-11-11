@@ -1,0 +1,235 @@
+# Design
+
+This note is for readers who want the detail behind spared: how it works, what it costs, and what is not built. spared hosts small Rust web apps on one machine. Each app is a Rust crate compiled to a `wasm32-wasip2` component, with SQLite compiled in. Numbers come from `bench/results/`, and [benchmarks](benchmarks.md) says how to rerun them.
+
+spared is an early preview, so nothing here is a stable interface. The sandbox has had no outside audit (see the [FAQ](faq.md)).
+
+## Shape of the system
+
+One host process (`spared serve`, wasmtime 50.0.1) runs on a single node. It has two listeners:
+
+- The public listener (default `127.0.0.1:8080`) routes by the `Host` header: `<app>.localhost` goes to the app named `<app>`. With `--allow-path-routing`, `/_/<app>/` on any host also reaches the app, at the cost of putting every app on one browser origin, so apps could read each other's data in a visitor's browser; leave it off for code you did not write.
+- The admin listener (default `127.0.0.1:8081`) takes deploys, lists, logs and deletes, and serves the metrics. It needs a bearer token, refuses `Host` names that are not an IP or `localhost`, and refuses requests with an `Origin` header.
+
+The public listener answers one path itself: `GET /healthz`, and only for a host that names no app (see [Observability](#observability)). Everything else on it is an app's or a 404.
+
+On disk, the data dir starts with `format.json`, the stamp that says which layout it uses (see [Versions and the data directory format](#versions-and-the-data-directory-format)). Each app has a directory under the data dir: the precompiled component (`component.cwasm`, a hard link into the shared store described below), the deployed wasm (`component.wasm`, also a link into the store), `component.sha256` (its key), its manifest, a version number, an `app.log` and a `data/` directory that holds the app's SQLite file.
+
+Compiled components live once per distinct deployed binary in `<data-dir>/components/<sha256 of the deployed wasm>.cwasm`, written to a temporary name and renamed. The server keeps one `Component` and one pre-linked `ProxyPre` per hash in memory, shared by every app using it, so identical deployments map the compiled code once (the workerd comparison found about 4 MiB of resident memory per hot app when each name mapped its own copy; apps with different code still cannot share, see the memory curve in `docs/memory-methodology.md`). Limits, grants, the store and the data directory stay per app. Deleting or redeploying an app removes its link, and the stored file goes when no loaded app runs that hash and no app directory links to it (link count 1); startup also removes unreferenced, unlinked and partial files. On a file system that cannot hard link (a store on another mount) each app directory gets a copy and the store file's link count stays 1, so the link count alone never decides: a hash a loaded app names is kept, and a store file that went missing is put back from the app directory's copy at load.
+
+The deployed wasm is stored beside its compiled file (`components/<sha256>.wasm`), because a `.cwasm` loads only into the wasmtime version and configuration that made it. When a stored `.cwasm` is refused at load, the server checks the stored wasm against its hash, compiles it again into a new file, renames that into place and relinks the app, so a wasmtime upgrade does not strand deployed apps.
+
+## One instance per app
+
+Requests to one app go through a single instance, guarded by a lock in the host (`crates/spared/src/server.rs`). Requests to the same app run one after another. Different apps run concurrently on the host's async runtime.
+
+Consequences:
+
+- Writes to an app are serialized, the way a Durable Object serializes them, and SQLite needs no cross-process locking.
+- An app keeps in-memory state only until its instance is dropped. Apps must treat memory as a cache.
+- One slow request delays the app's other requests, up to the deadline.
+- A request runs in its own task, holding the lock until it finishes: a client that disconnects does not cancel it, so the instance is never left mid-call. A request still queued for the lock is dropped when its client goes away. An app takes at most `--max-app-queue` requests running or waiting (default 16); the next gets `503 app_busy` with `Retry-After`, so a slow app cannot use up every connection slot.
+
+Spin 4 does it differently. It pools and reuses wasip3 instances (up to 128 requests by default; 1 for wasip2), and several instances of one app can run at once with no per-app serialization (Spin v4.3.0 source, `crates/trigger-http/src/lib.rs`, read for the comparison).
+
+## SQLite inside the sandbox
+
+SQLite is C compiled to Wasm with wasi-sdk 25 and linked into the app through `rusqlite` with the bundled source. The app opens `/data/app.db` itself.
+
+Two settings are not defaults, and both come from the crash test:
+
+- The `unix-none` VFS, which takes no lock files. This is safe only because the host guarantees one owner. With SQLite's default dotfile locking, 7 of the first 100 kill -9 trials could not reopen the database (a stale `app.db.lock` directory); with `unix-none`, 0 of 100 failed. The 7 failures have no raw file in `bench/results/`.
+- `locking_mode=EXCLUSIVE` when WAL is used, because WASI has no shared memory.
+
+The shipped helper (`src/spared.rs` in each generated app) uses the rollback journal in `TRUNCATE` mode with `synchronous=FULL`. It wakes fastest and needs no recovery step. WAL also works but each wake after an unclean unload recovers the WAL: about 0.2 ms more than TRUNCATE on the current build, about 1 ms before SQLite used `pread`/`pwrite` (`bench/results/wake-tuned.jsonl`, `wake.jsonl`).
+
+The alternative is native SQLite in the host, reached through a query API. See the trade-offs table below.
+
+## Grants and import validation
+
+The manifest, `spared.toml`, declares what an app may use:
+
+```toml
+name = "my-app"
+
+[grants]
+data = true               # a /data directory; default true
+fetch = ["api.example.com"]   # outbound HTTP hosts; "*.example.com" matches subdomains only
+
+[limits]
+memory_mb = 64
+cpu_ms = 1000
+deadline_ms = 5000
+max_outbound = 10
+```
+
+At deploy, the host reads the component's declared imports (`crates/spared/src/grants.rs`):
+
+- `wasi:cli`, `wasi:clocks`, `wasi:random`, `wasi:io` and `wasi:http/types` are always allowed.
+- `wasi:filesystem` needs `data = true`.
+- `wasi:http/outgoing-handler` needs a non-empty `fetch`.
+- Anything else, including every `wasi:sockets` interface, is refused.
+
+A refused deploy returns `ungranted_import`, naming the imports and the manifest line that would fix it where one exists. The host also refuses a component that does not export `wasi:http/incoming-handler`, is not a component, exceeds 16 MB, is too expensive to compile, or whose manifest name differs from the deployed name.
+
+At run time the app's filesystem is one preopened directory. Outbound HTTP passes a hook (`crates/spared/src/sandbox.rs`) that checks the host list and the per-request call budget, resolves the name, refuses any private, loopback, link-local, CGNAT, multicast, documentation, benchmarking or reserved address (including mapped IPv6 forms), then connects to the address it checked (`pinned_send.rs`). Without that last step the stock sender in wasmtime-wasi-http resolves the name a second time, which a short-TTL DNS name can exploit.
+
+Result: 50 escape cases, 0 failures: 43 attacks denied and 7 controls that succeeded (`bench/results/escape.json`; `escape-tuned.json` is an earlier run of 43 cases). The first run had 31 cases. The hardening pass added the rest: it refuses URLs with userinfo or a mismatched `Host`, compares hosts without case or trailing dot, and denies more embedded-IPv4 IPv6 forms.
+
+## Wake and sleep
+
+Deploy precompiles the component to native code (`.cwasm`) and pre-links it. Waking an app creates a store with the app's limits, preopens `/data`, sets stdout and stderr to the app log, and instantiates the component. The first request does the rest: the app opens its SQLite file.
+
+A background task checks every 500 ms and drops any instance idle for `--idle-secs` (default 30). A dropped instance releases its Wasm memory and its open database, but the app is not free while idle. The compiled component stays mapped, which costs about 4.1 MiB of reclaimable file pages and 0.35 MiB of anonymous memory per different app, and about 0.09 MiB per app for copies of one component. An app that is deployed but has not been requested since the server started costs about 0.67 MiB, because the server maps every deployed component at start. Beyond that an idle app costs its files on disk and an entry in the host's app table.
+
+Measured (`bench/wake.sh`, one pinned CPU, in process, precompiled component, 100-row database):
+
+- Instantiating the component: about 40 to 50 us at p50.
+- Wake to first query with the rollback journal, current build: p50 634 to 684 us, p99 1831 to 2881 us across three runs (`wake-tuned.jsonl`). Before the `pread`/`pwrite` change it read p50 595 to 607 us and p99 699 to 747 us on a faster VM run; within one run the current build is about 13% faster.
+- With WAL, current build: p50 856 to 875 us (1420 to 1438 us before the `pread`/`pwrite` change).
+
+Density harness (`spared bench-density`, in a `--features lab` build): an in-process harness, not the server. It built 10,000 app directories with 500 instances live, in one process with the CPU limit off and no memory cap. Creating the apps added 7.7 MiB to the process in total, and a live instance grew it by 417 KiB. These used one shared component, and the harness says nothing about what `spared serve` does at that count, which was not measured. Before compiled code was shared, 50 separately deployed names of the demo app cost 4,120 KiB per hot app by RSS, 93% of it file-backed pages, and PSS was the same (`bench/results/vs-workerd-spared-mem-run*.json`, `vs-workerd-mem-pss-before-same-run*.json`). With sharing, 50 identical deployments cost 435 KiB of PSS growth per hot app (`vs-workerd-set2-mem-pss-set2-same-run*.json`). Apps with different code cannot share. Measured as totals for N different apps (`docs/memory-methodology.md`, `bench/results/memory-curve-*.json`, from the build before the `pread`/`pwrite` change), spared costs 17.1 MiB + 4,481 KiB per hot app by PSS (87 percent file-backed code pages the kernel can reclaim) and 1.3 MiB + 561 KiB by RssAnon, and identical apps cost 288 KiB each. Per-app growth after one request (4,000 KiB against 508 KiB for workerd) leaves out workerd's startup memory, so totals are the fair comparison.
+
+## Limits
+
+- Memory: `StoreLimits` caps linear memory at `memory_mb`. A failed grow returns an error to the guest rather than killing it.
+- CPU: epoch interruption. A host thread increments a counter every 1 ms. At each tick a running guest yields to the async runtime (a multi-thread runtime in `spared serve`), so one app's compute does not stall other apps or the admin API, and the request is charged for the wall-clock time its guest was running; the guest is interrupted at the next tick after that time reaches `cpu_ms`. The charge covers the guest's own code and the work the server does inside the calls it makes (file reads and writes, fsync, directory listings), because the server does that work on the same thread while the guest waits. It is wall-clock time, not CPU time, and it does not cover time spent waiting for the network or for another app's turn. Outbound HTTP work (connecting, parsing the response) runs outside the guest's call and is not charged; it is bounded by `max_outbound` and by `deadline_ms`. Epoch checks cost 12 to 34% on SQLite-heavy work depending on the query shape, about 21% across the six shapes of the SQLite microbenchmark, so they stay on and we pay for it.
+- Operator maximums: `spared serve --max-memory-mb`, `--max-cpu-ms`, `--max-deadline-ms` and `--max-outbound` cap what a manifest may ask for. Deploy refuses more; load clamps.
+- Deadline: a wall-clock timeout per request (`deadline_ms`), covering the wake of the instance as well as the handler. On timeout the instance is dropped and the client gets `deadline` (HTTP 504).
+- Outbound: at most `max_outbound` HTTP calls per request (the count resets at each request).
+- Guest file calls run on the worker thread that polls the guest, and a call in progress cannot be interrupted, so `cpu_ms` and `deadline_ms` take effect once it returns; what one call can cost is bounded by the per-app caps on entries, open files and data size. `spared serve` runs at least 4 workers so one app's slow sync cannot stall the listeners. `deadline_ms` is the bound on everything a request does, host work included: at the deadline the request is stopped and the instance dropped, which also ends any outbound call it had started.
+- Connections: request headers and body within `--client-timeout-secs`, a write that makes no progress for that long closes the connection, and a public connection lives at most 30 timeouts.
+- Request body 8 MB and response body 16 MB by default (`--max-request-mb`, `--max-response-mb`). The response body is read while the handler runs. Component 16 MB (`--max-component-mb`).
+- A trap, a CPU limit hit, a memory failure or a deadline drops the instance. The next request wakes a fresh one.
+
+The escape suite checked the memory cap (512 MB request under a 32 MB cap fails the allocation without killing the app) and the CPU cap (200 ms cap interrupted a loop at 253 ms in the stored run). The deadline and the outbound count have code but no test in the suite.
+
+## WebAssembly features
+
+The engine turns on only what the guest toolchain (Rust for `wasm32-wasip2`, wasi-sdk 25 for SQLite) emits, and switches the rest off by name, so a wasmtime upgrade cannot widen what an upload may use. A component that uses an off feature is refused at deploy (`invalid_component`).
+
+| Feature | State | Why |
+|---|---|---|
+| Component model | on | every app is a component |
+| Bulk memory, reference types, multi-value, sign extension, saturating float conversion | on | emitted by Rust and by the SQLite build |
+| SIMD (fixed width) | on | the SQLite build uses `-msimd128` |
+| Relaxed SIMD | off | nothing emits it, and results may differ between machines |
+| Threads, atomics, shared memory | off | apps are single-threaded and SQLite is built without threads |
+| Garbage collection, function references | off | Rust has no managed heap; a collector heap would be a second memory beside `memory_mb` |
+| Exception handling | off | Rust panics abort and C builds without exceptions |
+| Memory64 | off | 32-bit address space is what `memory_mb` limits are written for |
+| Multiple memories | off | each module has one memory |
+| Tail calls | off | not emitted by the toolchain |
+| Wide arithmetic, extended constant expressions, stack switching, custom page sizes | off | not emitted by the toolchain |
+| Component-model async, threading, error contexts, extra proposals | off | the WASI 0.2 interfaces apps use are synchronous |
+
+## Compiling an upload
+
+A component can be small and still cost gigabytes and many seconds to compile: the compiler's memory grows much faster than the size of one function with thousands of locals. So the host never compiles an upload in the server process. It first scans the wasm for the largest function (bytes and locals) and the function count, and refuses a component over `--max-function-kb`, `--max-function-locals` or `--max-component-functions`. What passes is compiled by a child process (`spared compile-worker`) that has an address-space limit (`--compile-memory-mb`), a time limit (`--compile-timeout-secs`, enforced by killing it), a CPU-time backstop, a low priority, and at most `--compile-threads` threads. It dies with the server. The server only loads the artifact the child wrote, so one compile serves both validation and storage. Compiles run one at a time. A component that trips any of these gets `422 component_too_complex`, and nothing is deployed. A component the compiler itself rejects still gets `invalid_component`.
+
+The limits apply to new uploads. A component already in the store is not scanned again, and a recompile after a wasmtime upgrade keeps the memory and time limits but not the size scan, so an upgrade never takes down an app that deployed fine before.
+
+## Atomic deploy
+
+A deploy validates everything first: manifest, component, imports, handler export, and that the host can link the component (the step that used to run only when the app was loaded afterwards). Only then does it write files: the stored component, then the new manifest, hash, version and component links as synced `*.tmp` files, then a synced `release.pending` marker, then the renames into place. The marker is the commit point. A crash before it leaves the previous version; a crash after it is finished at the next start, so the app directory never settles with a new manifest beside an old component. The new in-memory app is built before the commit and swapped into the app table after it, then the old instance is dropped. The app's data directory is untouched, so state survives a redeploy.
+
+Limits of this claim: it relies on `fsync` and `rename` doing what the file system says, and no power-loss test has been run. Requests already running on the old instance are not shown to be drained.
+
+## Backups
+
+`POST /v1/apps/{name}/backup` (`spared backup`) copies an app's `data/` directory to `<data-dir>/backups/<name>/<UTC timestamp>/`. It works because of the one-instance rule: the server takes the app's instance lock (the same lock a request holds, so a request in flight finishes first and queued requests wait), drops the live instance so no handle holds the database, copies every file to a `.tmp-` directory, fsyncs it, and renames it into place. With the `TRUNCATE` journal a dropped instance leaves a clean `app.db`, so the copy is a consistent database. The server does not open the copy: an earlier version ran `PRAGMA integrity_check` on it, which evaluated the app's own index expressions in the host with no limits (9 s and 734 MB for a 12 KB file) and exposed SQLite's file parsers to app-written bytes. Now each file is hashed as it is read, the copy is read back and hashed, and they must match; the response says `integrity: "copied, sha256 verified; database not opened by the host"`. That proves a faithful copy, not a healthy database; the app's own SQLite, inside its sandbox, is what reads the file after a restore. If a non-empty `app.db-journal` or `-wal` is present, the files are copied together and the response says `journal_clean: false`. Symlinks in `data/` are not followed or copied, since the app controls them. The same holds if the app swaps a directory for a link while the copy runs: every directory and file is opened relative to its parent directory without following links, so a name that has become a link is skipped, not entered. The walks that run beside a live app (the size and entry count behind `spared ps` and the quota books) and the deletion of a tree work the same way. They keep one directory handle per nesting level, so they stop at 256 levels: the size shown for a deeper tree is partial, and for the quota such a tree counts as over the entry limit. A copy is capped at 64 directory levels, 100,000 entries and `--max-app-data-mb` of apparent size (a sparse file counts at its full size, and its holes stay holes in the copy); over that the backup is refused and nothing changes.
+
+A backup holds app data only, not code. A restore (`POST /v1/apps/{name}/restore`, `spared restore --from <id> --yes`) takes the same lock and drops the instance, copies the backup next to the data directory with the same hash check, stages the complete copy as `data.restore-ready` (so a start after a crash can finish or undo the restore), moves the current `data/` to `backups/<name>/pre-restore-<timestamp>/`, and renames the copy into place; restoring the `pre-restore` id undoes it. Ids come from the clock but never go backwards: a new id is at least one second after the newest existing one, so retention (`--max-backups-per-app`, default 20, applied to backups and, separately, to pre-restore copies) cannot make a new backup sort as the oldest. Ids are validated against the timestamp pattern, so a request cannot name a path.
+
+Deleting an app moves its directory to `<data-dir>/trash/` with one rename and removes it with an iterative walk (no recursion, two open directories, short paths), so an app that nested its data thousands of levels deep cannot crash the server when it is removed; backup deletion and retention work the same way.
+
+Backups are on the same disk as the data, so they protect against bad writes and bad deploys, not against losing the disk. Tested through the real server (`scripts/server-test.py`), including a writer thread acknowledging writes while three backups run; not tested: power loss during a backup, a full disk, and backups of databases in WAL mode.
+
+`spared bench <name>` times cold wakes (evict, then the first request's time to first byte, 20 cycles) and warm requests on one connection, and prints p50, p99 and max. It runs against a live server over HTTP, so its numbers include the loopback network path and differ from the in-process figures of the wake and workerd benchmarks.
+
+## Versions and the data directory format
+
+`spared --version` prints the release version from `Cargo.toml` and the git commit the binary was built from (`crates/spared/build.rs` asks git, or takes `SPARED_GIT_SHA` where the build has no checkout, as in the image build). The server prints the same line when it starts and reports the version in `/healthz` and in `spared_build_info`.
+
+The data dir carries a stamp, `format.json`: `{"format": 1, "created_by": "<version>", "last_opened_by": "<version>"}`. `format` numbers the on-disk layout, not the release. `spared serve` and `spared dev` read it before they create the admin token or touch anything else (`crates/spared/src/datadir.rs`):
+
+- No stamp: a new directory, or one from before stamps existed. It is format 1; the server stamps it.
+- The format this build writes: opened, and `last_opened_by` updated.
+- A higher format than this build reads: refused with `data_dir_too_new`. A lower one than it reads: `data_dir_too_old`. A file that does not parse: `data_dir_stamp_unreadable`. In each case the process exits 1 before writing anything, with a `fix`.
+
+The stamp is written to a temporary name and renamed, mode 0600. One format exists so far, so there is no migration code yet; the rule for the first one is in [upgrading.md](upgrading.md): a release that changes the layout raises the number and either upgrades the directory at start or refuses it. What the stamp does not cover is the compiled code, which has its own check: a `.cwasm` from another wasmtime version is refused by wasmtime at load and recompiled from the stored wasm (above).
+
+Tested in `scripts/server-test.py`: a directory with no stamp opens, is stamped and serves; three bad stamps are refused and the directory's files are compared before and after. Not tested: a crash between a layout upgrade and the stamp write, since there is no layout upgrade yet.
+
+## Observability
+
+Three things, all in `crates/spared/src/obs.rs` and the request wrapper in `server.rs`. No new dependency, and no OpenTelemetry: this is a log and a metrics endpoint, not traces.
+
+**Access log.** One JSON object per line on stdout for every request on either listener; the server's own messages go to stderr, so the two can be split. Fields: `time` (UTC, RFC 3339, milliseconds), `listener` (`public` or `admin`), `app` (the app the request was routed to, or `null`), `method`, `path`, `status`, `duration_ms` (from the request's headers arriving to the response being ready to send) and `request_id`; plus `error`, the error kind, when spared itself produced the response (`app_trap`, `deadline`, `no_such_app`, `unauthorized` and so on). The line is built from the request's method and path only. It never holds the query string, a header, a cookie or a body, and the admin token cannot reach it. Every string goes through a JSON encoder, so a request path cannot forge a second line; paths are cut at 512 characters. `--access-log off` (env `SPARED_ACCESS_LOG=off`) stops it. Not logged: connections that never send a complete request head (they time out inside the HTTP layer), and the time spent writing the response to a slow client.
+
+The request id is 16 hex digits, different for every request and not a counter, so it does not reveal request volume. It is returned to the client as the `x-spared-request-id` response header, on app responses too (the server overwrites a header of that name set by an app), so someone reporting a failure can quote it. The app itself is not given the id.
+
+**Health check.** `GET` or `HEAD /healthz` on the public listener answers 200 with `{"status": "ok", "version": "...", "uptime_seconds": N}`. It is the only path the public listener answers itself. It is matched after host routing, so a request whose `Host` names an app goes to that app, `/healthz` included. The body names no app, path or count of apps. It does tell anyone who can reach the listener which version runs and when it started, which is what a health check and a bug report need; put a proxy in front if that is too much.
+
+**Metrics.** `GET /metrics` on the admin listener only, in the Prometheus text format (version 0.0.4). It goes through the same refusals as every admin route, in the same order: an `Origin` header (403), a `Host` that is not an IP or `localhost` (403), a missing or wrong bearer token (401). The public listener has no such route: `/metrics` there is routed like any other path and ends in an app or a 404.
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `spared_build_info` | gauge | `version` | Always 1; carries the version |
+| `spared_uptime_seconds` | gauge | | Seconds since start |
+| `spared_requests_total` | counter | `listener`, `status` (`1xx` to `5xx`) | Requests answered |
+| `spared_errors_total` | counter | `listener`, `kind` | Error responses spared itself produced, by error kind |
+| `spared_wakes_total` | counter | | App instances started |
+| `spared_evictions_total` | counter | `reason`: `idle`, `error`, `admin`, `deploy` | Live instances dropped: idle timeout; a trap, limit or deadline; `spared evict`, a backup or a restore; a redeploy or delete |
+| `spared_apps` | gauge | `state`: `deployed`, `hot` | Apps on the server, and those with a live instance |
+| `spared_components_loaded` | gauge | | Distinct compiled components in memory |
+| `spared_prefetch_bytes_total` | counter | | Bytes of stored components read into the page cache ahead of requests, at start and at a component's first wake |
+| `process_resident_memory_bytes` | gauge | | Resident memory of the server process (Linux) |
+
+No metric has an app name as a label: with thousands of apps that would be thousands of series, and `spared ps` already has per-app requests, wakes and errors. The error kinds are string literals in the server, so that label set is small and fixed. Counters reset when the server restarts.
+
+Cost: the access log is one `write` to stdout per request. Measured on a warm GET with the log on against off, it added +5.6% at p50 with one connection and +5.9% with 16 connections, and a line is about 163 bytes (`docs/benchmarks.md`). Only warm GET and one app were measured, and stdout went to a file. The benchmark scripts that start a server pass `--access-log off`, which is the configuration the published numbers were measured in (they predate the log).
+
+Tested in `scripts/server-test.py` and `scripts/e2e.sh`: the fields of a line; that a secret placed in a query string, a header, a cookie and a body appears nowhere in the server's output; that the admin token is never printed; `/metrics` refused without the token, with an `Origin`, with a foreign `Host`, and absent from the public listener even with the token; `/healthz` naming no app.
+
+## Trade-offs
+
+| | SQLite inside Wasm (spared) | SQLite on the host |
+|---|---|---|
+| A SQLite memory-safety bug reached by a hostile app | Contained to that app's sandbox | Reaches the host and every other app |
+| Memory and CPU caps on database work | Cover it, because it runs as guest code | Need separate accounting; a heavy query runs outside the app's limits |
+| What the host must defend | A directory grant | A query API: which file, result size, query time |
+| Crash domain | One app | The host process |
+| Same engine in the browser | Yes, so a local-first sync path stays open | No |
+| SQLite speed | About 1.85x native CPU with CPU limits on (1.5x without them) | Native |
+
+The cost, measured:
+
+- SQLite microbenchmark, current build: geometric mean 1.85x native across six query shapes, from 1.07x (durable inserts) to 2.37x (point select); 1.54x with epochs off. What is left is Cranelift code against native C and the epoch checks.
+- Request-cost benchmark, current build: a request with 10 reads and 1 durable write has p50 1.13 ms in the sandbox against 0.80 ms with SQLite on the host, and uses 2.05x the CPU (560 us against 276 us), medians of five runs from `bench/results/request-cost-passB-*.json`. One core serves about half as many write-carrying requests.
+- Before the `pread`/`pwrite` change SQLite measured 3.22x (2.21x to 5.14x) in the SQLite microbenchmark and 3x the CPU in the request-cost benchmark, a much larger ratio than today (`docs/benchmarks.md`). Most of that gap was SQLite on WASI reading and writing every page through a WASI stream that wasmtime-wasi runs on another thread; the guest SQLite is now built with `-DHAVE_PREAD=1 -DHAVE_PWRITE=1` (`scripts/guest-cflags.txt`).
+
+If you trust your apps, a host-side SQLite is faster. spared exists to host code nobody reviewed.
+
+## How it differs from others
+
+Only what we read or ran.
+
+- Spin (v4.3.0). Verified from its source: SQLite runs in the host (`crates/sqlite-inproc`, a host-side `rusqlite` connection, exposed as `spin:sqlite@3.1.0`). Instances are pooled and reused, with no per-app serialization. spared keeps SQLite in the sandbox and runs one instance per app. Measured on the same demo app in a separate run (`docs/benchmarks.md`): warm GET at one connection, p50 456 us on Spin against 109 us on spared. Spin's SQLite ran on the host with the delete journal, the app was a wasip3 component that opened its database on every request, and Spin was not rerun alongside workerd and celld.
+- celld (v0.6.3). Read from its source and docs: `crates/celld` depends on `rusqlite` with the bundled SQLite, native in the node process, and `docs/security.md` says "celld trusts the application code" and "Do not run code from mutually distrusting tenants in one fleet". Measured on the same demo app in the second workerd comparison run, in `celld dev` mode (single node, local object store), so its cold and write numbers are not like for like. It was also run in production mode against RustFS, an S3-compatible server on loopback with local disk. That is a best case for celld with no network, and celld's docs do not qualify RustFS for production.
+- workerd. Measured in the same-app comparison against workerd 1.20261110.1, JavaScript worker with a SQLite-backed Durable Object, same app. Waking an idle app with data on disk and its code in the page cache is close (890 us against 1067 us at p50 in the latest session, 1.08x slower in the first, so no advantage is claimed. After a reboot (cold page cache) the first request took 5.4 ms with no read-ahead, 3.3 ms with the 1 GB default and 1.8 ms against workerd's 2.5 ms with `--prefetch-mb 4096` covering the apps' code), and a first request that seeds the database was slower on spared in all four sessions. Warm requests at one connection were 2.34x, 2.51x, 2.88x and 2.62x lower at p50 across four sessions (121 against 283 us, 108 against 271 us, 162 against 467 us, 148 against 388 us). With 16 connections on one saturated CPU, p99 was 2.85x to 4.57x lower, and with 10% writes at one connection spared's p99 was higher in two of the four sessions. Memory for N different apps, measured as totals: spared 15.4 MiB + 4.4 MiB per app by PSS against workerd 50.9 MiB + 2.6 MiB, so spared uses less up to about 20 apps and workerd less beyond (889 against 574 MiB at 200). By unreclaimable memory (RssAnon) spared is lower at every count (108 against 516 MiB at 200), but a cgroup limit counts page cache, and there spared used 1.84x workerd's memory at 200 apps. Identical apps cost 0.28 MiB each. See `docs/benchmarks.md`. workerd runs JavaScript on V8; spared runs Rust on wasmtime; the comparison is not like for like.
+- Cloudflare Durable Objects. spared's one-owner-per-app rule serializes writes the way a Durable Object does. That is a design reference, not a tested equivalence. 'Better data isolation' means one thing: in workerd, the open-source Workers runtime, the SQLite engine behind a Durable Object runs natively in the one process all apps share, while in spared the engine and the database file sit inside each app's own sandbox, so a SQLite bug one app reaches stays in that app. It is a claim about where the database engine runs, not about Cloudflare's hosted service, which was not run.
+
+## Not built yet
+
+- Point-in-time restore. Backups exist (see above), so you can go back to a backup you took, not to an arbitrary moment. Backups also stay on the server's own disk; nothing copies them off the machine.
+- Multi-node. One host process on one machine.
+- WebSockets.
+- Cron and scheduled jobs.
+- Browser sync. SQLite in Wasm leaves the path open; no code exists.
+- Code sharing between apps with different binaries. Identical deployments share one compiled copy (see memory above).
+- Authentication on the admin API beyond one shared bearer token (no users, no TLS).
+- Tracing and OpenTelemetry export. There is an access log and a Prometheus metrics endpoint (see [Observability](#observability)); nothing else.
+- Migration code for the data directory. One format exists; the stamp and the refusal are built, an in-place upgrade is not needed yet.
+- Power-loss durability testing.
+- An outside security review.

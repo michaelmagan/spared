@@ -1,0 +1,46 @@
+same: GET / (200 text/html; charset=utf-8, 3893 bytes)
+same: GET /api/items (200 application/json, 1123 bytes)
+same: GET /missing (404 , 10 bytes)
+same: POST /api/items (400 , 9 bytes)
+same: POST /api/items (201 application/json, 55 bytes)
+same: GET / (200 text/html; charset=utf-8, 3910 bytes)
+same: GET /api/items (200 application/json, 1123 bytes)
+latency round 1: spared
+latency round 1: native
+latency round 2: native
+latency round 2: spared
+latency round 3: spared
+latency round 3: native
+latency round 4: native
+latency round 4: spared
+latency round 5: spared
+latency round 5: native
+warm spared_c1    p50    161 p99    311 us (3 runs, 0 errors)
+warm spared_c16   p50   2388 p99   5678 us (3 runs, 0 errors)
+warm native_c1    p50     59 p99    131 us (3 runs, 0 errors)
+warm native_c16   p50    540 p99   1748 us (3 runs, 0 errors)
+cold spared       p50      935 p99     2892 us (3 runs, 0 errors)
+cold native       p50     5052 p99    11290 us (3 runs, 0 errors)
+cold container    p50   183929 p99   204450 us (3 runs, 0 errors)
+memory native-distinct  first Pss         0.7 MiB + N x  2831.3 KiB (res 439)
+memory native-distinct  first RssAnon    -0.0 MiB + N x   421.3 KiB (res 23)
+memory native-distinct  first RssFile     0.0 MiB + N x  4712.3 KiB (res 480)
+memory native-same      first Pss         3.1 MiB + N x   450.8 KiB (res 479)
+memory native-same      first RssAnon    -0.0 MiB + N x   423.5 KiB (res 21)
+memory native-same      first RssFile     0.1 MiB + N x  4751.3 KiB (res 285)
+memory spared-distinct  first Pss        18.3 MiB + N x  4502.8 KiB (res 574)
+memory spared-distinct  first RssAnon     1.4 MiB + N x   566.4 KiB (res 74)
+memory spared-distinct  first RssFile    18.9 MiB + N x  3959.1 KiB (res 515)
+container app      Pss         3.2 MiB + N x   355.1 KiB (res 115)
+container app      RssAnon     0.0 MiB + N x   350.2 KiB (res 6)
+container shim     Pss         7.3 MiB + N x  3844.2 KiB (res 466)
+container shim     RssAnon     0.1 MiB + N x  3834.9 KiB (res 387)
+container proxy    Pss         2.4 MiB + N x  1491.0 KiB (res 771)
+container proxy    RssAnon     0.0 MiB + N x  1460.0 KiB (res 820)
+container daemons  Pss       146.4 MiB + N x   734.2 KiB (res 5643)
+container daemons  RssAnon    54.1 MiB + N x   692.5 KiB (res 5646)
+container all      Pss       159.4 MiB + N x  6424.5 KiB (res 5977)
+container all      RssAnon    54.3 MiB + N x  6337.6 KiB (res 5648)
+container n=1: per container (app+shim+proxy) 18653 KiB PSS, start p50 194323 us
+container n=10: per container (app+shim+proxy) 7062 KiB PSS, start p50 191591 us
+container n=30: per container (app+shim+proxy) 6113 KiB PSS, start p50 195941 us

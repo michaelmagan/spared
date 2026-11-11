@@ -1,0 +1,1 @@
+{"journal_mode":"TRUNCATE","trials":100,"integrity_failures":0,"trials_with_lost_commits":0,"acked_commits_total":2549,"guest_flags":"shipped flags with HAVE_PREAD/HAVE_PWRITE, MEMSTATUS=0, OMIT_SHARED_CACHE, USE_ALLOCA","host_path":"async linker, allow_blocking_current_thread"}

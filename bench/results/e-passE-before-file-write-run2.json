@@ -1,0 +1,1 @@
+{"body_len":4,"body_len_changed":0,"errors":0,"first_byte_us":{"max":10962,"mean":3691,"min":2527,"p50":3385,"p90":4835,"p99":7816},"full_body_us":{"max":10964,"mean":3693,"min":2528,"p50":3389,"p90":4837,"p99":7819},"host":"passe.localhost","path":"/file-write","requests":1000,"server_cpu_us_per_request":2952,"server_pids":[1811],"wall_s":3.695907467,"warmup":20}

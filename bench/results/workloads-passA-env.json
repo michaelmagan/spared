@@ -1,0 +1,26 @@
+{
+ "kernel": "Linux 6.18.44-fc-v338",
+ "cpu": "Intel(R) Xeon(R) Processor @ 2.10GHz",
+ "nproc": "4",
+ "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+ "workerd_npm": "1.20261110.1",
+ "workerd_version": "workerd 2026-11-10",
+ "marked": "18.2.0",
+ "rust_crates": {
+  "wstd": "0.6.8",
+  "rusqlite": "0.41.1",
+  "libsqlite3-sys": "0.39.1",
+  "serde_json": "1.0.154",
+  "sha2": "0.10.9",
+  "hmac": "0.12.1",
+  "pbkdf2": "0.12.2",
+  "pulldown-cmark": "0.13.6",
+  "flate2": "1.1.11",
+  "miniz_oxide": "0.9.1",
+  "regex": "1.13.1",
+  "regex-automata": "0.4.18",
+  "base64": "0.22.1"
+ },
+ "release_profile": "opt-level=3, lto=true, codegen-units=1, strip=true (same as apps/demo-spared)",
+ "spared_limits": "name = \"workloads\"\n\n[grants]\ndata = true\n\n[limits]\nmemory_mb = 256\ncpu_ms = 5000\ndeadline_ms = 30000\nmax_outbound = 0\n"
+}

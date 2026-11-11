@@ -1,0 +1,1 @@
+{"suite": "workloads", "segment": "workloads", "start": "2026-11-10T23:35:43Z", "end": "2026-11-11T00:18:06Z", "loadavg1_at_start": 0.26, "steal_jiffies_before": 158229, "steal_jiffies_after": 161048, "steal_delta": 2819, "all_cpu_jiffies_delta": 1015896, "steal_pct": 0.277}

@@ -1,0 +1,1 @@
+{"body_len":31,"body_len_changed":0,"errors":0,"first_byte_us":{"max":41327,"mean":13955,"min":10208,"p50":12650,"p90":17925,"p99":29539},"full_body_us":{"max":41331,"mean":13958,"min":10210,"p50":12654,"p90":17927,"p99":29542},"host":"workloads.localhost","path":"/w/sql-write","requests":300,"server_cpu_us_per_request":9944,"server_pids":[671],"wall_s":4.188592025,"warmup":20}

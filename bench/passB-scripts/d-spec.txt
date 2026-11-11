@@ -1,0 +1,33 @@
+# name|target|bin|NA|proto|wait|cpus|extra server flags
+# restart: cache dropped, then the server starts. b5: server started, cache dropped, then requests. warm: every file read first.
+n500-restart-before|spared|before|500|restart|4|0|
+n500-restart-off|spared|after|500|restart|4|0|--prefetch-mb 0
+n500-restart-done1024|spared|after|500|restart|finished|0|
+n500-restart-done4096|spared|after|500|restart|finished|0|--prefetch-mb 4096
+n500-restart-running1024|spared|after|500|restart|none|0|
+n500-restart-running4096|spared|after|500|restart|none|0|--prefetch-mb 4096
+n500-restart-startonly4096|spared|startonly|500|restart|finished|0|--prefetch-mb 4096
+n500-restart-wakeonly|spared|wakeonly|500|restart|4|0|
+n500-restart-before-2cpu|spared|before|500|restart|4|0,1|
+n500-restart-running4096-2cpu|spared|after|500|restart|none|0,1|--prefetch-mb 4096
+n500-b5-before|spared|before|500|b5|-|0|
+n500-b5-after|spared|after|500|b5|-|0|
+n500-b5-wakeonly|spared|wakeonly|500|b5|-|0|
+n500-b5-off|spared|after|500|b5|-|0|--prefetch-mb 0
+n500-warm-before|spared|before|500|warm|-|0|
+n500-warm-after|spared|after|500|warm|-|0|
+n500-restart-wd|workerd|-|500|restart|4|0|
+n500-b5-wd|workerd|-|500|b5|-|0|
+n500-warm-wd|workerd|-|500|warm|-|0|
+n50-restart-before|spared|before|50|restart|3|0|
+n50-restart-done|spared|after|50|restart|finished|0|
+n50-restart-running|spared|after|50|restart|none|0|
+n50-restart-wakeonly|spared|wakeonly|50|restart|3|0|
+n50-b5-before|spared|before|50|b5|-|0|
+n50-b5-after|spared|after|50|b5|-|0|
+n50-b5-wakeonly|spared|wakeonly|50|b5|-|0|
+n50-warm-before|spared|before|50|warm|-|0|
+n50-warm-after|spared|after|50|warm|-|0|
+n50-restart-wd|workerd|-|50|restart|3|0|
+n50-b5-wd|workerd|-|50|b5|-|0|
+n50-warm-wd|workerd|-|50|warm|-|0|

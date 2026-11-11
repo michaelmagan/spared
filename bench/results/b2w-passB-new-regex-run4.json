@@ -1,0 +1,1 @@
+{"body_len":51,"body_len_changed":0,"errors":0,"first_byte_us":{"max":28196,"mean":13850,"min":12385,"p50":13172,"p90":16263,"p99":22167},"full_body_us":{"max":28199,"mean":13852,"min":12387,"p50":13174,"p90":16266,"p99":22170},"host":"workloads.localhost","path":"/w/regex","requests":200,"server_cpu_us_per_request":13037,"server_pids":[1361],"wall_s":2.771054845,"warmup":20}

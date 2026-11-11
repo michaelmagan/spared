@@ -1,0 +1,15 @@
+spin_manifest_version = 2
+
+[application]
+name = "demo-spin"
+version = "0.0.0"
+
+[[trigger.http]]
+route = "/..."
+component = "demo-spin"
+
+[component.demo-spin]
+source = "target/wasm32-wasip2/release/demo_spin.wasm"
+sqlite_databases = ["default"]
+[component.demo-spin.build]
+command = "cargo build --target wasm32-wasip2 --release -j2"

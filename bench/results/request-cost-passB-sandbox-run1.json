@@ -1,0 +1,18 @@
+{
+  "benchmark": "request-cost",
+  "cpu_sys_us_per_request": 158.3251,
+  "cpu_us_per_request": 580.4709,
+  "cpu_user_us_per_request": 422.1458,
+  "latency_us": {
+    "max": 38172.271,
+    "mean": 1300.4337079,
+    "p50": 1178.89,
+    "p99": 3676.351
+  },
+  "requests": 10000,
+  "response_bytes": 372,
+  "run": 1,
+  "variant": "sandbox",
+  "wall_s": 13.041352482,
+  "warmup": 500
+}

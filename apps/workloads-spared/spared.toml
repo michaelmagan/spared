@@ -1,0 +1,10 @@
+name = "workloads"
+
+[grants]
+data = true
+
+[limits]
+memory_mb = 256
+cpu_ms = 5000
+deadline_ms = 30000
+max_outbound = 0

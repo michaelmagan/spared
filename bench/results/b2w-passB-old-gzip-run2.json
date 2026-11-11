@@ -1,0 +1,1 @@
+{"body_len":35,"body_len_changed":0,"errors":0,"first_byte_us":{"max":58234,"mean":33920,"min":29915,"p50":32724,"p90":37956,"p99":46888},"full_body_us":{"max":58238,"mean":33924,"min":29917,"p50":32727,"p90":37959,"p99":46933},"host":"workloads.localhost","path":"/w/gzip","requests":200,"server_cpu_us_per_request":32309,"server_pids":[32087],"wall_s":6.785854131,"warmup":20}

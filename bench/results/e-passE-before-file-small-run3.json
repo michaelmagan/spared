@@ -1,0 +1,1 @@
+{"body_len":3,"body_len_changed":0,"errors":0,"first_byte_us":{"max":8268,"mean":2241,"min":1366,"p50":1894,"p90":3663,"p99":5562},"full_body_us":{"max":8270,"mean":2243,"min":1367,"p50":1900,"p90":3665,"p99":5564},"host":"passe.localhost","path":"/file-small","requests":500,"server_cpu_us_per_request":1732,"server_pids":[2316],"wall_s":1.125518059,"warmup":20}

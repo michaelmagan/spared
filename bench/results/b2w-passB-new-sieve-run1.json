@@ -1,0 +1,1 @@
+{"body_len":48,"body_len_changed":0,"errors":0,"first_byte_us":{"max":21471,"mean":11654,"min":9676,"p50":11093,"p90":13833,"p99":17997},"full_body_us":{"max":21474,"mean":11657,"min":9678,"p50":11095,"p90":13835,"p99":18000},"host":"workloads.localhost","path":"/w/sieve","requests":200,"server_cpu_us_per_request":10618,"server_pids":[30952],"wall_s":2.332081605,"warmup":20}

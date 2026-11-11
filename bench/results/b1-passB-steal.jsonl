@@ -1,0 +1,1 @@
+{"suite": "b1", "segment": "request-cost", "start": "2026-11-11T00:47:49Z", "end": "2026-11-11T00:51:20Z", "loadavg1_at_start": 0.29, "steal_jiffies_before": 7199, "steal_jiffies_after": 7697, "steal_delta": 498, "all_cpu_jiffies_delta": 84127, "steal_pct": 0.592}

@@ -1,0 +1,6 @@
+{"mode":"nodrop","run":1,"ready_s":0.242,"pss_kb":987987}
+{"mode":"drop","run":1,"ready_s":0.244,"pss_kb":948957}
+{"mode":"drop","run":2,"ready_s":0.322,"pss_kb":948020}
+{"mode":"nodrop","run":2,"ready_s":0.309,"pss_kb":965680}
+{"mode":"nodrop","run":3,"ready_s":0.24,"pss_kb":965765}
+{"mode":"drop","run":3,"ready_s":0.225,"pss_kb":947855}

@@ -1,0 +1,92 @@
+{
+ "target": "container-gvisor",
+ "runtime": "runsc",
+ "rep": 1,
+ "image": "spared-ctr-demo:bench",
+ "what": "docker run -d / docker start, FROM scratch static binary, default bridge network, published loopback port, --cpuset-cpus 0, database already seeded; first response byte measured from the start of the docker command, polled every 0.5 ms after the command returns",
+ "docker_run": {
+  "first_byte_us": {
+   "p50": 196881,
+   "p99": 252079,
+   "min": 175743,
+   "max": 252079
+  },
+  "first_byte_us_all": [
+   196881,
+   230382,
+   222211,
+   231070,
+   193704,
+   196770,
+   252079,
+   185172,
+   175743,
+   207025
+  ],
+  "docker_command_returned_us_all": [
+   171443,
+   216101,
+   205420,
+   203346,
+   175334,
+   175100,
+   232199,
+   168339,
+   159630,
+   191546
+  ]
+ },
+ "docker_start": {
+  "first_byte_us": {
+   "p50": 160078,
+   "p99": 177944,
+   "min": 154219,
+   "max": 177944
+  },
+  "first_byte_us_all": [
+   166014,
+   160078,
+   154219,
+   172851,
+   162021,
+   155781,
+   177944,
+   174759,
+   158263,
+   158692
+  ],
+  "docker_command_returned_us_all": [
+   150092,
+   146721,
+   136274,
+   157631,
+   135420,
+   140694,
+   160393,
+   160220,
+   145064,
+   144826
+  ]
+ },
+ "docker_start_via_container_ip": {
+  "first_byte_us": {
+   "p50": 182167,
+   "p99": 202566,
+   "min": 162848,
+   "max": 202566
+  },
+  "first_byte_us_all": [
+   162848,
+   168722,
+   202566,
+   180881,
+   172976,
+   184799,
+   191912,
+   191917,
+   183567,
+   182167
+  ]
+ },
+ "docker_version": "29.9.2"
+}

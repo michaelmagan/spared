@@ -1,0 +1,147 @@
+{
+ "target": "container-gvisor",
+ "runtime": "runsc",
+ "n": 1,
+ "rep": 4,
+ "images": "spared-ctr-dist:v0..0 (one distinct static binary per container)",
+ "server_cpu": "0",
+ "docker_version": "29.9.2",
+ "daemons_before_kb": {
+  "VmRSS": 167396,
+  "RssAnon": 67544,
+  "RssFile": 99852,
+  "Pss": 164410,
+  "Pss_Anon": 67544,
+  "Pss_File": 96866,
+  "pids": 2
+ },
+ "start_to_first_byte_us": [
+  214984
+ ],
+ "snapshots_kb": {
+  "first": {
+   "app": {
+    "VmRSS": 32612,
+    "RssAnon": 5460,
+    "RssFile": 26768,
+    "Pss": 32113,
+    "Pss_Anon": 5446,
+    "Pss_File": 26454,
+    "pids": 1
+   },
+   "shim": {
+    "VmRSS": 11128,
+    "RssAnon": 3776,
+    "RssFile": 7352,
+    "Pss": 11120,
+    "Pss_Anon": 3776,
+    "Pss_File": 7344,
+    "pids": 1
+   },
+   "shim_names": [
+    "containerd-shim"
+   ],
+   "tree_of_shims": {
+    "VmRSS": 62392,
+    "RssAnon": 11076,
+    "RssFile": 49988,
+    "Pss": 60883,
+    "Pss_Anon": 11020,
+    "Pss_File": 49046,
+    "pids": 7
+   },
+   "tree_comms": [
+    "containerd-shim",
+    "exe",
+    "gvisor_sentry",
+    "runsc-fd-parkin"
+   ],
+   "proxy": {
+    "VmRSS": 5488,
+    "RssAnon": 1508,
+    "RssFile": 3980,
+    "Pss": 3988,
+    "Pss_Anon": 1508,
+    "Pss_File": 2480,
+    "pids": 1
+   },
+   "daemons": {
+    "VmRSS": 166216,
+    "RssAnon": 66364,
+    "RssFile": 99852,
+    "Pss": 163216,
+    "Pss_Anon": 66364,
+    "Pss_File": 96852,
+    "pids": 2
+   },
+   "cgroup_sum_kb": {
+    "usage": 9376,
+    "rss": 7240,
+    "cache": 532,
+    "mapped_file": 516
+   }
+  },
+  "idle15": {
+   "app": {
+    "VmRSS": 32612,
+    "RssAnon": 5460,
+    "RssFile": 26768,
+    "Pss": 32113,
+    "Pss_Anon": 5446,
+    "Pss_File": 26454,
+    "pids": 1
+   },
+   "shim": {
+    "VmRSS": 11128,
+    "RssAnon": 3776,
+    "RssFile": 7352,
+    "Pss": 11120,
+    "Pss_Anon": 3776,
+    "Pss_File": 7344,
+    "pids": 1
+   },
+   "shim_names": [
+    "containerd-shim"
+   ],
+   "tree_of_shims": {
+    "VmRSS": 62392,
+    "RssAnon": 11076,
+    "RssFile": 49988,
+    "Pss": 60883,
+    "Pss_Anon": 11020,
+    "Pss_File": 49046,
+    "pids": 7
+   },
+   "tree_comms": [
+    "containerd-shim",
+    "exe",
+    "gvisor_sentry",
+    "runsc-fd-parkin"
+   ],
+   "proxy": {
+    "VmRSS": 5488,
+    "RssAnon": 1508,
+    "RssFile": 3980,
+    "Pss": 3988,
+    "Pss_Anon": 1508,
+    "Pss_File": 2480,
+    "pids": 1
+   },
+   "daemons": {
+    "VmRSS": 166216,
+    "RssAnon": 66364,
+    "RssFile": 99852,
+    "Pss": 163216,
+    "Pss_Anon": 66364,
+    "Pss_File": 96852,
+    "pids": 2
+   },
+   "cgroup_sum_kb": {
+    "usage": 9376,
+    "rss": 7236,
+    "cache": 532,
+    "mapped_file": 516
+   }
+  }
+ }
+}

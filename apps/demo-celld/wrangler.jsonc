@@ -1,0 +1,10 @@
+{
+  "name": "demo-celld",
+  "main": "worker.js",
+  "compatibility_date": "2026-01-01",
+  "rules": [{ "type": "Text", "globs": ["**/*.html"] }],
+  "durable_objects": {
+    "bindings": [{ "name": "ITEMS", "class_name": "Items" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Items"] }]
+}

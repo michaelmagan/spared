@@ -1,0 +1,10 @@
+package spared:bench;
+
+interface db {
+    exec: func(sql: string, params-json: string) -> result<u64, string>;
+    query: func(sql: string, params-json: string) -> result<string, string>;
+}
+
+world bench-host {
+    import db;
+}

@@ -1,0 +1,12 @@
+spared
+Copyright 2026 Michael Magan
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+It includes third-party software under other licenses. THIRD-PARTY-NOTICES lists it, with the
+license texts: the Rust crates in the spared binary, and the code (SQLite, wasi-libc and Rust
+crates) that is compiled into app components.
+
+crates/spared/src/pinned_send.rs is adapted from wasmtime-wasi-http 50.0.1,
+src/default_send_request.rs (https://github.com/bytecodealliance/wasmtime), which is licensed
+under Apache-2.0 WITH LLVM-exception. The file records its changes in its header.

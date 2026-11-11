@@ -1,0 +1,14 @@
+# EXPERIMENTAL Render blueprint, not yet run against Render. See docs/deploy.md.
+# Render fills in PORT, and the image reads it for the public listener. The admin listener stays
+# on 127.0.0.1 inside the container, and the admin token is generated into the disk on first start.
+services:
+  - type: web
+    name: spared
+    runtime: image
+    image:
+      url: ghcr.io/michaelmagan/spared:0.0.1-preview
+    healthCheckPath: /healthz
+    disk:
+      name: spared-data
+      mountPath: /data
+      sizeGB: 1

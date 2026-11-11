@@ -1,0 +1,135 @@
+{
+ "target": "container",
+ "n": 20,
+ "rep": 5,
+ "images": "spared-ctr-dist:v0..19 (one distinct static binary per container)",
+ "server_cpu": "0",
+ "docker_version": "29.9.2",
+ "daemons_before_kb": {
+  "VmRSS": 182176,
+  "RssAnon": 75828,
+  "RssFile": 106348,
+  "Pss": 179224,
+  "Pss_Anon": 75828,
+  "Pss_File": 103396,
+  "pids": 2
+ },
+ "start_to_first_byte_us": [
+  212206,
+  185216,
+  191779,
+  199210,
+  189209,
+  184739,
+  183691,
+  200387,
+  202360,
+  191840,
+  205763,
+  203828,
+  202670,
+  271358,
+  208071,
+  205128,
+  210749,
+  207374,
+  193921,
+  219259
+ ],
+ "snapshots_kb": {
+  "first": {
+   "app": {
+    "VmRSS": 72236,
+    "RssAnon": 6940,
+    "RssFile": 65296,
+    "Pss": 72156,
+    "Pss_Anon": 6940,
+    "Pss_File": 65216,
+    "pids": 20
+   },
+   "shim": {
+    "VmRSS": 223992,
+    "RssAnon": 77828,
+    "RssFile": 146164,
+    "Pss": 85330,
+    "Pss_Anon": 77828,
+    "Pss_File": 7502,
+    "pids": 20
+   },
+   "shim_names": [
+    "containerd-shim"
+   ],
+   "proxy": {
+    "VmRSS": 107588,
+    "RssAnon": 29160,
+    "RssFile": 78428,
+    "Pss": 32463,
+    "Pss_Anon": 29160,
+    "Pss_File": 3303,
+    "pids": 20
+   },
+   "daemons": {
+    "VmRSS": 190484,
+    "RssAnon": 84136,
+    "RssFile": 106348,
+    "Pss": 187374,
+    "Pss_Anon": 84136,
+    "Pss_File": 103238,
+    "pids": 2
+   },
+   "cgroup_sum_kb": {
+    "usage": 85960,
+    "rss": 6940,
+    "cache": 72912,
+    "mapped_file": 65216
+   }
+  },
+  "idle15": {
+   "app": {
+    "VmRSS": 72236,
+    "RssAnon": 6940,
+    "RssFile": 65296,
+    "Pss": 72156,
+    "Pss_Anon": 6940,
+    "Pss_File": 65216,
+    "pids": 20
+   },
+   "shim": {
+    "VmRSS": 223992,
+    "RssAnon": 77828,
+    "RssFile": 146164,
+    "Pss": 85330,
+    "Pss_Anon": 77828,
+    "Pss_File": 7502,
+    "pids": 20
+   },
+   "shim_names": [
+    "containerd-shim"
+   ],
+   "proxy": {
+    "VmRSS": 107588,
+    "RssAnon": 29160,
+    "RssFile": 78428,
+    "Pss": 32463,
+    "Pss_Anon": 29160,
+    "Pss_File": 3303,
+    "pids": 20
+   },
+   "daemons": {
+    "VmRSS": 190484,
+    "RssAnon": 84136,
+    "RssFile": 106348,
+    "Pss": 187374,
+    "Pss_Anon": 84136,
+    "Pss_File": 103238,
+    "pids": 2
+   },
+   "cgroup_sum_kb": {
+    "usage": 85960,
+    "rss": 6940,
+    "cache": 72912,
+    "mapped_file": 65216
+   }
+  }
+ }
+}

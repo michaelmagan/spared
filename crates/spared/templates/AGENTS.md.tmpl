@@ -1,0 +1,13 @@
+# __NAME__
+
+A spared app: a Rust HTTP handler compiled to a wasm32-wasip2 component, with one SQLite file at `/data/app.db`.
+
+- Edit `src/main.rs`. Routes are a `match` on `(method, path)`. `src/spared.rs` holds the helpers (`with_db`, `json_response`, `html_response`, `text_response`, `read_json`); set the table definitions in `SCHEMA`.
+- `spared test` builds and requests `/` in a sandbox, printing status and body. Add `--path <route>` for more (GET only).
+- `spared deploy` publishes to the local server (`spared serve` must be running) and prints the URL.
+- Building runs this project's build scripts on your machine, like any cargo build.
+- `spared logs __NAME__` shows the app's stdout and panics (it says so when there is no output yet). `spared ps` lists apps. `spared dev` rebuilds on every save.
+- Permissions live in `spared.toml`: outbound HTTP needs `fetch = ["host"]`; no raw sockets; files only under `/data`.
+- Every error prints an `error[kind]:` line and a `fix:` line; follow the fix line.
+
+Full guide: https://github.com/michaelmagan/spared/blob/main/AGENTS.md

@@ -1,0 +1,27 @@
+run 1 sandbox done (loadavg 0.40)
+run 1 host done (loadavg 0.64)
+run 2 host done (loadavg 0.54)
+run 2 sandbox done (loadavg 0.58)
+run 3 sandbox done (loadavg 0.64)
+run 3 host done (loadavg 0.54)
+run 4 host done (loadavg 0.54)
+run 4 sandbox done (loadavg 0.58)
+run 5 sandbox done (loadavg 0.57)
+run 5 host done (loadavg 0.56)
+variant    run    p50 us    p99 us    max us  cpu us/req
+sandbox      1    1178.9    3676.4   38172.3       580.5
+sandbox      2    1132.1    3329.3   10909.5       562.6
+sandbox      3    1135.2    3378.1   27169.7       560.4
+sandbox      4    1123.6    3441.0   14128.2       557.2
+sandbox      5    1055.7    3224.4    9463.5       532.0
+host         1     804.6    2928.0   15304.1       276.0
+host         2     777.8    2867.2   23561.9       270.0
+host         3     802.1    2938.2   32179.5       276.9
+host         4     832.8    3129.3   38784.5       285.4
+host         5     727.6    2001.4   15205.3       259.5
+
+median over 5 runs: (a) p50 1132.1 us, p99 3378.1 us, cpu 560.4 us/req; (b) p50 802.1 us
+(a).p50 - (b).p50 = 330.0 us
+500 hot apps x 10 req/s = 5000 req/s; cpu needed = 2801754 us per second of one core (limit 1,000,000)
+PASS  (a).p99 <= 5 ms [3.378 ms] AND (a).p50-(b).p50 < 1 ms [0.330 ms]: True
+FAIL  (a).p99 > 20 ms: False; cpu_us_per_request*5000 > 1,000,000: True; fail: True

@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Demo List</title>
+<style>
+:root{--bg:#faf8f5;--fg:#1d1b19;--muted:#6b665f;--accent:#c2410c;--card:#fff;--line:#e7e2da}
+*{box-sizing:border-box}
+body{margin:0;font:16px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--fg)}
+header{padding:2.5rem 1.25rem 1rem;max-width:42rem;margin:0 auto}
+h1{margin:0 0 .25rem;font-size:2rem;letter-spacing:-.02em}
+p.sub{margin:0;color:var(--muted)}
+main{max-width:42rem;margin:0 auto;padding:0 1.25rem 3rem}
+form{display:flex;gap:.5rem;margin:1.5rem 0}
+input[type=text]{flex:1;padding:.65rem .8rem;border:1px solid var(--line);border-radius:8px;font:inherit;background:var(--card);color:inherit}
+input[type=text]:focus{outline:2px solid var(--accent);outline-offset:1px}
+button{padding:.65rem 1.1rem;border:0;border-radius:8px;background:var(--accent);color:#fff;font:inherit;font-weight:600;cursor:pointer}
+button:hover{filter:brightness(1.1)}
+h2{font-size:1.1rem;margin:2rem 0 .5rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+ul{list-style:none;margin:0;padding:0;border:1px solid var(--line);border-radius:10px;background:var(--card);overflow:hidden}
+li{display:flex;justify-content:space-between;gap:1rem;padding:.7rem .9rem;border-bottom:1px solid var(--line)}
+li:last-child{border-bottom:0}
+li:nth-child(even){background:#fdfbf8}
+li time{color:var(--muted);font-size:.85rem;white-space:nowrap}
+footer{max-width:42rem;margin:0 auto;padding:1rem 1.25rem 2rem;color:var(--muted);font-size:.85rem}
+a{color:var(--accent)}
+@media (max-width:480px){h1{font-size:1.6rem}li{flex-direction:column;gap:.1rem}}
+@media (prefers-color-scheme:dark){:root{--bg:#161412;--fg:#f1ede6;--muted:#a39d93;--card:#1f1c19;--line:#34302b}li:nth-child(even){background:#24211d}}
+</style>
+</head>
+<body>
+<header>
+<h1>Demo List</h1>
+<p class="sub">A small server-rendered page backed by SQLite. Newest items first.</p>
+</header>
+<main>
+<form id="f" method="post" action="api/items">
+<input type="text" name="text" placeholder="Add an item" required maxlength="200" autocomplete="off">
+<button type="submit">Add</button>
+</form>
+<h2>Latest 20 items</h2>
+<ul id="items">
+<!--ITEMS-->
+</ul>
+</main>
+<footer>Items are stored durably. JSON API: <a href="api/items">GET /api/items</a>, POST /api/items with {"text": "..."}.</footer>
+<script>
+document.getElementById('f').addEventListener('submit',async function(e){e.preventDefault();var i=this.elements.text;var r=await fetch("api/items",{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({text:i.value})});if(r.ok)location.reload()});
+</script>
+</body>
+</html>

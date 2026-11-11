@@ -1,0 +1,2 @@
+{"label": "request-cost", "time": "2026-11-11T00:47:49.845527Z", "kernel": "6.18.44-fc-v378", "cpu": "model name\t: Intel(R) Xeon(R) Processor @ 2.10GHz", "nproc": "4", "loadavg": "0.29 1.88 1.69 1/112 23636", "mem_free_mb": "15404", "head": "ee15835"}
+{"label": "crash", "time": "2026-11-11T03:10:22.839674Z", "kernel": "6.18.44-fc-v378", "cpu": "model name\t: Intel(R) Xeon(R) Processor @ 2.10GHz", "nproc": "4", "loadavg": "0.29 0.31 0.33 1/110 26864", "mem_free_mb": "15491", "head": "7b65a87"}

@@ -1,0 +1,1 @@
+prefetch: 151 components, 1022 MB read into the page cache in 850 ms (161 ms of CPU); 349 not read because the budget (--prefetch-mb) ran out

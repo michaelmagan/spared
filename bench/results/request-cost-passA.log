@@ -1,0 +1,27 @@
+Error: failed to open file
+
+Caused by:
+    No such file or directory (os error 2)
+
+Stack backtrace:
+   0: wasmtime_internal_core::error::backtrace::capture
+   1: <wasmtime_internal_core::error::error::Error>::new::<std::io::error::Error>
+   2: wasmtime::runtime::vm::sys::unix::mmap::open_file_for_mmap
+   3: <wasmtime::runtime::component::component::Component>::deserialize_file::<&std::path::PathBuf>
+   4: spared::lab::bench3b::run::{closure#0}
+   5: spared::lab::run::{closure#0}
+   6: <tokio::runtime::scheduler::current_thread::Context>::enter::<core::task::poll::Poll<core::result::Result<core::convert::Infallible, wasmtime_internal_core::error::error::Error>>, <tokio::runtime::scheduler::current_thread::CoreGuard>::block_on<spared::run::{closure#0}>::{closure#0}::{closure#0}>
+   7: <std::thread::local::LocalKey<tokio::runtime::context::Context>>::with::<tokio::runtime::context::set_scheduler<(alloc::boxed::Box<tokio::runtime::scheduler::current_thread::Core>, core::option::Option<core::result::Result<core::convert::Infallible, wasmtime_internal_core::error::error::Error>>), <tokio::runtime::scheduler::current_thread::CoreGuard>::enter<<tokio::runtime::scheduler::current_thread::CoreGuard>::block_on<spared::run::{closure#0}>::{closure#0}, core::option::Option<core::result::Result<core::convert::Infallible, wasmtime_internal_core::error::error::Error>>>::{closure#0}>::{closure#0}, (alloc::boxed::Box<tokio::runtime::scheduler::current_thread::Core>, core::option::Option<core::result::Result<core::convert::Infallible, wasmtime_internal_core::error::error::Error>>)>
+   8: <tokio::runtime::scheduler::current_thread::CoreGuard>::block_on::<spared::run::{closure#0}>
+   9: tokio::runtime::context::runtime::enter_runtime::<<tokio::runtime::scheduler::current_thread::CurrentThread>::block_on<spared::run::{closure#0}>::{closure#0}, core::result::Result<core::convert::Infallible, wasmtime_internal_core::error::error::Error>>
+  10: spared::main
+  11: std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> core::result::Result<(), wasmtime_internal_core::error::error::Error>, core::result::Result<(), wasmtime_internal_core::error::error::Error>>
+  12: std::rt::lang_start::<core::result::Result<(), wasmtime_internal_core::error::error::Error>>::{closure#0}
+  13: std::rt::lang_start_internal
+  14: main
+  15: __libc_start_call_main
+             at ./csu/../sysdeps/nptl/libc_start_call_main.h:58:16
+  16: __libc_start_main_impl
+             at ./csu/../csu/libc-start.c:360:3
+  17: _start
+

@@ -1,0 +1,22 @@
+# name|target|NA|UNIQ|SEEDED|DROP|WARM
+n50-all|spared|50|50|1|all|1
+n50-none|spared|50|50|1|none|1
+n50-cwasm|spared|50|50|1|cwasm|1
+n50-db|spared|50|50|1|db|1
+n50-cwasmdb|spared|50|50|1|cwasmdb|1
+n50-allbutcwasm|spared|50|50|1|allbutcwasm|1
+n50-allbutdb|spared|50|50|1|allbutdb|1
+n50-empty-all|spared|50|50|0|all|1
+n50-nowarm-all|spared|50|50|1|all|0
+n50u10-all|spared|50|10|1|all|1
+n500u500-all|spared|500|500|1|all|1
+n500u500-none|spared|500|500|1|none|1
+n500u500-cwasm|spared|500|500|1|cwasm|1
+n500u200-all|spared|500|200|1|all|1
+n50-all|workerd|50|50|1|all|1
+n50-none|workerd|50|50|1|none|1
+n50-db|workerd|50|50|1|db|1
+n50-empty-all|workerd|50|50|0|all|1
+n50-nowarm-all|workerd|50|50|1|all|0
+n500-all|workerd|500|500|1|all|1
+n500-none|workerd|500|500|1|none|1

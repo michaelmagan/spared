@@ -1,0 +1,628 @@
+{
+ "zero_app_server_kb": {
+  "spared": {
+   "Pss": 10863,
+   "Pss_Anon": 1128,
+   "Pss_File": 9735,
+   "RssAnon": 1128,
+   "RssFile": 11688
+  },
+  "workerd": {
+   "Pss": 25762,
+   "Pss_Anon": 6520,
+   "Pss_File": 19318,
+   "RssAnon": 6520,
+   "RssFile": 21204
+  }
+ },
+ "fits": {
+  "spared-distinct": {
+   "startup": {
+    "Pss": {
+     "fixed_kb": 12390,
+     "slope_kb": 676.9,
+     "max_abs_residual_kb": 1350,
+     "points": 30
+    },
+    "Pss_Anon": {
+     "fixed_kb": 1247,
+     "slope_kb": 220.3,
+     "max_abs_residual_kb": 15,
+     "points": 30
+    },
+    "Pss_File": {
+     "fixed_kb": 11144,
+     "slope_kb": 456.7,
+     "max_abs_residual_kb": 1347,
+     "points": 30
+    },
+    "RssAnon": {
+     "fixed_kb": 1247,
+     "slope_kb": 220.3,
+     "max_abs_residual_kb": 15,
+     "points": 30
+    },
+    "RssFile": {
+     "fixed_kb": 13079,
+     "slope_kb": 456.7,
+     "max_abs_residual_kb": 1357,
+     "points": 30
+    }
+   },
+   "first": {
+    "Pss": {
+     "fixed_kb": 15766,
+     "slope_kb": 4476.2,
+     "max_abs_residual_kb": 1823,
+     "points": 30
+    },
+    "Pss_Anon": {
+     "fixed_kb": 1428,
+     "slope_kb": 546.0,
+     "max_abs_residual_kb": 129,
+     "points": 30
+    },
+    "Pss_File": {
+     "fixed_kb": 14338,
+     "slope_kb": 3930.2,
+     "max_abs_residual_kb": 1697,
+     "points": 30
+    },
+    "RssAnon": {
+     "fixed_kb": 1428,
+     "slope_kb": 546.0,
+     "max_abs_residual_kb": 129,
+     "points": 30
+    },
+    "RssFile": {
+     "fixed_kb": 16403,
+     "slope_kb": 3946.5,
+     "max_abs_residual_kb": 1632,
+     "points": 30
+    }
+   },
+   "steady": {
+    "Pss": {
+     "fixed_kb": 16463,
+     "slope_kb": 4549.7,
+     "max_abs_residual_kb": 2781,
+     "points": 30
+    },
+    "Pss_Anon": {
+     "fixed_kb": 1611,
+     "slope_kb": 557.2,
+     "max_abs_residual_kb": 317,
+     "points": 30
+    },
+    "Pss_File": {
+     "fixed_kb": 14853,
+     "slope_kb": 3992.5,
+     "max_abs_residual_kb": 2672,
+     "points": 30
+    },
+    "RssAnon": {
+     "fixed_kb": 1611,
+     "slope_kb": 557.2,
+     "max_abs_residual_kb": 317,
+     "points": 30
+    },
+    "RssFile": {
+     "fixed_kb": 16917,
+     "slope_kb": 4008.7,
+     "max_abs_residual_kb": 2607,
+     "points": 30
+    }
+   }
+  },
+  "workerd-distinct": {
+   "startup": {
+    "Pss": {
+     "fixed_kb": 52867,
+     "slope_kb": 2055.1,
+     "max_abs_residual_kb": 16028,
+     "points": 30
+    },
+    "Pss_Anon": {
+     "fixed_kb": 11189,
+     "slope_kb": 2051.1,
+     "max_abs_residual_kb": 12110,
+     "points": 30
+    },
+    "Pss_File": {
+     "fixed_kb": 41677,
+     "slope_kb": 4.0,
+     "max_abs_residual_kb": 4344,
+     "points": 30
+    },
+    "RssAnon": {
+     "fixed_kb": 11193,
+     "slope_kb": 2050.9,
+     "max_abs_residual_kb": 12189,
+     "points": 30
+    },
+    "RssFile": {
+     "fixed_kb": 43567,
+     "slope_kb": 4.0,
+     "max_abs_residual_kb": 4339,
+     "points": 30
+    }
+   },
+   "first": {
+    "Pss": {
+     "fixed_kb": 52104,
+     "slope_kb": 2676.7,
+     "max_abs_residual_kb": 1846,
+     "points": 30
+    },
+    "Pss_Anon": {
+     "fixed_kb": 6679,
+     "slope_kb": 2607.2,
+     "max_abs_residual_kb": 711,
+     "points": 30
+    },
+    "Pss_File": {
+     "fixed_kb": 45425,
+     "slope_kb": 69.5,
+     "max_abs_residual_kb": 1683,
+     "points": 30
+    },
+    "RssAnon": {
+     "fixed_kb": 6679,
+     "slope_kb": 2607.2,
+     "max_abs_residual_kb": 711,
+     "points": 30
+    },
+    "RssFile": {
+     "fixed_kb": 47315,
+     "slope_kb": 69.5,
+     "max_abs_residual_kb": 1696,
+     "points": 30
+    }
+   },
+   "steady": {
+    "Pss": {
+     "fixed_kb": 58229,
+     "slope_kb": 5300.8,
+     "max_abs_residual_kb": 4725,
+     "points": 30
+    },
+    "Pss_Anon": {
+     "fixed_kb": 8081,
+     "slope_kb": 5244.2,
+     "max_abs_residual_kb": 3533,
+     "points": 30
+    },
+    "Pss_File": {
+     "fixed_kb": 50148,
+     "slope_kb": 56.6,
+     "max_abs_residual_kb": 2548,
+     "points": 30
+    },
+    "RssAnon": {
+     "fixed_kb": 8081,
+     "slope_kb": 5244.2,
+     "max_abs_residual_kb": 3533,
+     "points": 30
+    },
+    "RssFile": {
+     "fixed_kb": 52047,
+     "slope_kb": 56.7,
+     "max_abs_residual_kb": 2531,
+     "points": 30
+    }
+   }
+  }
+ },
+ "medians_kb": {
+  "spared-distinct": {
+   "startup": {
+    "0": {
+     "Pss": 10863,
+     "Pss_Anon": 1128,
+     "Pss_File": 9735,
+     "RssAnon": 1128,
+     "RssFile": 11688,
+     "runs": 5
+    },
+    "1": {
+     "Pss": 12596,
+     "Pss_Anon": 1460,
+     "Pss_File": 11140,
+     "RssAnon": 1460,
+     "RssFile": 13068,
+     "runs": 5
+    },
+    "10": {
+     "Pss": 18339,
+     "Pss_Anon": 3456,
+     "Pss_File": 14887,
+     "RssAnon": 3456,
+     "RssFile": 16824,
+     "runs": 5
+    },
+    "20": {
+     "Pss": 25669,
+     "Pss_Anon": 5660,
+     "Pss_File": 20009,
+     "RssAnon": 5660,
+     "RssFile": 21972,
+     "runs": 5
+    },
+    "50": {
+     "Pss": 46554,
+     "Pss_Anon": 12260,
+     "Pss_File": 34294,
+     "RssAnon": 12260,
+     "RssFile": 36208,
+     "runs": 5
+    },
+    "100": {
+     "Pss": 80497,
+     "Pss_Anon": 23268,
+     "Pss_File": 57229,
+     "RssAnon": 23268,
+     "RssFile": 59152,
+     "runs": 5
+    },
+    "200": {
+     "Pss": 147543,
+     "Pss_Anon": 45308,
+     "Pss_File": 102239,
+     "RssAnon": 45308,
+     "RssFile": 104192,
+     "runs": 5
+    }
+   },
+   "first": {
+    "0": {
+     "Pss": 10863,
+     "Pss_Anon": 1128,
+     "Pss_File": 9735,
+     "RssAnon": 1128,
+     "RssFile": 11688,
+     "runs": 5
+    },
+    "1": {
+     "Pss": 19732,
+     "Pss_Anon": 1868,
+     "Pss_File": 17880,
+     "RssAnon": 1868,
+     "RssFile": 19832,
+     "runs": 5
+    },
+    "10": {
+     "Pss": 59478,
+     "Pss_Anon": 6896,
+     "Pss_File": 52578,
+     "RssAnon": 6896,
+     "RssFile": 54772,
+     "runs": 5
+    },
+    "20": {
+     "Pss": 104957,
+     "Pss_Anon": 12360,
+     "Pss_File": 92601,
+     "RssAnon": 12360,
+     "RssFile": 95084,
+     "runs": 5
+    },
+    "50": {
+     "Pss": 240017,
+     "Pss_Anon": 28776,
+     "Pss_File": 211305,
+     "RssAnon": 28776,
+     "RssFile": 214364,
+     "runs": 5
+    },
+    "100": {
+     "Pss": 464573,
+     "Pss_Anon": 56092,
+     "Pss_File": 408517,
+     "RssAnon": 56092,
+     "RssFile": 412100,
+     "runs": 5
+    },
+    "200": {
+     "Pss": 910486,
+     "Pss_Anon": 110576,
+     "Pss_File": 799898,
+     "RssAnon": 110576,
+     "RssFile": 805176,
+     "runs": 5
+    }
+   },
+   "steady": {
+    "0": {
+     "Pss": 10863,
+     "Pss_Anon": 1128,
+     "Pss_File": 9735,
+     "RssAnon": 1128,
+     "RssFile": 11688,
+     "runs": 5
+    },
+    "1": {
+     "Pss": 20024,
+     "Pss_Anon": 2064,
+     "Pss_File": 17960,
+     "RssAnon": 2064,
+     "RssFile": 19912,
+     "runs": 5
+    },
+    "10": {
+     "Pss": 60582,
+     "Pss_Anon": 7180,
+     "Pss_File": 53402,
+     "RssAnon": 7180,
+     "RssFile": 55596,
+     "runs": 5
+    },
+    "20": {
+     "Pss": 107149,
+     "Pss_Anon": 12748,
+     "Pss_File": 94253,
+     "RssAnon": 12748,
+     "RssFile": 96736,
+     "runs": 5
+    },
+    "50": {
+     "Pss": 244845,
+     "Pss_Anon": 29548,
+     "Pss_File": 215457,
+     "RssAnon": 29548,
+     "RssFile": 218516,
+     "runs": 5
+    },
+    "100": {
+     "Pss": 473497,
+     "Pss_Anon": 57404,
+     "Pss_File": 416237,
+     "RssAnon": 57404,
+     "RssFile": 419820,
+     "runs": 5
+    },
+    "200": {
+     "Pss": 925022,
+     "Pss_Anon": 113004,
+     "Pss_File": 812262,
+     "RssAnon": 113004,
+     "RssFile": 817540,
+     "runs": 5
+    }
+   },
+   "idle15": {},
+   "idle65": {}
+  },
+  "workerd-distinct": {
+   "startup": {
+    "1": {
+     "Pss": 49820,
+     "Pss_Anon": 9072,
+     "Pss_File": 40748,
+     "RssAnon": 9072,
+     "RssFile": 42608,
+     "runs": 5
+    },
+    "10": {
+     "Pss": 70158,
+     "Pss_Anon": 29356,
+     "Pss_File": 40802,
+     "RssAnon": 29356,
+     "RssFile": 42648,
+     "runs": 5
+    },
+    "20": {
+     "Pss": 92417,
+     "Pss_Anon": 50848,
+     "Pss_File": 41557,
+     "RssAnon": 50848,
+     "RssFile": 43488,
+     "runs": 5
+    },
+    "50": {
+     "Pss": 159364,
+     "Pss_Anon": 116700,
+     "Pss_File": 42803,
+     "RssAnon": 116700,
+     "RssFile": 44664,
+     "runs": 5
+    },
+    "100": {
+     "Pss": 272942,
+     "Pss_Anon": 227156,
+     "Pss_File": 45750,
+     "RssAnon": 227156,
+     "RssFile": 47636,
+     "runs": 5
+    },
+    "200": {
+     "Pss": 459669,
+     "Pss_Anon": 417844,
+     "Pss_File": 41825,
+     "RssAnon": 417840,
+     "RssFile": 43672,
+     "runs": 5
+    }
+   },
+   "first": {
+    "1": {
+     "Pss": 54930,
+     "Pss_Anon": 9516,
+     "Pss_File": 45358,
+     "RssAnon": 9516,
+     "RssFile": 47260,
+     "runs": 5
+    },
+    "10": {
+     "Pss": 79070,
+     "Pss_Anon": 33364,
+     "Pss_File": 45706,
+     "RssAnon": 33364,
+     "RssFile": 47576,
+     "runs": 5
+    },
+    "20": {
+     "Pss": 105718,
+     "Pss_Anon": 58772,
+     "Pss_File": 46946,
+     "RssAnon": 58772,
+     "RssFile": 48876,
+     "runs": 5
+    },
+    "50": {
+     "Pss": 185363,
+     "Pss_Anon": 136508,
+     "Pss_File": 48851,
+     "RssAnon": 136508,
+     "RssFile": 50712,
+     "runs": 5
+    },
+    "100": {
+     "Pss": 320177,
+     "Pss_Anon": 266744,
+     "Pss_File": 53445,
+     "RssAnon": 266744,
+     "RssFile": 55296,
+     "runs": 5
+    },
+    "200": {
+     "Pss": 587437,
+     "Pss_Anon": 528608,
+     "Pss_File": 58829,
+     "RssAnon": 528608,
+     "RssFile": 60716,
+     "runs": 5
+    }
+   },
+   "steady": {
+    "1": {
+     "Pss": 62239,
+     "Pss_Anon": 12708,
+     "Pss_File": 49459,
+     "RssAnon": 12708,
+     "RssFile": 51372,
+     "runs": 5
+    },
+    "10": {
+     "Pss": 110821,
+     "Pss_Anon": 60496,
+     "Pss_File": 50274,
+     "RssAnon": 60496,
+     "RssFile": 52164,
+     "runs": 5
+    },
+    "20": {
+     "Pss": 163921,
+     "Pss_Anon": 112696,
+     "Pss_File": 51173,
+     "RssAnon": 112696,
+     "RssFile": 53104,
+     "runs": 5
+    },
+    "50": {
+     "Pss": 323503,
+     "Pss_Anon": 270328,
+     "Pss_File": 53175,
+     "RssAnon": 270328,
+     "RssFile": 55104,
+     "runs": 5
+    },
+    "100": {
+     "Pss": 592016,
+     "Pss_Anon": 534252,
+     "Pss_File": 57616,
+     "RssAnon": 534252,
+     "RssFile": 59488,
+     "runs": 5
+    },
+    "200": {
+     "Pss": 1117235,
+     "Pss_Anon": 1056324,
+     "Pss_File": 60581,
+     "RssAnon": 1056324,
+     "RssFile": 62504,
+     "runs": 5
+    }
+   },
+   "idle15": {},
+   "idle65": {}
+  }
+ },
+ "crossover_n": {
+  "spared-distinct": {
+   "first": {
+    "Pss": [
+     20,
+     "spared lower below this N"
+    ],
+    "RssAnon": [
+     null,
+     "spared lower at every N"
+    ],
+    "Pss_Anon": [
+     null,
+     "spared lower at every N"
+    ]
+   },
+   "steady": {
+    "Pss": [
+     null,
+     "spared lower at every N"
+    ],
+    "RssAnon": [
+     null,
+     "spared lower at every N"
+    ],
+    "Pss_Anon": [
+     null,
+     "spared lower at every N"
+    ]
+   }
+  }
+ },
+ "apps_per_budget": {
+  "spared-distinct": {
+   "first": {
+    "Pss": {
+     "1": 230,
+     "4": 933
+    },
+    "RssAnon": {
+     "1": 1917,
+     "4": 7679
+    }
+   },
+   "steady": {
+    "Pss": {
+     "1": 226,
+     "4": 918
+    },
+    "RssAnon": {
+     "1": 1878,
+     "4": 7524
+    }
+   }
+  },
+  "workerd-distinct": {
+   "first": {
+    "Pss": {
+     "1": 372,
+     "4": 1547
+    },
+    "RssAnon": {
+     "1": 399,
+     "4": 1606
+    }
+   },
+   "steady": {
+    "Pss": {
+     "1": 186,
+     "4": 780
+    },
+    "RssAnon": {
+     "1": 198,
+     "4": 798
+    }
+   }
+  }
+ }
+}

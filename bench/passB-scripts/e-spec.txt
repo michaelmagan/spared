@@ -1,0 +1,10 @@
+# name|target|NA|UNIQ|SEEDED|DROP|WARM|RA(kb, blank=unchanged)|FAULTS
+all-ra128|spared|50|50|1|all|1||1
+none-ra128|spared|50|50|1|none|1||1
+all-ra2048|spared|50|50|1|all|1|2048|1
+all-ra0|spared|50|50|1|all|1|0|1
+cwasm-only|spared|50|50|1|cwasm|1||1
+db-only|spared|50|50|1|db|1||1
+allbutcwasm-cat|spared|50|50|1|allbutcwasm|1||1
+all-ra128|workerd|50|50|1|all|1||1
+none-ra128|workerd|50|50|1|none|1||1

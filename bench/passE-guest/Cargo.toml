@@ -1,0 +1,16 @@
+[package]
+name = "passe-guest"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[workspace]
+
+[dependencies]
+wstd = "0.6.8"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

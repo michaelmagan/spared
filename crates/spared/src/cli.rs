@@ -1,0 +1,3035 @@
+use crate::grants::{Manifest, Maxima, valid_name};
+use crate::sandbox::{CallError, Guarded, TrapKind, call_handler};
+use base64::Engine as _;
+use bytes::Bytes;
+use clap::Subcommand;
+use http_body_util::{BodyExt, Full};
+use serde_json::{Value, json};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, SystemTime};
+use wasmtime::Engine;
+use wasmtime::component::Component;
+use wasmtime_wasi::p2::pipe::MemoryOutputPipe;
+use wasmtime_wasi_http::io::TokioIo;
+use wasmtime_wasi_http::p2::bindings::ProxyPre;
+
+const DEFAULT_ADMIN: &str = "http://127.0.0.1:8081";
+const SDK_VERSION: &str = "25";
+
+/// SHA-256 of each wasi-sdk 25 tarball `spared setup` downloads, in `sha256sum` format. One file
+/// serves this check, the Dockerfile and the tests; CI pins the same x86_64 Linux value.
+const SDK_SHA256: &str = include_str!("../../../scripts/wasi-sdk-sha256.txt");
+
+/// C flags for the guest's SQLite. One file serves this build step, scripts/build-examples.sh and
+/// bench/env.sh; it explains each flag (HAVE_PREAD/HAVE_PWRITE keep a page to one host call).
+const GUEST_CFLAGS: &str = include_str!("../../../scripts/guest-cflags.txt");
+
+/// `CFLAGS_wasm32_wasip2` for a guest build against the wasi-sdk in `sdk`.
+fn guest_cflags(sdk: &str) -> String {
+    let flags: Vec<&str> = GUEST_CFLAGS
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect();
+    format!("--sysroot={sdk}/share/wasi-sysroot {}", flags.join(" "))
+}
+
+#[derive(Subcommand)]
+pub enum UserCmd {
+    /// Create a new app crate in ./<name>, from a template (see `spared templates`). Building the
+    /// app later runs its build scripts on your machine, like any cargo build.
+    New {
+        name: String,
+        /// Template to start from (default: notes). `spared templates` lists them.
+        #[arg(long, short = 't')]
+        template: Option<String>,
+    },
+    /// List the app templates `spared new --template` accepts.
+    Templates,
+    /// Check this machine for what building, testing and serving apps needs.
+    Doctor,
+    /// Install the wasm32-wasip2 target and wasi-sdk 25 into ~/.spared.
+    Setup {
+        /// Print what would be done without changing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Build the app and request it in-process in a temp data dir. Building runs the project's
+    /// build scripts on your machine, like any cargo build.
+    Test {
+        /// Path to GET (repeatable, default /).
+        #[arg(long = "path")]
+        paths: Vec<String>,
+    },
+    /// Build the app and deploy it to a running server. Building runs the project's build scripts
+    /// on your machine, like any cargo build.
+    Deploy {
+        /// Admin URL of the server to talk to. Default: $SPARED_URL, then http://127.0.0.1:8081.
+        #[arg(long, value_name = "URL")]
+        server: Option<String>,
+    },
+    /// List deployed apps.
+    Ps {
+        /// Admin URL of the server to talk to. Default: $SPARED_URL, then http://127.0.0.1:8081.
+        #[arg(long, value_name = "URL")]
+        server: Option<String>,
+    },
+    /// Show an app's log (defaults to the app in ./spared.toml).
+    Logs {
+        name: Option<String>,
+        #[arg(long, default_value_t = 50)]
+        lines: usize,
+        /// Admin URL of the server to talk to. Default: $SPARED_URL, then http://127.0.0.1:8081.
+        #[arg(long, value_name = "URL")]
+        server: Option<String>,
+    },
+    /// Delete a deployed app and its data. Asks for --yes; backups stay.
+    Rm {
+        name: String,
+        /// Confirm the deletion.
+        #[arg(long)]
+        yes: bool,
+        /// Admin URL of the server to talk to. Default: $SPARED_URL, then http://127.0.0.1:8081.
+        #[arg(long, value_name = "URL")]
+        server: Option<String>,
+    },
+    /// Run a local server, deploy the app, and redeploy on every change. Building runs the
+    /// project's build scripts on your machine, like any cargo build.
+    Dev,
+    /// Copy an app's data directory to <data-dir>/backups/<name>/<timestamp>/ (data only, not code).
+    Backup {
+        name: String,
+        /// Admin URL of the server to talk to. Default: $SPARED_URL, then http://127.0.0.1:8081.
+        #[arg(long, value_name = "URL")]
+        server: Option<String>,
+    },
+    /// List an app's backups, newest first.
+    Backups {
+        name: String,
+        /// Admin URL of the server to talk to. Default: $SPARED_URL, then http://127.0.0.1:8081.
+        #[arg(long, value_name = "URL")]
+        server: Option<String>,
+    },
+    /// Replace an app's data with a backup (the current data is kept as a pre-restore copy).
+    Restore {
+        name: String,
+        /// Backup id from `spared backups <name>`.
+        #[arg(long = "from")]
+        from: String,
+        /// Confirm that the app's current data is replaced.
+        #[arg(long)]
+        yes: bool,
+        /// Admin URL of the server to talk to. Default: $SPARED_URL, then http://127.0.0.1:8081.
+        #[arg(long, value_name = "URL")]
+        server: Option<String>,
+    },
+    /// Drop an app's live instance now; the next request wakes a fresh one.
+    Evict {
+        name: String,
+        /// Admin URL of the server to talk to. Default: $SPARED_URL, then http://127.0.0.1:8081.
+        #[arg(long, value_name = "URL")]
+        server: Option<String>,
+    },
+    /// Measure cold-wake and warm request latency (p50, p99, max) for a deployed app.
+    Bench {
+        name: String,
+        /// Warm requests on one connection, after the 20 evict-then-request cold cycles.
+        #[arg(long, default_value_t = 2000)]
+        requests: usize,
+        /// GET path to request.
+        #[arg(long, default_value = "/")]
+        path: String,
+        /// Admin URL of the server to talk to. Default: $SPARED_URL, then http://127.0.0.1:8081.
+        #[arg(long, value_name = "URL")]
+        server: Option<String>,
+    },
+}
+
+pub struct CliError {
+    kind: String,
+    message: String,
+    fix: String,
+    extra: Option<Value>,
+}
+
+type R<T> = std::result::Result<T, CliError>;
+
+fn err(kind: &str, message: impl Into<String>, fix: impl Into<String>) -> CliError {
+    CliError {
+        kind: kind.into(),
+        message: message.into(),
+        fix: fix.into(),
+        extra: None,
+    }
+}
+
+fn report(e: &CliError, json: bool) {
+    let fix = if e.fix.is_empty() {
+        "run `spared --help` and see AGENTS.md"
+    } else {
+        e.fix.as_str()
+    };
+    if json {
+        let mut v = json!({"error": {"kind": e.kind, "message": e.message, "fix": fix}});
+        if let Some(Value::Object(extra)) = &e.extra {
+            for (k, x) in extra {
+                v[k] = x.clone();
+            }
+        }
+        println!("{v}");
+    } else {
+        eprintln!("error[{}]: {}", e.kind, e.message);
+        eprintln!("fix: {fix}");
+    }
+}
+
+pub async fn run(cmd: UserCmd, json: bool) -> i32 {
+    match dispatch(cmd, json).await {
+        Ok(()) => 0,
+        Err(e) => {
+            report(&e, json);
+            1
+        }
+    }
+}
+
+async fn dispatch(cmd: UserCmd, json: bool) -> R<()> {
+    match cmd {
+        UserCmd::New { name, template } => cmd_new(&name, template.as_deref(), json),
+        UserCmd::Templates => cmd_templates(json),
+        UserCmd::Doctor => cmd_doctor(json).await,
+        UserCmd::Setup { dry_run } => cmd_setup(dry_run, json),
+        UserCmd::Test { paths } => cmd_test(paths, json).await,
+        UserCmd::Deploy { server } => cmd_deploy(server, json).await,
+        UserCmd::Ps { server } => cmd_ps(server, json).await,
+        UserCmd::Logs {
+            name,
+            lines,
+            server,
+        } => cmd_logs(name, lines, server, json).await,
+        UserCmd::Rm { name, yes, server } => cmd_rm(&name, yes, server, json).await,
+        UserCmd::Dev => cmd_dev(json).await,
+        UserCmd::Backup { name, server } => cmd_backup(&name, server, json).await,
+        UserCmd::Backups { name, server } => cmd_backups(&name, server, json).await,
+        UserCmd::Restore {
+            name,
+            from,
+            yes,
+            server,
+        } => cmd_restore(&name, &from, yes, server, json).await,
+        UserCmd::Evict { name, server } => cmd_evict(&name, server, json).await,
+        UserCmd::Bench {
+            name,
+            requests,
+            path,
+            server,
+        } => cmd_bench(&name, requests, &path, server, json).await,
+    }
+}
+
+fn home() -> R<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
+        err(
+            "no_home",
+            "$HOME is not set",
+            "set HOME, or set WASI_SDK_PATH and CARGO_TARGET_DIR explicitly",
+        )
+    })
+}
+
+fn io_err(what: &str, e: std::io::Error) -> CliError {
+    err(
+        "io",
+        format!("{what}: {e}"),
+        "check the path and its permissions",
+    )
+}
+
+fn out_json(v: Value) {
+    println!("{v}");
+}
+
+fn read_manifest(dir: &Path) -> R<(Manifest, String)> {
+    let p = dir.join("spared.toml");
+    let text = std::fs::read_to_string(&p).map_err(|_| {
+        err(
+            "no_manifest",
+            format!("no spared.toml in {}", dir.display()),
+            "run this command inside an app directory, or create one with `spared new <name>`",
+        )
+    })?;
+    let m = Manifest::parse(&text).map_err(|e| err(e.kind, e.message, e.fix))?;
+    if !valid_name(&m.name) {
+        return Err(err(
+            "bad_name",
+            format!("invalid app name '{}' in spared.toml", m.name),
+            "use 1 to 40 lowercase letters, digits and dashes",
+        ));
+    }
+    Ok((m, text))
+}
+
+/// The fix for an app that cannot start. A memory limit below the app's own minimum memory is the
+/// likely cause of a failure that says so, and the error names the minimum in 64 KiB pages.
+fn wake_failed_fix(msg: &str) -> String {
+    let pages = msg
+        .split_once("memory minimum size of ")
+        .filter(|_| msg.contains("exceeds memory limits"))
+        .and_then(|(_, rest)| rest.split_whitespace().next())
+        .and_then(|n| n.parse::<u64>().ok());
+    match pages {
+        Some(pages) => {
+            let mb = (pages * 65536).div_ceil(1 << 20);
+            format!("raise limits.memory_mb in spared.toml (this app needs at least {mb})")
+        }
+        None => "check the manifest grants; the app log above may show why".to_string(),
+    }
+}
+
+/// The one-line reason `spared test` prints for a trap, worded like the server's own error.
+fn trap_message(kind: TrapKind, text: &str, limits: &crate::grants::Limits) -> String {
+    match kind {
+        TrapKind::MemoryLimit => format!("the app hit its memory limit ({} MB)", limits.memory_mb),
+        TrapKind::CpuLimit => format!("request used more than {} ms of compute", limits.cpu_ms),
+        TrapKind::AppTrap => {
+            let first: String = text
+                .lines()
+                .next()
+                .unwrap_or("")
+                .chars()
+                .take(300)
+                .collect();
+            if first.ends_with("backtrace:") {
+                "the app trapped (panic or abort)".to_string()
+            } else {
+                first
+            }
+        }
+    }
+}
+
+fn trap_fix(kind: TrapKind) -> &'static str {
+    match kind {
+        TrapKind::CpuLimit => "reduce work per request or raise limits.cpu_ms in spared.toml",
+        TrapKind::MemoryLimit => "use less memory or raise limits.memory_mb in spared.toml",
+        TrapKind::AppTrap => {
+            "the app crashed; read the app log printed above (panic message), or `spared logs` when deployed"
+        }
+    }
+}
+
+fn lock_for(name: &str) -> String {
+    let text = include_str!("../templates/Cargo.lock.template");
+    let (head, rest) = text.split_once("[[package]]").unwrap_or((text, ""));
+    let mut blocks: Vec<String> = rest
+        .split("[[package]]")
+        .map(|b| b.replace("name = \"__NAME__\"", &format!("name = \"{name}\"")))
+        .collect();
+    let key = |b: &String| {
+        b.lines()
+            .find_map(|l| l.strip_prefix("name = "))
+            .unwrap_or("")
+            .to_string()
+    };
+    blocks.sort_by_key(key);
+    let body: Vec<String> = blocks
+        .iter()
+        .map(|b| format!("[[package]]{}", b.trim_end()))
+        .collect();
+    format!("{head}{}\n", body.join("\n\n"))
+}
+
+fn sqlite_compiled(target_dir: &Path) -> bool {
+    let Ok(rd) = std::fs::read_dir(target_dir.join("wasm32-wasip2/release/deps")) else {
+        return false;
+    };
+    rd.flatten().any(|e| {
+        e.file_name()
+            .to_string_lossy()
+            .starts_with("libsqlite3_sys-")
+    })
+}
+
+struct Template {
+    name: &'static str,
+    about: &'static str,
+    routes: &'static [&'static str],
+    main: &'static str,
+    manifest: &'static str,
+}
+
+macro_rules! app_template {
+    ($dir:literal) => {
+        (
+            include_str!(concat!("../templates/apps/", $dir, "/main.rs")),
+            include_str!(concat!("../templates/apps/", $dir, "/spared.toml")),
+        )
+    };
+}
+
+const DEFAULT_TEMPLATE: &str = "notes";
+
+/// Every template `spared new --template` accepts, in the order `spared templates` lists them.
+const TEMPLATES: &[Template] = &[
+    Template {
+        name: "notes",
+        about: "Notes page with add and delete, plus a JSON API",
+        routes: &[
+            "GET /",
+            "GET /api/notes",
+            "POST /api/notes",
+            "DELETE /api/notes/<id>",
+        ],
+        main: include_str!("../templates/main.rs.tmpl"),
+        manifest: include_str!("../templates/spared.toml.tmpl"),
+    },
+    Template {
+        name: "counter",
+        about: "An atomic counter: a page with a button and a JSON API",
+        routes: &["GET /", "GET /api/count", "POST /api/increment"],
+        main: app_template!("counter").0,
+        manifest: app_template!("counter").1,
+    },
+    Template {
+        name: "todo",
+        about: "Todo list with checkboxes: create, read, update, delete",
+        routes: &[
+            "GET /",
+            "GET /api/todos",
+            "POST /api/todos",
+            "PATCH /api/todos/<id>",
+            "DELETE /api/todos/<id>",
+        ],
+        main: app_template!("todo").0,
+        manifest: app_template!("todo").1,
+    },
+    Template {
+        name: "guestbook",
+        about: "Guestbook with HTML-escaped messages, newest first",
+        routes: &["GET /", "POST /api/messages"],
+        main: app_template!("guestbook").0,
+        manifest: app_template!("guestbook").1,
+    },
+    Template {
+        name: "kv",
+        about: "Key-value store over HTTP: PUT, GET, DELETE, sorted listing",
+        routes: &[
+            "GET /",
+            "GET /kv",
+            "PUT /kv/<key>",
+            "GET /kv/<key>",
+            "DELETE /kv/<key>",
+        ],
+        main: app_template!("kv").0,
+        manifest: app_template!("kv").1,
+    },
+    Template {
+        name: "shortener",
+        about: "URL shortener: create a code, 302 redirect, hit counts",
+        routes: &[
+            "GET /",
+            "POST /api/links",
+            "GET /api/links",
+            "GET /api/links/<code>",
+            "GET /<code>",
+        ],
+        main: app_template!("shortener").0,
+        manifest: app_template!("shortener").1,
+    },
+    Template {
+        name: "webhook",
+        about: "Webhook receiver: stores any JSON with a timestamp, lists the last 50, shared-secret header",
+        routes: &["GET /", "POST /hook", "GET /events"],
+        main: app_template!("webhook").0,
+        manifest: app_template!("webhook").1,
+    },
+    Template {
+        name: "fetcher",
+        about: "Outbound HTTPS call to a host you grant in spared.toml, returns status and size",
+        routes: &["GET /", "GET /fetch"],
+        main: app_template!("fetcher").0,
+        manifest: app_template!("fetcher").1,
+    },
+    Template {
+        name: "blog",
+        about: "Blog: HTML list and post pages, bearer-token protected publish endpoint",
+        routes: &["GET /", "GET /posts/<slug>", "POST /api/posts"],
+        main: app_template!("blog").0,
+        manifest: app_template!("blog").1,
+    },
+];
+
+fn find_template(name: &str) -> R<&'static Template> {
+    TEMPLATES.iter().find(|t| t.name == name).ok_or_else(|| {
+        let names: Vec<&str> = TEMPLATES.iter().map(|t| t.name).collect();
+        err(
+            "unknown_template",
+            format!("no template named '{name}'"),
+            format!("pick one of: {} (see `spared templates`)", names.join(", ")),
+        )
+    })
+}
+
+const HELPER_TEMPLATE: &str = include_str!("../templates/spared.rs");
+
+/// The version in a `// spared-helper: N` line near the top of a generated `src/spared.rs`.
+fn helper_version(text: &str) -> Option<u32> {
+    text.lines().take(5).find_map(|l| {
+        let rest = l.trim().strip_prefix("// spared-helper:")?;
+        rest.split_whitespace().next()?.parse().ok()
+    })
+}
+
+/// What this CLI writes: the version of the helper `spared new` generates.
+fn current_helper_version() -> u32 {
+    helper_version(HELPER_TEMPLATE).expect("templates/spared.rs carries a spared-helper marker")
+}
+
+/// A warning when the app in `dir` has a `src/spared.rs` older than the helper this CLI writes.
+/// No `src/spared.rs` means an app that does not use the helper: nothing to say.
+fn helper_warning(dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(dir.join("src/spared.rs")).ok()?;
+    let ours = current_helper_version();
+    match helper_version(&text) {
+        None => Some(format!(
+            "src/spared.rs has no version marker, so it is older than helper version {ours}. Compare it with the one `spared new` writes (run `spared new scratch` elsewhere and diff the two files), and copy over what you need"
+        )),
+        Some(v) if v < ours => Some(format!(
+            "src/spared.rs is helper version {v}; this spared writes version {ours}. Compare it with the one `spared new` writes (run `spared new scratch` elsewhere and diff the two files), and copy over what you need"
+        )),
+        Some(v) if v > ours => Some(format!(
+            "src/spared.rs is helper version {v}, newer than the {ours} this spared writes: it came from a newer spared. Upgrade spared"
+        )),
+        Some(_) => None,
+    }
+}
+
+fn new_files(name: &str, t: &Template) -> Vec<(&'static str, String)> {
+    let sub = |text: &str| text.replace("__NAME__", name);
+    vec![
+        (
+            "Cargo.toml",
+            sub(include_str!("../templates/Cargo.toml.tmpl")),
+        ),
+        ("Cargo.lock", lock_for(name)),
+        ("spared.toml", sub(t.manifest)),
+        (
+            ".gitignore",
+            sub(include_str!("../templates/gitignore.tmpl")),
+        ),
+        (
+            "AGENTS.md",
+            sub(include_str!("../templates/AGENTS.md.tmpl")),
+        ),
+        ("src/main.rs", sub(t.main)),
+        ("src/spared.rs", HELPER_TEMPLATE.to_string()),
+    ]
+}
+
+fn cmd_templates(json: bool) -> R<()> {
+    if json {
+        let list: Vec<Value> = TEMPLATES
+            .iter()
+            .map(|t| json!({"name": t.name, "description": t.about, "routes": t.routes, "default": t.name == DEFAULT_TEMPLATE}))
+            .collect();
+        out_json(json!({"templates": list}));
+    } else {
+        let width = TEMPLATES.iter().map(|t| t.name.len()).max().unwrap_or(0);
+        for t in TEMPLATES {
+            let mark = if t.name == DEFAULT_TEMPLATE {
+                " (default)"
+            } else {
+                ""
+            };
+            println!("{:width$}  {}{mark}", t.name, t.about);
+        }
+        println!("start one with: spared new <name> --template <template>");
+    }
+    Ok(())
+}
+
+fn cmd_new(name: &str, template: Option<&str>, json: bool) -> R<()> {
+    if !valid_name(name) {
+        return Err(err(
+            "bad_name",
+            format!("invalid app name '{name}'"),
+            "use 1 to 40 lowercase letters, digits and dashes, e.g. `spared new my-app`",
+        ));
+    }
+    let t = find_template(template.unwrap_or(DEFAULT_TEMPLATE))?;
+    let dir = PathBuf::from(name);
+    if dir.exists() {
+        return Err(err(
+            "exists",
+            format!("./{name} already exists"),
+            "pick another name or remove the directory",
+        ));
+    }
+    let mut written = vec![];
+    for (rel, content) in new_files(name, t) {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).map_err(|e| io_err("create dir", e))?;
+        std::fs::write(&p, content).map_err(|e| io_err(&format!("write {}", p.display()), e))?;
+        written.push(rel);
+    }
+    let steps = next_steps(name);
+    if json {
+        out_json(
+            json!({"created": name, "path": dir, "files": written, "template": t.name, "routes": t.routes, "next": steps}),
+        );
+    } else {
+        println!(
+            "created ./{name} from the {} template ({})",
+            t.name,
+            written.join(", ")
+        );
+        println!("routes:");
+        for r in t.routes {
+            println!("  {r}");
+        }
+        println!("next:");
+        for step in &steps {
+            println!("  {step}");
+        }
+    }
+    Ok(())
+}
+
+fn next_steps(name: &str) -> Vec<String> {
+    vec![
+        format!("cd {name}"),
+        "spared test --path /             # build it and request / in a sandbox".to_string(),
+        "spared serve --data-dir ./data   # in another terminal, once; leave it running"
+            .to_string(),
+        format!("spared deploy                    # then open http://{name}.localhost:8080/"),
+    ]
+}
+
+fn find_sdk() -> Option<PathBuf> {
+    let ok = |p: &Path| p.join("bin/clang").exists();
+    if let Some(p) = std::env::var_os("WASI_SDK_PATH").map(PathBuf::from) {
+        if ok(&p) {
+            return Some(p);
+        }
+    }
+    let base = PathBuf::from(std::env::var_os("HOME")?).join(".spared/wasi-sdk");
+    if ok(&base) {
+        return Some(base);
+    }
+    let mut kids: Vec<_> = std::fs::read_dir(&base)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| ok(p))
+        .collect();
+    kids.sort();
+    kids.pop()
+}
+
+fn target_installed() -> bool {
+    let out = Command::new("rustc")
+        .args(["--print", "target-libdir", "--target", "wasm32-wasip2"])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            let dir = PathBuf::from(String::from_utf8_lossy(&o.stdout).trim());
+            std::fs::read_dir(dir)
+                .map(|mut d| d.any(|e| e.is_ok()))
+                .unwrap_or(false)
+        }
+        _ => false,
+    }
+}
+
+fn sdk_platform() -> R<String> {
+    let run = |a: &str| {
+        Command::new("uname")
+            .arg(a)
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default()
+    };
+    let (os, arch) = (run("-s"), run("-m"));
+    let arch = match arch.as_str() {
+        "x86_64" | "amd64" => "x86_64",
+        "aarch64" | "arm64" => "arm64",
+        other => {
+            return Err(err(
+                "unsupported_platform",
+                format!("no wasi-sdk build for architecture '{other}'"),
+                "install wasi-sdk 25 manually and set WASI_SDK_PATH to its directory",
+            ));
+        }
+    };
+    let os = match os.as_str() {
+        "Linux" => "linux",
+        "Darwin" => "macos",
+        other => {
+            return Err(err(
+                "unsupported_platform",
+                format!("no wasi-sdk build for OS '{other}'"),
+                "install wasi-sdk 25 manually and set WASI_SDK_PATH to its directory",
+            ));
+        }
+    };
+    Ok(format!("{arch}-{os}"))
+}
+
+fn sdk_expected_sha(table: &str, file: &str) -> Option<String> {
+    table.lines().find_map(|l| {
+        let (hash, name) = l.split_once("  ")?;
+        (name.trim() == file).then(|| hash.trim().to_ascii_lowercase())
+    })
+}
+
+fn sha256_hex(path: &Path) -> std::io::Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut f = std::fs::File::open(path)?;
+    let mut h = Sha256::new();
+    let mut buf = vec![0u8; 1 << 16];
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+    }
+    Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
+}
+
+fn verify_sdk_tarball(table: &str, file: &str, path: &Path) -> R<()> {
+    let Some(want) = sdk_expected_sha(table, file) else {
+        return Err(err(
+            "checksum_missing",
+            format!("no pinned SHA-256 for {file}"),
+            "install wasi-sdk 25 manually and set WASI_SDK_PATH to its directory",
+        ));
+    };
+    let got = sha256_hex(path).map_err(|e| io_err("read the downloaded wasi-sdk archive", e))?;
+    if got != want {
+        return Err(err(
+            "checksum_mismatch",
+            format!("{file} has SHA-256 {got}, expected {want}; it was not unpacked"),
+            "rerun `spared setup` (the download may have been cut off or altered on the way), or install wasi-sdk 25 yourself and set WASI_SDK_PATH",
+        ));
+    }
+    Ok(())
+}
+
+fn cmd_setup(dry_run: bool, json: bool) -> R<()> {
+    let mut steps: Vec<Value> = vec![];
+    let mut say = |step: &str, status: &str, detail: String| {
+        if !json {
+            println!(
+                "{step}: {status}{}",
+                if detail.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({detail})")
+                }
+            );
+        }
+        steps.push(json!({"step": step, "status": status, "detail": detail}));
+    };
+
+    if target_installed() {
+        say(
+            "rust target wasm32-wasip2",
+            "already installed",
+            String::new(),
+        );
+    } else if dry_run {
+        say(
+            "rust target wasm32-wasip2",
+            "would run",
+            "rustup target add wasm32-wasip2".into(),
+        );
+    } else {
+        let st = Command::new("rustup")
+            .args(["target", "add", "wasm32-wasip2"])
+            .stdout(if json {
+                Stdio::null()
+            } else {
+                Stdio::inherit()
+            })
+            .status();
+        match st {
+            Ok(s) if s.success() => say(
+                "rust target wasm32-wasip2",
+                "installed",
+                "rustup target add wasm32-wasip2".into(),
+            ),
+            Ok(_) => {
+                return Err(err(
+                    "rustup_failed",
+                    "`rustup target add wasm32-wasip2` failed",
+                    "run it by hand and read its output; install rustup from https://rustup.rs if it is missing",
+                ));
+            }
+            Err(e) => {
+                return Err(err(
+                    "no_rustup",
+                    format!("cannot run rustup: {e}"),
+                    "install rustup from https://rustup.rs, then rerun `spared setup`",
+                ));
+            }
+        }
+    }
+
+    if let Some(sdk) = find_sdk() {
+        say("wasi-sdk", "already present", sdk.display().to_string());
+    } else {
+        let platform = sdk_platform()?;
+        let url = format!(
+            "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-{SDK_VERSION}/wasi-sdk-{SDK_VERSION}.0-{platform}.tar.gz"
+        );
+        let dest = home()?.join(".spared/wasi-sdk");
+        if dry_run {
+            say(
+                "wasi-sdk",
+                "would download",
+                format!("{url} -> {}", dest.display()),
+            );
+        } else {
+            let base = home()?.join(".spared");
+            std::fs::create_dir_all(&base).map_err(|e| io_err("create ~/.spared", e))?;
+            let tarball = base.join("wasi-sdk.tar.gz.part");
+            let tmp = base.join("wasi-sdk.tmp");
+            let _ = std::fs::remove_dir_all(&tmp);
+            std::fs::create_dir_all(&tmp).map_err(|e| io_err("create temp dir", e))?;
+            if !json {
+                println!("downloading {url}");
+            }
+            let dl = Command::new("curl")
+                .args([
+                    "--proto",
+                    "=https",
+                    "--tlsv1.2",
+                    "-fL",
+                    "--retry",
+                    "3",
+                    "-o",
+                ])
+                .arg(&tarball)
+                .arg(&url)
+                .stdout(Stdio::null())
+                .status();
+            match dl {
+                Ok(s) if s.success() => {}
+                _ => {
+                    let _ = std::fs::remove_file(&tarball);
+                    return Err(err(
+                        "download_failed",
+                        format!("could not download {url}"),
+                        "check network access (curl must reach github.com), or install wasi-sdk 25 yourself and set WASI_SDK_PATH",
+                    ));
+                }
+            }
+            let file = format!("wasi-sdk-{SDK_VERSION}.0-{platform}.tar.gz");
+            if let Err(e) = verify_sdk_tarball(SDK_SHA256, &file, &tarball) {
+                let _ = std::fs::remove_file(&tarball);
+                let _ = std::fs::remove_dir_all(&tmp);
+                return Err(e);
+            }
+            let ex = Command::new("tar")
+                .arg("xzf")
+                .arg(&tarball)
+                .arg("--strip-components=1")
+                .arg("-C")
+                .arg(&tmp)
+                .status();
+            let _ = std::fs::remove_file(&tarball);
+            if !matches!(ex, Ok(s) if s.success()) || !tmp.join("bin/clang").exists() {
+                let _ = std::fs::remove_dir_all(&tmp);
+                return Err(err(
+                    "extract_failed",
+                    "could not unpack the wasi-sdk archive",
+                    "make sure `tar` is installed and ~/.spared has free space, then rerun `spared setup`",
+                ));
+            }
+            let _ = std::fs::remove_dir_all(&dest);
+            std::fs::rename(&tmp, &dest).map_err(|e| io_err("move wasi-sdk into place", e))?;
+            say("wasi-sdk", "installed", dest.display().to_string());
+        }
+    }
+    if json {
+        out_json(json!({"dry_run": dry_run, "steps": steps}));
+    }
+    Ok(())
+}
+
+fn no_rust_tool(tool: &str, e: &std::io::Error) -> CliError {
+    err(
+        "no_cargo",
+        format!("cannot run {tool}: {e}"),
+        "install Rust from https://rustup.rs, then run `spared setup`",
+    )
+}
+
+fn package_name(dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(dir.join("Cargo.toml")).ok()?;
+    let v: toml::Value = toml::from_str(&text).ok()?;
+    Some(v.get("package")?.get("name")?.as_str()?.to_string())
+}
+
+/// Every app builds into one target directory, and cargo names the final unit after the crate
+/// alone, so two app directories with the same crate name share a unit: cargo sees the other
+/// directory's sources as unchanged and keeps the other app's .wasm. The directory that last built
+/// each crate name is recorded next to the build; a different directory drops that one unit first.
+fn unit_owner_stamp(target_dir: &Path, name: &str) -> PathBuf {
+    target_dir.join("spared-unit-owner").join(name)
+}
+
+fn unit_owned_by_other(target_dir: &Path, name: &str, canonical_dir: &Path) -> bool {
+    match std::fs::read_to_string(unit_owner_stamp(target_dir, name)) {
+        Ok(owner) => Path::new(owner.trim_end_matches('\n')) != canonical_dir,
+        Err(_) => true,
+    }
+}
+
+fn release_unit_from_other_dir(dir: &Path, target_dir: &Path) -> R<()> {
+    let (Some(name), Ok(canonical)) = (package_name(dir), std::fs::canonicalize(dir)) else {
+        return Ok(());
+    };
+    if !unit_owned_by_other(target_dir, &name, &canonical) {
+        return Ok(());
+    }
+    let out = Command::new("cargo")
+        .args([
+            "clean",
+            "--release",
+            "--target",
+            "wasm32-wasip2",
+            "-p",
+            &name,
+        ])
+        .current_dir(dir)
+        .env("CARGO_TARGET_DIR", target_dir)
+        .output()
+        .map_err(|e| no_rust_tool("cargo", &e))?;
+    if !out.status.success() {
+        return Err(err(
+            "build_failed",
+            format!(
+                "cargo clean -p {name} failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+            "remove the build directory (~/.spared/target, or $CARGO_TARGET_DIR) and rerun",
+        ));
+    }
+    let stamp = unit_owner_stamp(target_dir, &name);
+    if let Some(parent) = stamp.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| io_err("record the build directory", e))?;
+    }
+    std::fs::write(&stamp, canonical.display().to_string())
+        .map_err(|e| io_err("record the build directory", e))?;
+    Ok(())
+}
+
+fn build(dir: &Path, json: bool) -> R<PathBuf> {
+    if !dir.join("Cargo.toml").exists() {
+        return Err(err(
+            "not_an_app",
+            format!("no Cargo.toml in {}", dir.display()),
+            "run this inside an app directory created by `spared new <name>`",
+        ));
+    }
+    for tool in ["cargo", "rustc"] {
+        if let Err(e) = Command::new(tool).arg("--version").output() {
+            return Err(no_rust_tool(tool, &e));
+        }
+    }
+    let sdk = find_sdk().ok_or_else(|| {
+        err(
+            "no_sdk",
+            "wasi-sdk not found (needed to compile SQLite for wasm)",
+            "run `spared setup`, or set WASI_SDK_PATH to a wasi-sdk 25 directory",
+        )
+    })?;
+    if !target_installed() {
+        return Err(err(
+            "no_target",
+            "the wasm32-wasip2 Rust target is not installed",
+            "run `spared setup`",
+        ));
+    }
+    let target_dir = match std::env::var_os("CARGO_TARGET_DIR") {
+        Some(t) => PathBuf::from(t),
+        None => home()?.join(".spared/target"),
+    };
+    let sdk_s = sdk.display().to_string();
+    let cflags = guest_cflags(&sdk_s);
+    release_unit_from_other_dir(dir, &target_dir)?;
+    if !json {
+        if sqlite_compiled(&target_dir) {
+            eprintln!("building {}", dir.display());
+        } else {
+            eprintln!(
+                "building {} (first build compiles SQLite and takes a minute)",
+                dir.display()
+            );
+        }
+    }
+    let out = Command::new("cargo")
+        .args([
+            "build",
+            "--release",
+            "--target",
+            "wasm32-wasip2",
+            "--message-format=json-render-diagnostics",
+        ])
+        .current_dir(dir)
+        .env("CC_wasm32_wasip2", format!("{sdk_s}/bin/clang"))
+        .env("AR_wasm32_wasip2", format!("{sdk_s}/bin/llvm-ar"))
+        .env("CFLAGS_wasm32_wasip2", cflags)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .env_remove("SPARED_TOKEN")
+        .env_remove("SPARED_ADMIN_TOKEN")
+        .stdout(Stdio::piped())
+        .stderr(if json {
+            Stdio::piped()
+        } else {
+            Stdio::inherit()
+        })
+        .output()
+        .map_err(|e| no_rust_tool("cargo", &e))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let tail: String = stderr
+            .chars()
+            .rev()
+            .take(4000)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        let msg = if json {
+            format!("cargo build failed:\n{tail}")
+        } else {
+            "cargo build failed (compiler output above)".to_string()
+        };
+        return Err(err(
+            "build_failed",
+            msg,
+            "fix the compiler errors in src/ and rerun; each error names the file and line",
+        ));
+    }
+    let mut wasm = None;
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if v["reason"] != "compiler-artifact" {
+            continue;
+        }
+        if let Some(files) = v["filenames"].as_array() {
+            for f in files.iter().filter_map(|f| f.as_str()) {
+                if f.ends_with(".wasm") && !f.contains("/deps/") {
+                    wasm = Some(PathBuf::from(f));
+                }
+            }
+        }
+    }
+    wasm.ok_or_else(|| {
+        err(
+            "no_wasm",
+            "cargo produced no .wasm file",
+            "the package must be a binary crate (src/main.rs) that builds for wasm32-wasip2",
+        )
+    })
+}
+
+struct Response {
+    status: u16,
+    body: Bytes,
+}
+
+fn parse_base(base: &str) -> R<String> {
+    let rest = base.strip_prefix("http://").ok_or_else(|| {
+        err(
+            "bad_server_url",
+            format!("server URL '{base}' must start with http://"),
+            "pass --server http://127.0.0.1:8081",
+        )
+    })?;
+    let hp = rest.split('/').next().unwrap_or("");
+    if hp.is_empty() {
+        return Err(err(
+            "bad_server_url",
+            format!("server URL '{base}' has no host"),
+            "pass --server http://127.0.0.1:8081",
+        ));
+    }
+    Ok(if hp.contains(':') {
+        hp.to_string()
+    } else {
+        format!("{hp}:80")
+    })
+}
+
+/// How long a refused connection is retried, so a command run right after `spared serve &` waits for the listener.
+const CONNECT_RETRY: Duration = Duration::from_millis(2000);
+
+async fn request(
+    base: &str,
+    method: &str,
+    path: &str,
+    headers: &[(&str, String)],
+    body: Bytes,
+) -> R<Response> {
+    request_retrying(base, method, path, headers, body, CONNECT_RETRY).await
+}
+
+async fn request_retrying(
+    base: &str,
+    method: &str,
+    path: &str,
+    headers: &[(&str, String)],
+    body: Bytes,
+    connect_retry: Duration,
+) -> R<Response> {
+    let addr = parse_base(base)?;
+    let unreachable = |why: String| {
+        err(
+            "server_unreachable",
+            format!("cannot reach the spared server at {base}: {why}"),
+            "start it with `spared serve` (or `spared dev` for a local loop), or point at another server with --server URL or $SPARED_URL",
+        )
+    };
+    let retry_until = tokio::time::Instant::now() + connect_retry;
+    let stream = loop {
+        match tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::net::TcpStream::connect(&addr),
+        )
+        .await
+        {
+            Ok(Ok(s)) => break s,
+            Ok(Err(e))
+                if e.kind() == std::io::ErrorKind::ConnectionRefused
+                    && tokio::time::Instant::now() < retry_until =>
+            {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Ok(Err(e)) => return Err(unreachable(e.to_string())),
+            Err(_) => return Err(unreachable("connection timed out".into())),
+        }
+    };
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+        .await
+        .map_err(|e| unreachable(e.to_string()))?;
+    tokio::spawn(async move {
+        let _ = conn.await;
+    });
+    let mut b = hyper::Request::builder()
+        .method(method)
+        .uri(path)
+        .header("host", addr.as_str());
+    for (k, v) in headers {
+        b = b.header(*k, v.as_str());
+    }
+    let req = b
+        .body(Full::new(body))
+        .map_err(|e| err("bad_request", e.to_string(), "report this"))?;
+    let resp = tokio::time::timeout(Duration::from_secs(120), sender.send_request(req))
+        .await
+        .map_err(|_| {
+            err(
+                "server_timeout",
+                "the server did not answer within 120 s",
+                "check `spared logs`, then retry",
+            )
+        })?
+        .map_err(|e| unreachable(e.to_string()))?;
+    let status = resp.status().as_u16();
+    let body = resp
+        .into_body()
+        .collect()
+        .await
+        .map_err(|e| unreachable(e.to_string()))?
+        .to_bytes();
+    Ok(Response { status, body })
+}
+
+async fn admin(
+    base: &str,
+    token: &str,
+    method: &str,
+    path: &str,
+    headers: &[(&str, String)],
+    body: Bytes,
+) -> R<Response> {
+    let mut headers = headers.to_vec();
+    headers.push(("authorization", format!("Bearer {token}")));
+    let r = request(base, method, path, &headers, body).await?;
+    if (200..300).contains(&r.status) {
+        return Ok(r);
+    }
+    match serde_json::from_slice::<Value>(&r.body) {
+        Ok(v) if v["error"]["kind"].is_string() => {
+            let e = &v["error"];
+            let kind = e["kind"].as_str().unwrap();
+            let fix = if kind == "unauthorized" {
+                UNAUTHORIZED_FIX
+            } else {
+                e["fix"].as_str().unwrap_or("")
+            };
+            Err(err(kind, e["message"].as_str().unwrap_or(""), fix))
+        }
+        _ => Err(err(
+            &format!("http_{}", r.status),
+            format!(
+                "server answered {}: {}",
+                r.status,
+                String::from_utf8_lossy(&r.body)
+                    .chars()
+                    .take(300)
+                    .collect::<String>()
+                    .trim()
+            ),
+            "check that the --server URL is the admin listener (default 127.0.0.1:8081), not the app listener",
+        )),
+    }
+}
+
+/// `~/.spared/token` holds the token of the first server started on this machine, so a second
+/// server (another data dir, `spared dev` in an app directory) is refused until the CLI is given its token.
+const UNAUTHORIZED_FIX: &str = "this server has a different token than the CLI sent: run `export SPARED_TOKEN=$(cat <data-dir>/admin-token)`, where <data-dir> is the directory you started this server with (`./.spared` for `spared dev`); ~/.spared/token holds only the first server's token";
+
+fn token_export_line(data_dir: &Path) -> String {
+    format!(
+        "export SPARED_TOKEN=$(cat '{}')",
+        data_dir.join("admin-token").display()
+    )
+}
+
+/// The admin token: $SPARED_TOKEN, then ~/.spared/token (written by `spared serve`).
+fn token() -> R<String> {
+    let nonempty = |t: String| Some(t.trim().to_string()).filter(|t| !t.is_empty());
+    let from_file = || {
+        let p = PathBuf::from(std::env::var_os("HOME")?).join(".spared/token");
+        std::fs::read_to_string(p).ok().and_then(nonempty)
+    };
+    std::env::var("SPARED_TOKEN")
+        .ok()
+        .and_then(nonempty)
+        .or_else(from_file)
+        .ok_or_else(|| {
+            err(
+                "no_token",
+                "no admin token: $SPARED_TOKEN is not set and ~/.spared/token does not exist",
+                "start `spared serve` on this machine once (it writes ~/.spared/token), or set SPARED_TOKEN to the contents of <data-dir>/admin-token on the server",
+            )
+        })
+}
+
+fn token_present() -> R<()> {
+    let set = std::env::var("SPARED_TOKEN").is_ok_and(|t| !t.trim().is_empty());
+    let file =
+        std::env::var_os("HOME").is_some_and(|h| PathBuf::from(h).join(".spared/token").is_file());
+    if set || file {
+        Ok(())
+    } else {
+        token().map(|_| ())
+    }
+}
+
+fn server_url(flag: Option<String>) -> String {
+    flag.or_else(|| std::env::var("SPARED_URL").ok())
+        .unwrap_or_else(|| DEFAULT_ADMIN.to_string())
+        .trim_end_matches('/')
+        .to_string()
+}
+
+fn json_body(r: &Response) -> R<Value> {
+    serde_json::from_slice(&r.body).map_err(|e| {
+        err(
+            "bad_response",
+            format!("server sent invalid JSON: {e}"),
+            "check that the server and CLI are the same spared version",
+        )
+    })
+}
+
+async fn push(server: &str, token: &str, dir: &Path, wasm: &Path) -> R<Value> {
+    let (m, text) = read_manifest(dir)?;
+    let bytes = std::fs::read(wasm).map_err(|e| io_err("read the built .wasm", e))?;
+    let header = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+    let r = admin(
+        server,
+        token,
+        "PUT",
+        &format!("/v1/apps/{}", m.name),
+        &[("x-spared-manifest", header)],
+        Bytes::from(bytes),
+    )
+    .await?;
+    json_body(&r)
+}
+
+fn print_deployed(v: &Value) {
+    let name = v["name"].as_str().unwrap_or("");
+    let url = v["url"].as_str().unwrap_or("");
+    println!("deployed {name} (version {})", v["version"]);
+    if let Some(note) = v["note"].as_str() {
+        println!("note: {note}");
+    }
+    println!("url: {url}");
+    println!("try: curl -i {url}");
+}
+
+fn deploy_hints(name: &str) -> Vec<String> {
+    vec![format!("spared logs {name}"), "spared ps".to_string()]
+}
+
+async fn cmd_deploy(server: Option<String>, json: bool) -> R<()> {
+    let server = server_url(server);
+    let dir = PathBuf::from(".");
+    read_manifest(&dir)?;
+    match admin(&server, "", "GET", "/v1/apps", &[], Bytes::new()).await {
+        Err(e) if e.kind != "unauthorized" => return Err(e),
+        _ => {}
+    }
+    token_present()?;
+    let wasm = build(&dir, json)?;
+    let token = token()?;
+    let mut v = push(&server, &token, &dir, &wasm).await?;
+    let hints = deploy_hints(v["name"].as_str().unwrap_or(""));
+    let warning = helper_warning(&dir);
+    if json {
+        v["next"] = json!(hints);
+        if let Some(w) = &warning {
+            v["warnings"] = json!([w]);
+        }
+        out_json(v);
+    } else {
+        print_deployed(&v);
+        if let Some(w) = &warning {
+            eprintln!("warning: {w}");
+        }
+        println!("logs: {}", hints[0]);
+        println!("apps: {}", hints[1]);
+    }
+    Ok(())
+}
+
+async fn cmd_ps(server: Option<String>, json: bool) -> R<()> {
+    let r = admin(
+        &server_url(server),
+        &token()?,
+        "GET",
+        "/v1/apps",
+        &[],
+        Bytes::new(),
+    )
+    .await?;
+    let v = json_body(&r)?;
+    if json {
+        out_json(v);
+        return Ok(());
+    }
+    let apps = v["apps"].as_array().cloned().unwrap_or_default();
+    if apps.is_empty() {
+        println!("no apps deployed; run `spared deploy` in an app directory");
+        return Ok(());
+    }
+    println!(
+        "{:<20} {:<6} {:>4} {:>8} {:>6} {:>6} {:>10}  URL",
+        "NAME", "STATE", "VER", "REQUESTS", "WAKES", "ERRORS", "DATA"
+    );
+    for a in apps {
+        println!(
+            "{:<20} {:<6} {:>4} {:>8} {:>6} {:>6} {:>10}  {}",
+            a["name"].as_str().unwrap_or(""),
+            a["state"].as_str().unwrap_or(""),
+            a["version"].to_string(),
+            a["requests"].to_string(),
+            a["wakes"].to_string(),
+            a["errors"].to_string(),
+            format!("{} B", a["data_bytes"]),
+            a["url"].as_str().unwrap_or("")
+        );
+    }
+    Ok(())
+}
+
+const NO_LOG_YET: &str = "has written nothing to stdout or stderr yet. An app that prints nothing logs nothing; panics and limit hits are recorded here when they happen";
+
+async fn cmd_logs(name: Option<String>, lines: usize, server: Option<String>, json: bool) -> R<()> {
+    let name = match name {
+        Some(n) => n,
+        None => {
+            read_manifest(Path::new("."))
+                .map_err(|_| {
+                    err(
+                        "no_name",
+                        "no app name given and no spared.toml here",
+                        "run `spared logs <name>` (list names with `spared ps`)",
+                    )
+                })?
+                .0
+                .name
+        }
+    };
+    let r = admin(
+        &server_url(server),
+        &token()?,
+        "GET",
+        &format!("/v1/apps/{name}/logs?lines={lines}"),
+        &[],
+        Bytes::new(),
+    )
+    .await?;
+    let text = String::from_utf8_lossy(&r.body).to_string();
+    let empty = text.trim().is_empty();
+    if json {
+        let mut v = json!({"name": name, "lines": text.lines().collect::<Vec<_>>()});
+        if empty {
+            v["lines"] = json!([]);
+            v["note"] = NO_LOG_YET.into();
+        }
+        out_json(v);
+    } else if empty {
+        // On stderr, so stdout holds only what the app wrote.
+        eprintln!("no output yet: app '{name}' {NO_LOG_YET}.");
+    } else {
+        print!("{text}");
+    }
+    Ok(())
+}
+
+async fn cmd_rm(name: &str, yes: bool, server: Option<String>, json: bool) -> R<()> {
+    check_app_name(name)?;
+    if !yes {
+        return Err(err(
+            "confirm_required",
+            format!("removing {name} deletes its code and its data"),
+            format!(
+                "rerun with --yes: `spared rm {name} --yes`. To keep a copy first, run `spared backup {name}`; backups stay after the app is removed"
+            ),
+        ));
+    }
+    let r = admin(
+        &server_url(server),
+        &token()?,
+        "DELETE",
+        &format!("/v1/apps/{name}"),
+        &[],
+        Bytes::new(),
+    )
+    .await?;
+    let kept = serde_json::from_slice::<Value>(&r.body)
+        .ok()
+        .and_then(|v| v["backups_kept"].as_u64())
+        .unwrap_or(0);
+    if json {
+        let mut v = json!({"deleted": name});
+        if kept > 0 {
+            v["backups_kept"] = kept.into();
+        }
+        out_json(v);
+    } else {
+        println!("deleted {name} and its data");
+        if kept > 0 {
+            println!(
+                "note: {kept} backup(s) of {name} remain under <data-dir>/backups/{name}/; deploy the name again and `spared restore` brings them back"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn check_app_name(name: &str) -> R<()> {
+    if valid_name(name) {
+        return Ok(());
+    }
+    Err(err(
+        "bad_name",
+        format!("invalid app name '{name}'"),
+        "use 1 to 40 lowercase letters, digits and dashes; list apps with `spared ps`",
+    ))
+}
+
+const BACKUP_SCOPE: &str = "a backup holds the app's data only (data/, so /data/app.db), not its code; redeploy to restore code";
+
+async fn cmd_backup(name: &str, server: Option<String>, json: bool) -> R<()> {
+    check_app_name(name)?;
+    let r = admin(
+        &server_url(server),
+        &token()?,
+        "POST",
+        &format!("/v1/apps/{name}/backup"),
+        &[],
+        Bytes::new(),
+    )
+    .await?;
+    let v = json_body(&r)?;
+    if json {
+        out_json(v);
+        return Ok(());
+    }
+    let id = v["backup_id"].as_str().unwrap_or("");
+    println!(
+        "backed up {name} as {id} ({} bytes in {} files, integrity {})",
+        v["bytes"],
+        v["files"],
+        v["integrity"].as_str().unwrap_or("")
+    );
+    println!("note: {BACKUP_SCOPE}");
+    if let Some(n) = v["note"].as_str() {
+        println!("note: {n}");
+    }
+    if let Some(old) = v["removed_old"].as_array() {
+        println!(
+            "removed {} old backup(s) over the retention limit",
+            old.len()
+        );
+    }
+    println!("restore with: spared restore {name} --from {id} --yes");
+    Ok(())
+}
+
+async fn cmd_backups(name: &str, server: Option<String>, json: bool) -> R<()> {
+    check_app_name(name)?;
+    let r = admin(
+        &server_url(server),
+        &token()?,
+        "GET",
+        &format!("/v1/apps/{name}/backups"),
+        &[],
+        Bytes::new(),
+    )
+    .await?;
+    let v = json_body(&r)?;
+    if json {
+        out_json(v);
+        return Ok(());
+    }
+    let items = v["backups"].as_array().cloned().unwrap_or_default();
+    if items.is_empty() {
+        println!("no backups of {name}; run `spared backup {name}`");
+        return Ok(());
+    }
+    println!(
+        "{:<30} {:<12} {:<21} {:>10} {:>5}",
+        "ID", "KIND", "CREATED", "BYTES", "FILES"
+    );
+    for b in items {
+        println!(
+            "{:<30} {:<12} {:<21} {:>10} {:>5}",
+            b["backup_id"].as_str().unwrap_or(""),
+            b["kind"].as_str().unwrap_or(""),
+            b["created_at"].as_str().unwrap_or(""),
+            b["bytes"].to_string(),
+            b["files"].to_string()
+        );
+    }
+    println!("keeping the newest {} of each kind", v["max_backups"]);
+    Ok(())
+}
+
+async fn cmd_restore(
+    name: &str,
+    from: &str,
+    yes: bool,
+    server: Option<String>,
+    json: bool,
+) -> R<()> {
+    check_app_name(name)?;
+    if !yes {
+        return Err(err(
+            "confirm_required",
+            format!("restoring {name} from {from} replaces its current data"),
+            format!(
+                "rerun with --yes: `spared restore {name} --from {from} --yes`. The current data is first kept as a pre-restore copy, so the restore can be undone"
+            ),
+        ));
+    }
+    let r = admin(
+        &server_url(server),
+        &token()?,
+        "POST",
+        &format!("/v1/apps/{name}/restore"),
+        &[("content-type", "application/json".to_string())],
+        Bytes::from(json!({"backup_id": from}).to_string()),
+    )
+    .await?;
+    let v = json_body(&r)?;
+    if json {
+        out_json(v);
+        return Ok(());
+    }
+    println!(
+        "restored {name} from {from} ({} bytes in {} files)",
+        v["bytes"], v["files"]
+    );
+    println!("note: {BACKUP_SCOPE}");
+    if let Some(u) = v["undo"].as_str() {
+        println!(
+            "the data it replaced is kept as {}; undo with: {u}",
+            v["pre_restore_id"].as_str().unwrap_or("")
+        );
+    }
+    Ok(())
+}
+
+async fn cmd_evict(name: &str, server: Option<String>, json: bool) -> R<()> {
+    check_app_name(name)?;
+    let r = admin(
+        &server_url(server),
+        &token()?,
+        "POST",
+        &format!("/v1/apps/{name}/evict"),
+        &[],
+        Bytes::new(),
+    )
+    .await?;
+    let v = json_body(&r)?;
+    if json {
+        out_json(v);
+    } else {
+        println!(
+            "evicted {name} (state: {}); the next request wakes a fresh instance",
+            v["state"].as_str().unwrap_or("")
+        );
+    }
+    Ok(())
+}
+
+type Sender = hyper::client::conn::http1::SendRequest<Full<Bytes>>;
+
+async fn connect(addr: &str) -> R<Sender> {
+    let stream = tokio::net::TcpStream::connect(addr).await.map_err(|e| {
+        err(
+            "app_unreachable",
+            format!("cannot connect to the app listener at {addr}: {e}"),
+            "check that `spared serve` is running and its public listener is reachable from here",
+        )
+    })?;
+    let _ = stream.set_nodelay(true);
+    let (sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+        .await
+        .map_err(|e| err("app_unreachable", e.to_string(), "retry"))?;
+    tokio::spawn(async move {
+        let _ = conn.await;
+    });
+    Ok(sender)
+}
+
+/// One GET: the time until the response head arrives, then the body is drained untimed.
+async fn timed_get(sender: &mut Sender, host: &str, path: &str) -> R<(u16, Duration)> {
+    let lost = |e: String| {
+        err(
+            "bench_failed",
+            format!("request to {host}{path} failed: {e}"),
+            "check `spared logs <name>` and that the server is still running",
+        )
+    };
+    sender.ready().await.map_err(|e| lost(e.to_string()))?;
+    let req = hyper::Request::builder()
+        .uri(path)
+        .header("host", host)
+        .body(Full::new(Bytes::new()))
+        .map_err(|e| err("bad_path", e.to_string(), "pass --path like /api/notes"))?;
+    let t = std::time::Instant::now();
+    let resp = sender
+        .send_request(req)
+        .await
+        .map_err(|e| lost(e.to_string()))?;
+    let took = t.elapsed();
+    let status = resp.status().as_u16();
+    resp.into_body()
+        .collect()
+        .await
+        .map_err(|e| lost(e.to_string()))?;
+    Ok((status, took))
+}
+
+/// Nearest-rank percentile of a sorted, non-empty slice.
+fn percentile(sorted: &[Duration], p: f64) -> Duration {
+    let rank = (p / 100.0 * sorted.len() as f64).ceil() as usize;
+    sorted[rank.clamp(1, sorted.len()) - 1]
+}
+
+fn ms(d: Duration) -> f64 {
+    (d.as_secs_f64() * 1_000_000.0).round() / 1000.0
+}
+
+fn summarize(mut v: Vec<Duration>) -> Value {
+    v.sort();
+    json!({
+        "samples": v.len(),
+        "p50_ms": ms(percentile(&v, 50.0)),
+        "p99_ms": ms(percentile(&v, 99.0)),
+        "max_ms": ms(*v.last().unwrap()),
+    })
+}
+
+const COLD_CYCLES: usize = 20;
+
+async fn cmd_bench(
+    name: &str,
+    requests: usize,
+    path: &str,
+    server: Option<String>,
+    json: bool,
+) -> R<()> {
+    check_app_name(name)?;
+    if !path.starts_with('/') {
+        return Err(err(
+            "bad_path",
+            format!("--path '{path}' must start with /"),
+            "pass --path /api/notes",
+        ));
+    }
+    if requests == 0 {
+        return Err(err(
+            "bad_requests",
+            "--requests must be at least 1",
+            "pass --requests 2000",
+        ));
+    }
+    let server = server_url(server);
+    let token = token()?;
+    let app = json_body(
+        &admin(
+            &server,
+            &token,
+            "GET",
+            &format!("/v1/apps/{name}"),
+            &[],
+            Bytes::new(),
+        )
+        .await?,
+    )?;
+    let url = app["url"].as_str().unwrap_or("");
+    let authority = url
+        .strip_prefix("http://")
+        .and_then(|r| r.split('/').next())
+        .filter(|a| !a.is_empty())
+        .ok_or_else(|| {
+            err(
+                "bad_response",
+                format!("the server reported the app url '{url}'"),
+                "check that the server and CLI are the same spared version",
+            )
+        })?;
+    let port = authority.rsplit_once(':').map_or("80", |(_, p)| p);
+    let admin_host = parse_base(&server)?;
+    let admin_host = admin_host.rsplit_once(':').map_or("", |(h, _)| h);
+    let ip = if admin_host == "localhost" {
+        "127.0.0.1"
+    } else {
+        admin_host
+    };
+    let addr = format!("{ip}:{port}");
+    let evict_path = format!("/v1/apps/{name}/evict");
+    let evict = || admin(&server, &token, "POST", &evict_path, &[], Bytes::new());
+    let mut status = 0;
+    let mut cold = Vec::with_capacity(COLD_CYCLES);
+    for _ in 0..COLD_CYCLES {
+        let mut conn = connect(&addr).await?;
+        evict().await?;
+        let (st, took) = timed_get(&mut conn, authority, path).await?;
+        status = st;
+        if st >= 400 {
+            return Err(err(
+                "bad_status",
+                format!("GET {path} answered {st}, so its latency says little"),
+                "pass --path of a route that answers 2xx, like --path /",
+            ));
+        }
+        cold.push(took);
+    }
+    let mut conn = connect(&addr).await?;
+    let mut warm = Vec::with_capacity(requests);
+    for _ in 0..requests {
+        warm.push(timed_get(&mut conn, authority, path).await?.1);
+    }
+    let (cold, warm) = (summarize(cold), summarize(warm));
+    if json {
+        out_json(json!({
+            "app": name,
+            "path": path,
+            "status": status,
+            "unit": "ms",
+            "measure": "time from sending a GET to receiving the response head (first byte)",
+            "cold": cold,
+            "warm": warm,
+        }));
+        return Ok(());
+    }
+    println!("{name} GET {path}: time to first byte, ms (HTTP {status})");
+    println!(
+        "{:<28} {:>8} {:>9} {:>9} {:>9}",
+        "", "samples", "p50", "p99", "max"
+    );
+    for (label, v) in [
+        ("cold wake (evict, request)", &cold),
+        ("warm (one connection)", &warm),
+    ] {
+        println!(
+            "{:<28} {:>8} {:>9.3} {:>9.3} {:>9.3}",
+            label,
+            v["samples"],
+            v["p50_ms"].as_f64().unwrap_or(0.0),
+            v["p99_ms"].as_f64().unwrap_or(0.0),
+            v["max_ms"].as_f64().unwrap_or(0.0)
+        );
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Level {
+    Ok,
+    Warn,
+    Fail,
+}
+
+impl Level {
+    fn word(self) -> &'static str {
+        match self {
+            Level::Ok => "ok",
+            Level::Warn => "warn",
+            Level::Fail => "fail",
+        }
+    }
+}
+
+struct Check {
+    name: &'static str,
+    level: Level,
+    detail: String,
+    fix: String,
+}
+
+fn check(
+    name: &'static str,
+    level: Level,
+    detail: impl Into<String>,
+    fix: impl Into<String>,
+) -> Check {
+    Check {
+        name,
+        level,
+        detail: detail.into(),
+        fix: fix.into(),
+    }
+}
+
+/// The first `major.minor.patch` in a tool's `--version` output, like `rustc 1.97.0 (abc 2026-07-07)`.
+fn parse_version(text: &str) -> Option<(u32, u32, u32)> {
+    text.split_whitespace().find_map(|w| {
+        if !w.starts_with(|c: char| c.is_ascii_digit()) {
+            return None;
+        }
+        let mut it = w.split(|c: char| !c.is_ascii_digit());
+        let major = it.next()?.parse().ok()?;
+        let minor = it.next()?.parse().ok()?;
+        let patch = it.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+        Some((major, minor, patch))
+    })
+}
+
+/// The oldest Rust that builds a scaffolded app: edition 2024 and the wasm32-wasip2 target.
+const MIN_RUST: (u32, u32) = (1, 85);
+
+fn toolchain_level(v: Option<(u32, u32, u32)>) -> Level {
+    match v {
+        Some((major, minor, _)) if (major, minor) >= MIN_RUST => Level::Ok,
+        _ => Level::Fail,
+    }
+}
+
+const MIB: u64 = 1 << 20;
+
+/// A cold build of an app's dependencies writes about a gigabyte.
+fn disk_level(free_bytes: u64) -> Level {
+    if free_bytes < 500 * MIB {
+        Level::Fail
+    } else if free_bytes < 2048 * MIB {
+        Level::Warn
+    } else {
+        Level::Ok
+    }
+}
+
+fn human_bytes(b: u64) -> String {
+    if b >= 1 << 30 {
+        format!("{:.1} GiB", b as f64 / (1u64 << 30) as f64)
+    } else {
+        format!("{} MiB", b / MIB)
+    }
+}
+
+fn all_loopback(addrs: &[std::net::IpAddr]) -> bool {
+    !addrs.is_empty() && addrs.iter().all(|a| a.is_loopback())
+}
+
+fn readable_file(path: &Path) -> Result<(), String> {
+    match std::fs::metadata(path) {
+        Ok(m) if m.is_file() => std::fs::File::open(path)
+            .map(|_| ())
+            .map_err(|e| e.to_string()),
+        Ok(_) => Err("not a file".to_string()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+fn summarize_checks(checks: &[Check]) -> (usize, usize, usize) {
+    let n = |l: Level| checks.iter().filter(|c| c.level == l).count();
+    (n(Level::Ok), n(Level::Warn), n(Level::Fail))
+}
+
+fn doctor_json(checks: &[Check]) -> Value {
+    let (ok, warn, fail) = summarize_checks(checks);
+    json!({
+        "ok": fail == 0,
+        "summary": {"ok": ok, "warn": warn, "fail": fail},
+        "checks": checks.iter().map(|c| json!({
+            "name": c.name, "status": c.level.word(), "detail": c.detail, "fix": c.fix,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+fn tool_version(tool: &str) -> Result<String, String> {
+    let out = Command::new(tool)
+        .arg("--version")
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(format!("`{tool} --version` exited {}", out.status));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// In an app directory: whether `src/spared.rs` is as new as the helper this CLI writes.
+fn check_helper(dir: &Path) -> Option<Check> {
+    if !dir.join("spared.toml").is_file() || !dir.join("src/spared.rs").is_file() {
+        return None;
+    }
+    Some(match helper_warning(dir) {
+        Some(w) => check(
+            "helper",
+            Level::Warn,
+            w.clone(),
+            "update src/spared.rs as the detail says",
+        ),
+        None => check(
+            "helper",
+            Level::Ok,
+            format!(
+                "src/spared.rs is helper version {}",
+                current_helper_version()
+            ),
+            "",
+        ),
+    })
+}
+
+fn check_tool(name: &'static str, tool: &str) -> Check {
+    match tool_version(tool) {
+        Ok(text) => {
+            let level = toolchain_level(parse_version(&text));
+            let fix = if level == Level::Ok {
+                String::new()
+            } else {
+                format!(
+                    "update Rust to 1.{}.0 or newer: `rustup update stable`",
+                    MIN_RUST.1
+                )
+            };
+            check(name, level, text, fix)
+        }
+        Err(e) => check(
+            name,
+            Level::Fail,
+            format!("{tool} not runnable: {e}"),
+            "install Rust from https://rustup.rs and open a new shell so ~/.cargo/bin is on PATH",
+        ),
+    }
+}
+
+fn nearest_existing(p: &Path) -> Option<PathBuf> {
+    let mut cur = p.to_path_buf();
+    loop {
+        if cur.exists() {
+            return Some(cur);
+        }
+        if !cur.pop() {
+            return None;
+        }
+    }
+}
+
+fn free_bytes(dir: &Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `c` is a valid NUL-terminated path and `st` is a zeroed statvfs the call fills in.
+    if unsafe { libc::statvfs(c.as_ptr(), &mut st) } != 0 {
+        return None;
+    }
+    Some((st.f_bavail as u64).saturating_mul(st.f_frsize as u64))
+}
+
+fn check_target_dir() -> Vec<Check> {
+    let (dir, source) = match std::env::var_os("CARGO_TARGET_DIR") {
+        Some(t) => (PathBuf::from(t), "CARGO_TARGET_DIR"),
+        None => match home() {
+            Ok(h) => (h.join(".spared/target"), "~/.spared/target"),
+            Err(e) => return vec![check("build-dir", Level::Fail, e.message, e.fix)],
+        },
+    };
+    let Some(base) = nearest_existing(&dir) else {
+        return vec![check(
+            "build-dir",
+            Level::Fail,
+            format!("{} has no existing parent directory", dir.display()),
+            "set CARGO_TARGET_DIR to a directory you can write, or unset it",
+        )];
+    };
+    let probe = base.join(format!(".spared-doctor-{}", std::process::id()));
+    let writable = std::fs::write(&probe, b"").is_ok();
+    let _ = std::fs::remove_file(&probe);
+    let mut out = vec![if writable {
+        check(
+            "build-dir",
+            Level::Ok,
+            format!("{} ({source}) is writable", dir.display()),
+            "",
+        )
+    } else {
+        check(
+            "build-dir",
+            Level::Fail,
+            format!("cannot write to {} ({source})", base.display()),
+            format!(
+                "make {} writable (chmod u+w), or set CARGO_TARGET_DIR to another directory",
+                base.display()
+            ),
+        )
+    }];
+    out.push(match free_bytes(&base) {
+        Some(b) => check(
+            "disk-space",
+            disk_level(b),
+            format!("{} free where builds go", human_bytes(b)),
+            if disk_level(b) == Level::Ok {
+                String::new()
+            } else {
+                format!("free space on {}, or point CARGO_TARGET_DIR at a bigger disk (a first build needs about 1 GiB)", base.display())
+            },
+        ),
+        None => check("disk-space", Level::Warn, format!("could not read free space of {}", base.display()), "check `df` by hand: a first build needs about 1 GiB"),
+    });
+    out
+}
+
+fn check_sdk() -> Check {
+    match find_sdk() {
+        Some(p) => check(
+            "wasi-sdk",
+            Level::Ok,
+            format!("found at {}", p.display()),
+            "",
+        ),
+        None => check(
+            "wasi-sdk",
+            Level::Fail,
+            "not found in $WASI_SDK_PATH or ~/.spared/wasi-sdk",
+            "run `spared setup`, or set WASI_SDK_PATH to a wasi-sdk 25 directory",
+        ),
+    }
+}
+
+async fn is_spared(base: &str) -> bool {
+    match request_retrying(base, "GET", "/", &[], Bytes::new(), Duration::ZERO).await {
+        Ok(r) => serde_json::from_slice::<Value>(&r.body)
+            .map(|v| v["error"]["kind"].is_string())
+            .unwrap_or(false),
+        Err(_) => false,
+    }
+}
+
+async fn check_port(name: &'static str, port: u16, role: &str) -> Check {
+    let bind = std::net::TcpListener::bind(("127.0.0.1", port));
+    if bind.is_ok() {
+        return check(name, Level::Ok, format!("port {port} is free ({role})"), "");
+    }
+    drop(bind);
+    if is_spared(&format!("http://127.0.0.1:{port}")).await {
+        return check(
+            name,
+            Level::Ok,
+            format!("port {port} is held by a running spared server ({role})"),
+            "",
+        );
+    }
+    check(
+        name,
+        Level::Warn,
+        format!("port {port} ({role}) is in use by something that is not a spared server"),
+        format!(
+            "stop that program, or start spared on other ports: `spared serve --listen 127.0.0.1:18080 --admin-listen 127.0.0.1:18081` and deploy with `--server http://127.0.0.1:18081` (`spared dev` needs {port} free)"
+        ),
+    )
+}
+
+async fn check_admin_token() -> Option<Check> {
+    let base = DEFAULT_ADMIN;
+    if !is_spared(base).await {
+        return None;
+    }
+    Some(match token() {
+        Err(e) => check("admin-token", Level::Warn, e.message, e.fix),
+        Ok(t) => match admin(base, &t, "GET", "/v1/apps", &[], Bytes::new()).await {
+            Ok(_) => check(
+                "admin-token",
+                Level::Ok,
+                "the CLI's admin token is accepted by the server on 8081",
+                "",
+            ),
+            Err(e) => check(
+                "admin-token",
+                Level::Warn,
+                format!("the server on 8081 rejected the CLI's token: {}", e.message),
+                "export SPARED_TOKEN=$(cat <data-dir>/admin-token) for the server you deploy to",
+            ),
+        },
+    })
+}
+
+fn check_ca_files() -> Check {
+    let mut set = vec![];
+    for var in ["SSL_CERT_FILE", "SPARED_EXTRA_CA_FILE"] {
+        if let Some(v) = std::env::var_os(var).filter(|v| !v.is_empty()) {
+            set.push((var, PathBuf::from(v)));
+        }
+    }
+    if set.is_empty() {
+        return check(
+            "ca-bundle",
+            Level::Ok,
+            "SSL_CERT_FILE and SPARED_EXTRA_CA_FILE are not set (system trust is used)",
+            "",
+        );
+    }
+    for (var, path) in &set {
+        if let Err(why) = readable_file(path) {
+            return check(
+                "ca-bundle",
+                Level::Fail,
+                format!("{var}={} cannot be read: {why}", path.display()),
+                format!("point {var} at a readable PEM bundle, or unset it"),
+            );
+        }
+    }
+    let names: Vec<&str> = set.iter().map(|(v, _)| *v).collect();
+    check(
+        "ca-bundle",
+        Level::Ok,
+        format!("{} readable", names.join(" and ")),
+        "",
+    )
+}
+
+async fn check_localhost() -> Check {
+    let lookup = tokio::task::spawn_blocking(|| {
+        use std::net::ToSocketAddrs;
+        ("spared-doctor.localhost", 8080)
+            .to_socket_addrs()
+            .map(|it| it.map(|a| a.ip()).collect::<Vec<_>>())
+            .map_err(|e| e.to_string())
+    });
+    let addrs = match tokio::time::timeout(Duration::from_secs(3), lookup).await {
+        Ok(Ok(Ok(a))) => a,
+        _ => vec![],
+    };
+    if all_loopback(&addrs) {
+        check(
+            "localhost",
+            Level::Ok,
+            "*.localhost resolves to loopback",
+            "",
+        )
+    } else {
+        check(
+            "localhost",
+            Level::Warn,
+            "the system resolver does not map <app>.localhost to loopback (browsers and curl still reach it; tools that use the system resolver do not)",
+            "for such a tool, add `127.0.0.1 <app>.localhost` to /etc/hosts, or give it the address, as in `curl --resolve <app>.localhost:8080:127.0.0.1 http://<app>.localhost:8080/`",
+        )
+    }
+}
+
+async fn cmd_doctor(json: bool) -> R<()> {
+    let mut checks = vec![check_tool("rustc", "rustc"), check_tool("cargo", "cargo")];
+    checks.push(if target_installed() {
+        check("wasm-target", Level::Ok, "wasm32-wasip2 is installed", "")
+    } else {
+        check(
+            "wasm-target",
+            Level::Fail,
+            "the wasm32-wasip2 Rust target is not installed",
+            "run `spared setup` (or `rustup target add wasm32-wasip2`)",
+        )
+    });
+    checks.push(check_sdk());
+    checks.extend(check_target_dir());
+    checks.push(check_port("port-8080", 8080, "apps").await);
+    checks.push(check_port("port-8081", 8081, "admin").await);
+    checks.extend(check_admin_token().await);
+    checks.push(check_ca_files());
+    checks.push(check_localhost().await);
+    checks.extend(check_helper(Path::new(".")));
+
+    let (_, warn, fail) = summarize_checks(&checks);
+    let report_json = doctor_json(&checks);
+    if !json {
+        for c in &checks {
+            println!(
+                "{:<4} {}: {}",
+                c.level.word().to_uppercase(),
+                c.name,
+                c.detail
+            );
+            if c.level != Level::Ok && !c.fix.is_empty() {
+                println!("     fix: {}", c.fix);
+            }
+        }
+        println!("{fail} failed, {warn} warnings");
+    }
+    if fail == 0 {
+        if json {
+            out_json(report_json);
+        }
+        return Ok(());
+    }
+    let mut e = err(
+        "doctor_failed",
+        format!("{fail} check(s) failed"),
+        "apply the fix lines for the FAIL checks, then run `spared doctor` again",
+    );
+    e.extra = Some(report_json);
+    Err(e)
+}
+
+struct PathResult {
+    path: String,
+    status: Option<u16>,
+    body: String,
+    failure: Option<(String, String, String)>,
+}
+
+async fn request_once(
+    engine: &Engine,
+    pre: &ProxyPre<Guarded>,
+    m: &Manifest,
+    data: &Path,
+    path: &str,
+    log: &MemoryOutputPipe,
+) -> PathResult {
+    let mut res = PathResult {
+        path: path.to_string(),
+        status: None,
+        body: String::new(),
+        failure: None,
+    };
+    let fail = |res: &mut PathResult, kind: &str, msg: String, fix: &str| {
+        res.failure = Some((kind.into(), msg, fix.into()))
+    };
+    let mut store =
+        match crate::sandbox::app_store(engine, m, data, log, &crate::fsguard::AppCaps::default())
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                fail(
+                    &mut res,
+                    "wake_failed",
+                    format!("{e:#}"),
+                    "check the temp dir is writable",
+                );
+                return res;
+            }
+        };
+    let proxy = match pre.instantiate_async(&mut store).await {
+        Ok(p) => p,
+        Err(e) => {
+            let msg = format!("{e:#}");
+            let fix = wake_failed_fix(&msg);
+            fail(&mut res, "wake_failed", msg, &fix);
+            return res;
+        }
+    };
+    let uri = format!(
+        "http://{}.localhost{}",
+        m.name,
+        if path.starts_with('/') {
+            path.to_string()
+        } else {
+            format!("/{path}")
+        }
+    );
+    let req = match http::Request::builder()
+        .method("GET")
+        .uri(uri)
+        .body(Bytes::new())
+    {
+        Ok(r) => r,
+        Err(e) => {
+            fail(
+                &mut res,
+                "bad_path",
+                format!("invalid path '{path}': {e}"),
+                "pass a path like --path /api/items",
+            );
+            return res;
+        }
+    };
+    let deadline = Duration::from_millis(m.limits.deadline_ms);
+    let max = Maxima::default().response_mb << 20;
+    match call_handler(&mut store, &proxy, req, deadline, max).await {
+        Ok(resp) => {
+            res.status = Some(resp.status().as_u16());
+            let bytes = resp.body();
+            res.body = String::from_utf8_lossy(&bytes[..bytes.len().min(200)]).to_string();
+        }
+        Err(CallError::BadRequest(msg)) => fail(
+            &mut res,
+            "bad_request",
+            msg,
+            "pass a path like --path /api/items",
+        ),
+        Err(CallError::Deadline) => fail(
+            &mut res,
+            "deadline",
+            format!("request exceeded {} ms", m.limits.deadline_ms),
+            "make the handler faster or raise limits.deadline_ms in spared.toml",
+        ),
+        Err(CallError::Trap { kind, text }) => {
+            let fix = trap_fix(kind);
+            let first = trap_message(kind, &text, &m.limits);
+            fail(&mut res, kind.as_str(), first, fix);
+        }
+        Err(CallError::ResponseTooLarge) => fail(
+            &mut res,
+            "response_too_large",
+            format!("response body over {} MB", Maxima::default().response_mb),
+            "send a smaller response",
+        ),
+        Err(CallError::ResponseBody(msg)) => fail(
+            &mut res,
+            "response_body",
+            msg,
+            "check the handler's response body",
+        ),
+        Err(CallError::NoResponse) => fail(
+            &mut res,
+            "no_response",
+            "the handler returned without sending a response".into(),
+            "the handler failed before answering (an Err returned with `?` sends nothing); turn errors into a 500 response with spared::text_response, and read the app log",
+        ),
+    }
+    res
+}
+
+async fn cmd_test(paths: Vec<String>, json: bool) -> R<()> {
+    let dir = PathBuf::from(".");
+    let (mut m, _) = read_manifest(&dir)?;
+    if let Some((field, asked, max, _)) = m.limits.over(&Maxima::default()) {
+        return Err(err(
+            "limit_too_high",
+            format!("limits.{field} = {asked} is above the default server maximum of {max}"),
+            format!("set limits.{field} to at most {max} in spared.toml"),
+        ));
+    }
+    m.limits.clamp(&Maxima::default());
+    let wasm = build(&dir, json)?;
+    let engine =
+        crate::sandbox::engine().map_err(|e| err("engine", format!("{e:#}"), "report this"))?;
+    crate::sandbox::start_epoch_ticker(&engine);
+    let comp = Component::from_file(&engine, &wasm).map_err(|e| {
+        err(
+            "invalid_component",
+            format!("{e:#}"),
+            "build for wasm32-wasip2 as a component: use `#[wstd::http_server]` and a bin crate",
+        )
+    })?;
+    crate::sandbox::check_component(&engine, &comp, &m.grants)
+        .map_err(|r| err(r.kind, r.message, r.fix))?;
+    let pre = crate::sandbox::link(&engine, &comp)
+        .map_err(|e| err("link", format!("{e:#}"), "report this"))?;
+
+    let nanos = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = std::env::temp_dir().join(format!("spared-test-{}-{nanos}", std::process::id()));
+    let data = tmp.join("data");
+    std::fs::create_dir_all(&data).map_err(|e| io_err("create temp data dir", e))?;
+
+    let paths = if paths.is_empty() {
+        vec!["/".to_string()]
+    } else {
+        paths
+    };
+    let log = MemoryOutputPipe::new(1 << 16);
+    let mut results = vec![];
+    for p in &paths {
+        results.push(request_once(&engine, &pre, &m, &data, p, &log).await);
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+    let app_log = String::from_utf8_lossy(&log.contents()).to_string();
+
+    let failed = results
+        .iter()
+        .find(|r| r.failure.is_some() || r.status.is_some_and(|s| s >= 500));
+    let results_json: Vec<Value> = results
+        .iter()
+        .map(|r| json!({"path": r.path, "status": r.status, "body": r.body, "error": r.failure.as_ref().map(|(k, msg, _)| json!({"kind": k, "message": msg}))}))
+        .collect();
+    if !json {
+        for r in &results {
+            match (&r.failure, r.status) {
+                (Some((kind, msg, _)), _) => println!("GET {} -> FAILED {kind}: {msg}", r.path),
+                (None, Some(s)) => println!("GET {} -> {s}\n{}", r.path, r.body),
+                _ => {}
+            }
+        }
+        if !app_log.trim().is_empty() {
+            println!("--- app log ---\n{}", app_log.trim_end());
+        }
+    }
+    match failed {
+        None => {
+            if json {
+                out_json(
+                    json!({"ok": true, "results": results_json, "app_log": app_log, "next": "spared deploy"}),
+                );
+            } else {
+                println!("next: spared deploy");
+            }
+            Ok(())
+        }
+        Some(r) => {
+            let mut e = match &r.failure {
+                Some((k, msg, fix)) => err(k, format!("GET {}: {msg}", r.path), fix.clone()),
+                None => err(
+                    &format!("http_{}", r.status.unwrap_or(500)),
+                    format!("GET {} answered {}", r.path, r.status.unwrap_or(500)),
+                    "the handler returned a 5xx; read the response body and app log above, then fix src/main.rs",
+                ),
+            };
+            e.extra = Some(json!({"ok": false, "results": results_json, "app_log": app_log}));
+            Err(e)
+        }
+    }
+}
+
+fn newest_mtime(dir: &Path) -> SystemTime {
+    let mut newest = SystemTime::UNIX_EPOCH;
+    let mut stack = vec![dir.join("src")];
+    let mut files = vec![dir.join("spared.toml"), dir.join("Cargo.toml")];
+    while let Some(d) = stack.pop() {
+        if let Ok(rd) = std::fs::read_dir(&d) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else {
+                    files.push(p);
+                }
+            }
+        }
+    }
+    for f in files {
+        if let Ok(t) = std::fs::metadata(&f).and_then(|m| m.modified()) {
+            newest = newest.max(t);
+        }
+    }
+    newest
+}
+
+async fn cmd_dev(json: bool) -> R<()> {
+    let dir = PathBuf::from(".");
+    read_manifest(&dir)?;
+    let data_dir = std::fs::canonicalize(".")
+        .map_err(|e| io_err("resolve .", e))?
+        .join(".spared");
+    let engine =
+        crate::sandbox::engine().map_err(|e| err("engine", format!("{e:#}"), "report this"))?;
+    crate::datadir::check(&data_dir).map_err(|e| err(e.kind, e.message, e.fix))?;
+    let (listen, admin) = (
+        "127.0.0.1:8080".parse().unwrap(),
+        "127.0.0.1:8081".parse().unwrap(),
+    );
+    let listeners =
+        crate::server::bind_listeners(listen, admin).map_err(|e| err(e.kind, e.message, e.fix))?;
+    let data_lock =
+        crate::server::lock_data_dir(&data_dir).map_err(|e| err(e.kind, e.message, e.fix))?;
+    let token = crate::server::admin_token(&data_dir, None).map_err(|e| {
+        err(
+            "io",
+            format!(
+                "cannot set up the admin token in {}: {e:#}",
+                data_dir.display()
+            ),
+            "make the app directory writable",
+        )
+    })?;
+    crate::server::share_token_with_cli(&token);
+    let export_line = token_export_line(&data_dir);
+    let cfg = crate::server::Config {
+        data_dir,
+        listen,
+        admin,
+        domain: None,
+        examples_dir: None,
+        idle: Duration::from_secs(30),
+        path_routing: false,
+        max: Maxima::default(),
+        admin_token: token.clone(),
+        client_timeout: Duration::from_secs(10),
+        max_connections: 256,
+        prefetch_mb: 0,
+        max_backups: 20,
+        // `spared dev` prints its own build and deploy lines (JSON with --json) on stdout.
+        access_log: false,
+        caps: Default::default(),
+        compile: crate::compile::CompileLimits::isolated(),
+    };
+    let server = tokio::spawn(crate::server::serve(
+        cfg,
+        engine,
+        std::future::pending(),
+        listeners,
+        data_lock,
+    ));
+    let base = DEFAULT_ADMIN.to_string();
+    let mut up = false;
+    for _ in 0..50 {
+        if server.is_finished() {
+            let why = match server.await {
+                Ok(Err(e)) => format!("{e:#}"),
+                _ => "server task exited".into(),
+            };
+            return Err(err(
+                "serve_failed",
+                format!("could not start the dev server: {why}"),
+                "ports 8080 and 8081 must be free: stop any other `spared serve` or `spared dev`",
+            ));
+        }
+        if request_retrying(&base, "GET", "/v1/apps", &[], Bytes::new(), Duration::ZERO)
+            .await
+            .is_ok()
+        {
+            up = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    if !up {
+        return Err(err(
+            "serve_failed",
+            "the dev server did not come up within 5 s",
+            "ports 8080 and 8081 must be free: stop any other `spared serve` or `spared dev`",
+        ));
+    }
+
+    if !json {
+        eprintln!(
+            "to run spared commands against this dev server from another shell, first run: {export_line}"
+        );
+    }
+    let mut seen = SystemTime::UNIX_EPOCH;
+    loop {
+        let now = newest_mtime(&dir);
+        if now != seen {
+            let d = dir.clone();
+            let built = tokio::task::spawn_blocking(move || build(&d, json))
+                .await
+                .map_err(|e| err("build_failed", e.to_string(), "report this"))?;
+            let result = match built {
+                Ok(wasm) => push(&base, &token, &dir, &wasm).await,
+                Err(e) => Err(e),
+            };
+            match result {
+                Ok(v) => {
+                    if json {
+                        out_json(json!({"event": "deployed", "app": v}));
+                    } else {
+                        print_deployed(&v);
+                        println!(
+                            "watching src/ and spared.toml; edit and save to redeploy (ctrl-c to stop)"
+                        );
+                    }
+                }
+                Err(e) => {
+                    report(&e, json);
+                    if !json {
+                        eprintln!("waiting for the next change");
+                    }
+                }
+            }
+            seen = newest_mtime(&dir);
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+#[cfg(test)]
+mod sdk_checksum_tests {
+    use super::*;
+
+    const TABLE: &str = "\
+52640dde13599bf127a95499e61d6d640256119456d1af8897ab6725bcf3d89c  wasi-sdk-25.0-x86_64-linux.tar.gz
+";
+
+    fn temp_file(name: &str, bytes: &[u8]) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("spared-sdk-test-{}-{name}", std::process::id()));
+        std::fs::write(&p, bytes).unwrap();
+        p
+    }
+
+    #[test]
+    fn tarball_must_match_the_pinned_digest() {
+        let p = temp_file("bad", b"not a wasi-sdk");
+        let Err(e) = verify_sdk_tarball(TABLE, "wasi-sdk-25.0-x86_64-linux.tar.gz", &p) else {
+            panic!("accepted a wrong file")
+        };
+        assert_eq!(e.kind, "checksum_mismatch");
+        assert!(e.fix.contains("WASI_SDK_PATH"), "{}", e.fix);
+        let Err(e) = verify_sdk_tarball(TABLE, "wasi-sdk-25.0-riscv-linux.tar.gz", &p) else {
+            panic!("accepted an unpinned file")
+        };
+        assert_eq!(e.kind, "checksum_missing");
+        let table = format!(
+            "{}  wasi-sdk-25.0-x86_64-linux.tar.gz\n",
+            sha256_hex(&p).unwrap()
+        );
+        assert!(verify_sdk_tarball(&table, "wasi-sdk-25.0-x86_64-linux.tar.gz", &p).is_ok());
+        std::fs::remove_file(&p).unwrap();
+    }
+
+    #[test]
+    fn pinned_table_covers_every_platform_setup_downloads() {
+        for platform in ["x86_64-linux", "arm64-linux", "arm64-macos", "x86_64-macos"] {
+            let file = format!("wasi-sdk-{SDK_VERSION}.0-{platform}.tar.gz");
+            let h = sdk_expected_sha(SDK_SHA256, &file).unwrap_or_else(|| panic!("{file}"));
+            assert_eq!(h.len(), 64, "{file}");
+            assert!(h.bytes().all(|b| b.is_ascii_hexdigit()), "{file}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod doctor_tests {
+    use super::*;
+
+    #[test]
+    fn versions_parse_from_tool_output() {
+        assert_eq!(
+            parse_version("rustc 1.97.0 (2d8144b78 2026-07-07)"),
+            Some((1, 97, 0))
+        );
+        assert_eq!(
+            parse_version("cargo 1.85.1 (abc 2025-03-01)"),
+            Some((1, 85, 1))
+        );
+        assert_eq!(parse_version("rustc 1.99.0-nightly (x)"), Some((1, 99, 0)));
+        assert_eq!(parse_version("no numbers here"), None);
+    }
+
+    #[test]
+    fn old_or_unknown_toolchains_fail() {
+        assert_eq!(toolchain_level(Some((1, 85, 0))), Level::Ok);
+        assert_eq!(toolchain_level(Some((2, 0, 0))), Level::Ok);
+        assert_eq!(toolchain_level(Some((1, 84, 9))), Level::Fail);
+        assert_eq!(toolchain_level(None), Level::Fail);
+    }
+
+    #[test]
+    fn disk_thresholds() {
+        assert_eq!(disk_level(100 * MIB), Level::Fail);
+        assert_eq!(disk_level(1000 * MIB), Level::Warn);
+        assert_eq!(disk_level(5000 * MIB), Level::Ok);
+        assert_eq!(human_bytes(3 << 30), "3.0 GiB");
+        assert_eq!(human_bytes(700 * MIB), "700 MiB");
+    }
+
+    #[test]
+    fn loopback_needs_every_address_loopback() {
+        let lo: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+        let lo6: std::net::IpAddr = "::1".parse().unwrap();
+        let other: std::net::IpAddr = "10.0.0.1".parse().unwrap();
+        assert!(all_loopback(&[lo, lo6]));
+        assert!(!all_loopback(&[lo, other]));
+        assert!(!all_loopback(&[]));
+    }
+
+    #[test]
+    fn unreadable_ca_files_are_reported() {
+        let dir = std::env::temp_dir().join(format!("spared-doctor-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("ca.pem");
+        std::fs::write(&file, "x").unwrap();
+        assert!(readable_file(&file).is_ok());
+        assert!(readable_file(&dir.join("missing.pem")).is_err());
+        assert!(readable_file(&dir).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn json_report_names_status_and_fail_count() {
+        let checks = vec![
+            check("a", Level::Ok, "fine", ""),
+            check("b", Level::Warn, "hmm", "do x"),
+            check("c", Level::Fail, "bad", "do y"),
+        ];
+        let v = doctor_json(&checks);
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["summary"]["fail"], 1);
+        assert_eq!(v["checks"][1]["status"], "warn");
+        assert_eq!(v["checks"][2]["fix"], "do y");
+    }
+
+    #[test]
+    fn nearest_existing_walks_up() {
+        let tmp = std::env::temp_dir();
+        assert_eq!(nearest_existing(&tmp.join("no/such/deep/dir")), Some(tmp));
+    }
+}
+
+#[cfg(test)]
+mod template_tests {
+    use super::*;
+
+    #[test]
+    fn every_template_has_a_valid_manifest_and_entry_point() {
+        let mut names = std::collections::HashSet::new();
+        for t in TEMPLATES {
+            assert!(names.insert(t.name), "duplicate template {}", t.name);
+            assert!(valid_name(t.name));
+            assert!(!t.routes.is_empty());
+            let m: Manifest = toml::from_str(&t.manifest.replace("__NAME__", "demo"))
+                .unwrap_or_else(|e| panic!("{}: {e}", t.name));
+            assert_eq!(m.name, "demo");
+            assert!(t.main.contains("const SCHEMA"), "{} has no SCHEMA", t.name);
+            assert!(
+                t.main.contains("#[wstd::http_server]"),
+                "{} has no handler",
+                t.name
+            );
+            assert!(
+                t.main.lines().count() <= 150,
+                "{} is over 150 lines",
+                t.name
+            );
+        }
+        assert!(find_template(DEFAULT_TEMPLATE).is_ok());
+    }
+
+    #[test]
+    fn unknown_template_names_the_choices() {
+        let e = find_template("nope").err().unwrap();
+        assert_eq!(e.kind, "unknown_template");
+        assert!(e.fix.contains("counter") && e.fix.contains("spared templates"));
+    }
+}
+
+#[cfg(test)]
+mod scaffold_tests {
+    use super::*;
+
+    fn app_dir(tag: &str, spared_rs: Option<&str>) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("spared-helper-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("spared.toml"), "name = \"x\"\n").unwrap();
+        if let Some(t) = spared_rs {
+            std::fs::write(d.join("src/spared.rs"), t).unwrap();
+        }
+        d
+    }
+
+    #[test]
+    fn a_new_app_carries_the_helper_marker_and_gets_no_warning() {
+        let files = new_files("x", &TEMPLATES[0]);
+        let (_, text) = files.iter().find(|(p, _)| *p == "src/spared.rs").unwrap();
+        assert_eq!(helper_version(text), Some(current_helper_version()));
+        let d = app_dir("fresh", Some(text));
+        assert_eq!(helper_warning(&d), None);
+        let c = check_helper(&d).unwrap();
+        assert_eq!(c.level, Level::Ok);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn an_older_helper_or_one_with_no_marker_is_warned_about() {
+        let ours = current_helper_version();
+        let older = format!(
+            "// spared-helper: {}\nfn x() {{}}\n",
+            ours.saturating_sub(1)
+        );
+        for (tag, text) in [("none", "fn x() {}\n".to_string()), ("old", older)] {
+            let d = app_dir(tag, Some(&text));
+            let w = helper_warning(&d).unwrap_or_else(|| panic!("{tag}: no warning"));
+            assert!(w.contains("spared new"), "{w}");
+            assert_eq!(check_helper(&d).unwrap().level, Level::Warn, "{tag}");
+            std::fs::remove_dir_all(&d).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_newer_helper_says_to_upgrade_spared() {
+        let text = format!("// spared-helper: {}\n", current_helper_version() + 1);
+        let d = app_dir("newer", Some(&text));
+        assert!(helper_warning(&d).unwrap().contains("Upgrade spared"));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_directory_without_a_helper_is_not_checked() {
+        let d = app_dir("nohelper", None);
+        assert_eq!(helper_warning(&d), None);
+        assert!(check_helper(&d).is_none());
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn scaffold_lock_names_the_app_and_stays_sorted() {
+        for name in ["aaa", "my-app", "zzz"] {
+            let v: toml::Value = toml::from_str(&lock_for(name)).unwrap();
+            let pkgs = v["package"].as_array().unwrap();
+            let names: Vec<&str> = pkgs.iter().map(|p| p["name"].as_str().unwrap()).collect();
+            assert_eq!(names.iter().filter(|n| **n == name).count(), 1);
+            assert!(!names.contains(&"__NAME__"));
+            let root = pkgs
+                .iter()
+                .find(|p| p["name"].as_str() == Some(name))
+                .unwrap();
+            assert_eq!(root["version"].as_str(), Some("0.1.0"));
+            assert!(root.get("source").is_none());
+            let mut sorted = names.clone();
+            sorted.sort();
+            assert_eq!(names, sorted);
+        }
+    }
+}
+
+#[cfg(test)]
+mod bench_tests {
+    use super::*;
+
+    #[test]
+    fn percentiles_use_nearest_rank() {
+        let v: Vec<Duration> = (1..=100).map(Duration::from_millis).collect();
+        assert_eq!(percentile(&v, 50.0), Duration::from_millis(50));
+        assert_eq!(percentile(&v, 99.0), Duration::from_millis(99));
+        let one = [Duration::from_millis(7)];
+        assert_eq!(percentile(&one, 50.0), Duration::from_millis(7));
+        assert_eq!(percentile(&one, 99.0), Duration::from_millis(7));
+        let s = summarize(vec![
+            Duration::from_micros(1500),
+            Duration::from_micros(500),
+        ]);
+        assert_eq!(s["samples"], 2);
+        assert_eq!(s["p50_ms"], 0.5);
+        assert_eq!(s["max_ms"], 1.5);
+    }
+}
+
+#[cfg(test)]
+mod guest_cflags_tests {
+    use super::*;
+
+    #[test]
+    fn guest_sqlite_uses_pread_and_pwrite() {
+        // Without these SQLite on WASI reads and writes every page through a WASI stream, which
+        // wasmtime-wasi runs on a blocking-pool thread: the SQLite microbenchmark went from 1.8x to 3.2x native.
+        let f = guest_cflags("/sdk");
+        let words: Vec<&str> = f.split_whitespace().collect();
+        for flag in [
+            "-DHAVE_PREAD=1",
+            "-DHAVE_PWRITE=1",
+            "-DSQLITE_THREADSAFE=0",
+            "-DSQLITE_OMIT_LOAD_EXTENSION=1",
+            "-O3",
+        ] {
+            assert!(words.contains(&flag), "{flag} missing from {f}");
+        }
+        assert_eq!(words[0], "--sysroot=/sdk/share/wasi-sysroot");
+        assert!(!f.contains('#') && !f.contains('\n'), "{f}");
+    }
+}
+
+#[cfg(test)]
+mod shared_target_tests {
+    use super::*;
+
+    #[test]
+    fn a_unit_belongs_to_the_directory_that_last_built_it() {
+        let t = std::env::temp_dir().join(format!("spared-owner-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        let a = Path::new("/work/a/my-app");
+        let b = Path::new("/work/b/my-app");
+        assert!(unit_owned_by_other(&t, "my-app", a), "no stamp yet");
+        let stamp = unit_owner_stamp(&t, "my-app");
+        std::fs::create_dir_all(stamp.parent().unwrap()).unwrap();
+        std::fs::write(&stamp, a.display().to_string()).unwrap();
+        assert!(!unit_owned_by_other(&t, "my-app", a));
+        assert!(unit_owned_by_other(&t, "my-app", b));
+        assert!(unit_owned_by_other(&t, "other-app", a));
+        std::fs::remove_dir_all(&t).unwrap();
+    }
+
+    #[test]
+    fn the_package_name_comes_from_cargo_toml() {
+        let d = std::env::temp_dir().join(format!("spared-pkgname-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        assert_eq!(package_name(&d), None);
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"my-app\"\n").unwrap();
+        assert_eq!(package_name(&d).as_deref(), Some("my-app"));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod connect_retry_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn free_port() -> u16 {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    }
+
+    #[tokio::test]
+    async fn a_server_that_starts_late_is_waited_for() {
+        let port = free_port();
+        let late = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            let l = tokio::net::TcpListener::bind(("127.0.0.1", port))
+                .await
+                .unwrap();
+            let (mut s, _) = l.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = s.read(&mut buf).await;
+            s.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok")
+                .await
+                .unwrap();
+        });
+        let r = request(
+            &format!("http://127.0.0.1:{port}"),
+            "GET",
+            "/",
+            &[],
+            Bytes::new(),
+        )
+        .await;
+        let Ok(r) = r else {
+            panic!("the request should wait for the listener")
+        };
+        assert_eq!(r.status, 200);
+        late.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_server_that_never_starts_fails_after_about_two_seconds() {
+        let port = free_port();
+        let t = std::time::Instant::now();
+        let e = request(
+            &format!("http://127.0.0.1:{port}"),
+            "GET",
+            "/",
+            &[],
+            Bytes::new(),
+        )
+        .await;
+        let Err(e) = e else { panic!("nothing listens") };
+        assert_eq!(e.kind, "server_unreachable");
+        let took = t.elapsed();
+        assert!(
+            took >= Duration::from_millis(1900) && took < Duration::from_secs(5),
+            "{took:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod message_tests {
+    use super::*;
+    use crate::grants::Limits;
+
+    #[test]
+    fn a_memory_limit_below_the_apps_minimum_names_the_floor() {
+        let msg = "memory minimum size of 19 pages exceeds memory limits";
+        assert_eq!(
+            wake_failed_fix(msg),
+            "raise limits.memory_mb in spared.toml (this app needs at least 2)"
+        );
+        let big = "memory minimum size of 1025 pages exceeds memory limits";
+        assert!(
+            wake_failed_fix(big).contains("at least 65)"),
+            "{}",
+            wake_failed_fix(big)
+        );
+        assert!(wake_failed_fix("something else").contains("manifest grants"));
+        assert!(
+            wake_failed_fix("memory minimum size of x pages exceeds memory limits")
+                .contains("manifest grants")
+        );
+    }
+
+    #[test]
+    fn a_cpu_trap_uses_the_servers_wording() {
+        let limits = Limits {
+            cpu_ms: 1000,
+            ..Limits::default()
+        };
+        assert_eq!(
+            trap_message(
+                TrapKind::CpuLimit,
+                "error while executing\nbacktrace:",
+                &limits
+            ),
+            "request used more than 1000 ms of compute"
+        );
+        assert_eq!(
+            trap_message(TrapKind::MemoryLimit, "", &limits),
+            "the app hit its memory limit (64 MB)"
+        );
+        assert_eq!(
+            trap_message(
+                TrapKind::AppTrap,
+                "wasm trap: unreachable\nbacktrace:",
+                &limits
+            ),
+            "wasm trap: unreachable"
+        );
+        assert_eq!(
+            trap_message(TrapKind::AppTrap, "backtrace:", &limits),
+            "the app trapped (panic or abort)"
+        );
+    }
+
+    #[test]
+    fn the_dev_server_prints_the_export_line_for_its_own_token() {
+        let line = token_export_line(Path::new("/work/my-app/.spared"));
+        assert_eq!(
+            line,
+            "export SPARED_TOKEN=$(cat '/work/my-app/.spared/admin-token')"
+        );
+        assert!(
+            UNAUTHORIZED_FIX.contains("admin-token")
+                && UNAUTHORIZED_FIX.contains("~/.spared/token")
+        );
+    }
+}

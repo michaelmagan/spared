@@ -1,0 +1,17 @@
+.git
+.claude
+.github
+**/target
+bench
+probes
+internal
+docs
+assets
+examples/dist
+*.cwasm
+.spared
+.spared-data
+apps/bench3b-sandbox
+apps/bench3b-host
+apps/demo-spin
+apps/demo-workerd

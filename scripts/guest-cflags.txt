@@ -1,0 +1,16 @@
+# C flags for SQLite (and any other C) compiled into a wasm32-wasip2 guest, without --sysroot.
+# One source for every guest build: `spared deploy/test/dev` embeds this file (crates/spared/src/cli.rs),
+# and scripts/build-examples.sh and bench/env.sh read it. Lines starting with # are comments; the
+# flag lines are joined with spaces.
+#
+# HAVE_PREAD/HAVE_PWRITE: SQLite turns pread/pwrite on by itself only for Linux and macOS. Without
+# them every page read and write on WASI is an lseek plus a WASI stream call, and wasmtime-wasi 50
+# sends each stream call to a blocking-pool thread; with them a page is one host call on the
+# calling thread (SQLite microbenchmark: 3.2x to 1.8x native). SQLITE_DEFAULT_MEMSTATUS=0, SQLITE_OMIT_SHARED_CACHE
+# and SQLITE_USE_ALLOCA come from SQLite's recommended compile-time options and change no SQL
+# behaviour. Measurements: docs/sqlite-in-wasm-speedup.md.
+-O3 -mbulk-memory -msimd128 -mnontrapping-fptoint -mmultivalue -mreference-types
+-DSQLITE_THREADSAFE=0 -DSQLITE_OMIT_LOAD_EXTENSION=1
+-DHAVE_PREAD=1 -DHAVE_PWRITE=1
+-DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_OMIT_SHARED_CACHE -DSQLITE_USE_ALLOCA
+-D_WASI_EMULATED_GETPID -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS

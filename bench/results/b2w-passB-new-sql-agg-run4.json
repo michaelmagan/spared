@@ -1,0 +1,1 @@
+{"body_len":278,"body_len_changed":0,"errors":0,"first_byte_us":{"max":22225,"mean":14436,"min":13453,"p50":13819,"p90":15984,"p99":20354},"full_body_us":{"max":22226,"mean":14438,"min":13455,"p50":13821,"p90":15986,"p99":20356},"host":"workloads.localhost","path":"/w/sql-agg","requests":200,"server_cpu_us_per_request":13957,"server_pids":[1361],"wall_s":2.888235913,"warmup":20}

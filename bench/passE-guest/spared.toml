@@ -1,0 +1,10 @@
+name = "passe"
+
+[grants]
+data = true
+
+[limits]
+memory_mb = 128
+cpu_ms = 5000
+deadline_ms = 30000
+max_outbound = 0

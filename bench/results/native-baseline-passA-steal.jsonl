@@ -1,0 +1,1 @@
+{"suite": "native-baseline", "segment": "native-baseline", "start": "2026-11-10T23:29:39Z", "end": "2026-11-10T23:35:42Z", "loadavg1_at_start": 0.27, "steal_jiffies_before": 157635, "steal_jiffies_after": 158229, "steal_delta": 594, "all_cpu_jiffies_delta": 144687, "steal_pct": 0.411}

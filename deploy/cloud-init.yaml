@@ -1,0 +1,17 @@
+#cloud-config
+# EXPERIMENTAL, not yet run against a real provider. Ubuntu or Debian VPS: installs Docker and
+# starts the spared image. The public listener binds 127.0.0.1:8080 so nothing is exposed until
+# you put TLS in front (deploy/Caddyfile). The admin listener stays inside the container and is
+# never published. The admin token is generated on the server into the data volume.
+# See docs/deploy.md.
+package_update: true
+packages:
+  - docker.io
+runcmd:
+  - systemctl enable --now docker
+  - >-
+    docker run -d --name spared --restart unless-stopped --read-only
+    --tmpfs /tmp:rw,noexec,nosuid,size=64m --user 10001:10001
+    --cap-drop=ALL --security-opt=no-new-privileges --pids-limit=256 --memory=512m
+    -p 127.0.0.1:8080:8080 -v spared-data:/data
+    ghcr.io/michaelmagan/spared:0.0.1-preview

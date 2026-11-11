@@ -1,0 +1,132 @@
+{
+ "lever": "mem-m-base",
+ "timing": [],
+ "memory": [
+  {
+   "file": "mem16-m-base-rep2.json",
+   "apps_hot": 16,
+   "engine_knobs": null,
+   "distinct_sha256": 16,
+   "wasm_bytes": 2189902,
+   "cwasm_bytes": 6943248,
+   "kb_per_hot_app_growth": {
+    "rss": 5039,
+    "anon": 309,
+    "file": 4729,
+    "pss": 4893,
+    "pss_anon": 309,
+    "pss_file": 4584
+   },
+   "kb_total": {
+    "before_touch": {
+     "rss": 30716,
+     "anon": 5136,
+     "file": 25580,
+     "pss": 28645,
+     "pss_anon": 5136,
+     "pss_file": 23509
+    },
+    "after_1_hot": {
+     "rss": 39408,
+     "anon": 5472,
+     "file": 33936,
+     "pss": 37050,
+     "pss_anon": 5472,
+     "pss_file": 31578
+    },
+    "after_n_hot": {
+     "rss": 111340,
+     "anon": 10084,
+     "file": 101256,
+     "pss": 106942,
+     "pss_anon": 10084,
+     "pss_file": 96858
+    }
+   }
+  },
+  {
+   "file": "mem16-m-base-rep3.json",
+   "apps_hot": 16,
+   "engine_knobs": null,
+   "distinct_sha256": 16,
+   "wasm_bytes": 2189902,
+   "cwasm_bytes": 6943248,
+   "kb_per_hot_app_growth": {
+    "rss": 5024,
+    "anon": 307,
+    "file": 4716,
+    "pss": 4878,
+    "pss_anon": 307,
+    "pss_file": 4570
+   },
+   "kb_total": {
+    "before_touch": {
+     "rss": 30600,
+     "anon": 5140,
+     "file": 25460,
+     "pss": 28600,
+     "pss_anon": 5140,
+     "pss_file": 23460
+    },
+    "after_1_hot": {
+     "rss": 39092,
+     "anon": 5488,
+     "file": 33604,
+     "pss": 36802,
+     "pss_anon": 5488,
+     "pss_file": 31314
+    },
+    "after_n_hot": {
+     "rss": 110988,
+     "anon": 10064,
+     "file": 100924,
+     "pss": 106658,
+     "pss_anon": 10064,
+     "pss_file": 96594
+    }
+   }
+  },
+  {
+   "file": "mem16-m-base.json",
+   "apps_hot": 16,
+   "engine_knobs": null,
+   "distinct_sha256": 16,
+   "wasm_bytes": 2189902,
+   "cwasm_bytes": 6943248,
+   "kb_per_hot_app_growth": {
+    "rss": 4237,
+    "anon": 310,
+    "file": 3926,
+    "pss": 4091,
+    "pss_anon": 310,
+    "pss_file": 3781
+   },
+   "kb_total": {
+    "before_touch": {
+     "rss": 31064,
+     "anon": 5140,
+     "file": 25924,
+     "pss": 28926,
+     "pss_anon": 5140,
+     "pss_file": 23786
+    },
+    "after_1_hot": {
+     "rss": 38968,
+     "anon": 5480,
+     "file": 33488,
+     "pss": 36540,
+     "pss_anon": 5480,
+     "pss_file": 31060
+    },
+    "after_n_hot": {
+     "rss": 98860,
+     "anon": 10108,
+     "file": 88752,
+     "pss": 94392,
+     "pss_anon": 10108,
+     "pss_file": 84284
+    }
+   }
+  }
+ ]
+}

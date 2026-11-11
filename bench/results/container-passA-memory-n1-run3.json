@@ -1,0 +1,116 @@
+{
+ "target": "container",
+ "n": 1,
+ "rep": 3,
+ "images": "spared-ctr-dist:v0..0 (one distinct static binary per container)",
+ "server_cpu": "0",
+ "docker_version": "29.9.2",
+ "daemons_before_kb": {
+  "VmRSS": 185764,
+  "RssAnon": 79728,
+  "RssFile": 106036,
+  "Pss": 182858,
+  "Pss_Anon": 79728,
+  "Pss_File": 103130,
+  "pids": 2
+ },
+ "start_to_first_byte_us": [
+  215104
+ ],
+ "snapshots_kb": {
+  "first": {
+   "app": {
+    "VmRSS": 3600,
+    "RssAnon": 344,
+    "RssFile": 3256,
+    "Pss": 3596,
+    "Pss_Anon": 344,
+    "Pss_File": 3252,
+    "pids": 1
+   },
+   "shim": {
+    "VmRSS": 11020,
+    "RssAnon": 3812,
+    "RssFile": 7208,
+    "Pss": 11012,
+    "Pss_Anon": 3812,
+    "Pss_File": 7200,
+    "pids": 1
+   },
+   "shim_names": [
+    "containerd-shim"
+   ],
+   "proxy": {
+    "VmRSS": 5156,
+    "RssAnon": 1292,
+    "RssFile": 3864,
+    "Pss": 3690,
+    "Pss_Anon": 1292,
+    "Pss_File": 2398,
+    "pids": 1
+   },
+   "daemons": {
+    "VmRSS": 185780,
+    "RssAnon": 79744,
+    "RssFile": 106036,
+    "Pss": 182848,
+    "Pss_Anon": 79744,
+    "Pss_File": 103104,
+    "pids": 2
+   },
+   "cgroup_sum_kb": {
+    "usage": 4784,
+    "rss": 344,
+    "cache": 4004,
+    "mapped_file": 3252
+   }
+  },
+  "idle15": {
+   "app": {
+    "VmRSS": 3600,
+    "RssAnon": 344,
+    "RssFile": 3256,
+    "Pss": 3596,
+    "Pss_Anon": 344,
+    "Pss_File": 3252,
+    "pids": 1
+   },
+   "shim": {
+    "VmRSS": 11020,
+    "RssAnon": 3812,
+    "RssFile": 7208,
+    "Pss": 11012,
+    "Pss_Anon": 3812,
+    "Pss_File": 7200,
+    "pids": 1
+   },
+   "shim_names": [
+    "containerd-shim"
+   ],
+   "proxy": {
+    "VmRSS": 5156,
+    "RssAnon": 1292,
+    "RssFile": 3864,
+    "Pss": 3690,
+    "Pss_Anon": 1292,
+    "Pss_File": 2398,
+    "pids": 1
+   },
+   "daemons": {
+    "VmRSS": 185780,
+    "RssAnon": 79744,
+    "RssFile": 106036,
+    "Pss": 182848,
+    "Pss_Anon": 79744,
+    "Pss_File": 103104,
+    "pids": 2
+   },
+   "cgroup_sum_kb": {
+    "usage": 4784,
+    "rss": 344,
+    "cache": 4004,
+    "mapped_file": 3252
+   }
+  }
+ }
+}

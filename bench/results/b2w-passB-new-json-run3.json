@@ -1,0 +1,1 @@
+{"body_len":725,"body_len_changed":0,"errors":0,"first_byte_us":{"max":2103,"mean":1786,"min":1577,"p50":1799,"p90":1890,"p99":1984},"full_body_us":{"max":2105,"mean":1787,"min":1579,"p50":1800,"p90":1892,"p99":1986},"host":"workloads.localhost","path":"/w/json","requests":200,"server_cpu_us_per_request":1714,"server_pids":[666],"wall_s":0.358033434,"warmup":20}

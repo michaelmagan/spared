@@ -1,0 +1,10 @@
+name = "list"
+
+[grants]
+data = true
+
+[limits]
+memory_mb = 64
+cpu_ms = 500
+deadline_ms = 5000
+max_outbound = 0

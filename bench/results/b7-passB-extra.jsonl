@@ -1,0 +1,10 @@
+{"mode":"on","run":1,"pss_kb_after_mixed":49213,"log_bytes":7082486}
+{"mode":"off","run":1,"pss_kb_after_mixed":49147,"log_bytes":318}
+{"mode":"off","run":2,"pss_kb_after_mixed":49291,"log_bytes":318}
+{"mode":"on","run":2,"pss_kb_after_mixed":48985,"log_bytes":7082277}
+{"mode":"on","run":3,"pss_kb_after_mixed":49989,"log_bytes":7082728}
+{"mode":"off","run":3,"pss_kb_after_mixed":49205,"log_bytes":318}
+{"mode":"off","run":4,"pss_kb_after_mixed":49335,"log_bytes":318}
+{"mode":"on","run":4,"pss_kb_after_mixed":48928,"log_bytes":7082842}
+{"mode":"on","run":5,"pss_kb_after_mixed":49238,"log_bytes":7082423}
+{"mode":"off","run":5,"pss_kb_after_mixed":49795,"log_bytes":318}

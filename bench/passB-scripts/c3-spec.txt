@@ -1,0 +1,9 @@
+# name|target|NA|UNIQ|SEEDED|DROP|WARM
+n50-empty-none|spared|50|50|0|none|1
+n50-nowarm-none|spared|50|50|1|none|0
+n500u500-nowarm-all|spared|500|500|1|all|0
+n500u500-nowarm-none|spared|500|500|1|none|0
+n50-empty-none|workerd|50|50|0|none|1
+n50-nowarm-none|workerd|50|50|1|none|0
+n500-nowarm-all|workerd|500|500|1|all|0
+n500-nowarm-none|workerd|500|500|1|none|0

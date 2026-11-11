@@ -1,0 +1,160 @@
+{
+ "lever": "s-fdatasync",
+ "timing": [
+  {
+   "batch": "final-sqlite-wal",
+   "journal_mode": "WAL",
+   "cpus": "3",
+   "rows": 100000,
+   "reps": 7,
+   "statistic": "median",
+   "loadavg_limit_before_each_run": 0.3,
+   "engine_knobs": null,
+   "extra_sql": null,
+   "native_comparator": "nat-fdatasync",
+   "native_binary": "s-fdatasync",
+   "wasm_binary": "s-fdatasync",
+   "ratio": {
+    "insert_bulk": 1.751,
+    "point_select": 2.148,
+    "index_agg": 2.633,
+    "scan": 2.642,
+    "update_bulk": 1.856,
+    "durable_insert_200": 1.423
+   },
+   "geomean": 2.026,
+   "wasm_us": {
+    "insert_bulk": 91663,
+    "point_select": 123576,
+    "index_agg": 2931,
+    "scan": 14730,
+    "update_bulk": 131191,
+    "durable_insert_200": 37535
+   },
+   "native_us": {
+    "insert_bulk": 52340,
+    "point_select": 57533,
+    "index_agg": 1113,
+    "scan": 5575,
+    "update_bulk": 70696,
+    "durable_insert_200": 26371
+   },
+   "baseline_geomean_same_batch": 2.168,
+   "wasm_runs": {
+    "insert_bulk": [
+     84326,
+     95726,
+     91663,
+     115265,
+     90350,
+     89552,
+     100472
+    ],
+    "point_select": [
+     116619,
+     123576,
+     128656,
+     115279,
+     123457,
+     140183,
+     129550
+    ],
+    "index_agg": [
+     2851,
+     2931,
+     3061,
+     2830,
+     3445,
+     2915,
+     3030
+    ],
+    "scan": [
+     14206,
+     18355,
+     16532,
+     13951,
+     24592,
+     14730,
+     14350
+    ],
+    "update_bulk": [
+     125837,
+     138517,
+     163105,
+     122737,
+     155286,
+     131191,
+     127569
+    ],
+    "durable_insert_200": [
+     41059,
+     68826,
+     34835,
+     37535,
+     38925,
+     34454,
+     34073
+    ]
+   },
+   "native_runs": {
+    "insert_bulk": [
+     42866,
+     57562,
+     59214,
+     43862,
+     52340,
+     46828,
+     56175
+    ],
+    "point_select": [
+     63323,
+     58120,
+     54930,
+     48320,
+     48188,
+     57533,
+     62968
+    ],
+    "index_agg": [
+     1045,
+     1195,
+     1113,
+     1019,
+     1237,
+     1075,
+     1429
+    ],
+    "scan": [
+     5601,
+     5980,
+     5412,
+     5591,
+     5522,
+     5420,
+     5575
+    ],
+    "update_bulk": [
+     61428,
+     76943,
+     73279,
+     64471,
+     81468,
+     64244,
+     70696
+    ],
+    "durable_insert_200": [
+     28276,
+     27439,
+     34324,
+     21506,
+     22143,
+     23530,
+     26371
+    ]
+   }
+  }
+ ],
+ "memory": [],
+ "wasm_bytes": 1983891,
+ "cwasm_bytes": 6198872
+}

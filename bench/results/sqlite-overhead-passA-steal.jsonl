@@ -1,0 +1,1 @@
+{"suite": "sqlite-overhead", "segment": "sqlite-overhead", "start": "2026-11-10T23:27:58Z", "end": "2026-11-10T23:28:04Z", "loadavg1_at_start": 0.21, "steal_jiffies_before": 157401, "steal_jiffies_after": 157452, "steal_delta": 51, "all_cpu_jiffies_delta": 2399, "steal_pct": 2.126}

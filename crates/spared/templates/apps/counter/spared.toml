@@ -1,0 +1,12 @@
+name = "__NAME__"
+
+# A grant is a permission the app is given. Nothing is allowed unless it is listed here, and the
+# server refuses to run a build that uses more. This app only needs its SQLite file.
+[grants]
+data = true
+
+[limits]
+memory_mb = 64
+cpu_ms = 1000
+deadline_ms = 5000
+max_outbound = 10
