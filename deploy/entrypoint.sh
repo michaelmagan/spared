@@ -1,5 +1,6 @@
 #!/bin/sh
-# Container entrypoint: spared serve with the image's defaults. Extra arguments are appended.
+# Container entrypoint: spared serve with the image's defaults. Extra arguments are appended,
+# unless the first one is `spared`: then the arguments run as a command of their own.
 #
 #   spared serve --data-dir /data --examples-dir /examples --listen 0.0.0.0:${PORT:-8080}
 #
@@ -18,7 +19,10 @@
 set -eu
 SPARED_PATH_ROUTING=${SPARED_PATH_ROUTING:-1}
 export SPARED_PATH_ROUTING
-set -- spared serve --data-dir /data --examples-dir /examples --listen "0.0.0.0:${PORT:-8080}" "$@"
+# `docker run IMAGE spared <command>` (for example `spared --version`) runs that command as given.
+if [ "${1:-}" != spared ]; then
+  set -- spared serve --data-dir /data --examples-dir /examples --listen "0.0.0.0:${PORT:-8080}" "$@"
+fi
 if [ "$(id -u)" = 0 ]; then
   if [ "$(stat -c %u /data)" != 10001 ]; then chown -R spared:spared /data; fi
   exec setpriv --reuid=10001 --regid=10001 --clear-groups --no-new-privs --bounding-set=-all --inh-caps=-all "$@"
