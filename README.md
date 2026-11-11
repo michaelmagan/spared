@@ -8,7 +8,7 @@ It's like Cloudflare Workers plus Durable Objects, but self-hosted, and with bet
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/img/pitch-dark.png">
-  <img src="docs/img/pitch-light.png" alt="spared against workerd on the same small app, one 4-vCPU VM: 2.6x faster warm requests (148 against 388 microseconds at the median), 3.0x lower p99 under load (5.45 against 16.53 ms at 16 connections), 0.9 ms to wake an idle app whose code is in the page cache, about level with workerd (1.07 ms), 4.8x less memory that cannot be reclaimed (108 against 516 MiB at 200 apps), and 1.5x more total memory at 200 apps (889 against 574 MiB), lower below about 20 apps.">
+  <img src="docs/img/pitch-light.png" alt="Bar chart of spared against workerd on the same small app, one 4-vCPU VM, lower is better. Warm request p50: 148 against 388 microseconds, 2.6x faster. p99 at 16 connections: 5.45 against 16.53 ms, 3.0x lower. Waking an idle app: 0.9 against 1.07 ms, about level. Memory that cannot be reclaimed at 200 apps: 108 against 516 MiB, 4.8x less. Total memory at 200 apps: 889 against 574 MiB, where spared uses 1.5x more.">
 </picture>
 
 - **Faster warm requests.** 2.6x faster than workerd at the median (148 against 388 microseconds).
