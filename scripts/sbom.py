@@ -5,13 +5,15 @@
 
 It lists every package in the lock file with its version, its crates.io package URL and the
 SHA-256 that cargo recorded for it. That is the full resolved dependency set for all platforms,
-so a given binary links a subset of it. The output has no timestamp or random serial number: the
-same lock file and version always give the same bytes. Used by .github/workflows/release.yml,
+so a given binary links a subset of it. The output has no timestamp and no random serial number (the
+serial number is a UUIDv5 of the version, which actions/attest requires): the same lock file
+and version always give the same bytes. Used by .github/workflows/release.yml,
 which attaches the file to the release and attests it. Needs Python 3.11 (tomllib).
 """
 import json
 import sys
 import tomllib
+import uuid
 
 CRATES_IO = "registry+https://github.com/rust-lang/crates.io-index"
 
@@ -41,6 +43,7 @@ def main():
     bom = {
         "bomFormat": "CycloneDX",
         "specVersion": "1.5",
+        "serialNumber": f"urn:uuid:{uuid.uuid5(uuid.NAMESPACE_URL, 'https://github.com/michaelmagan/spared@' + sys.argv[2])}",
         "version": 1,
         "metadata": {
             "component": {"type": "application", "name": "spared", "version": sys.argv[2], "bom-ref": f"spared@{sys.argv[2]}"},
