@@ -23,6 +23,7 @@
 #   bench/crash-test.sh 20      # overwrites bench/results/crash-test.json; `git checkout` it afterwards
 #   scripts/build-examples.sh
 #   scripts/e2e.sh              # ends with scripts/server-test.py (needs examples/dist and probes/hostile-app)
+#   scripts/sqlite-cache-test.sh   # proves the SQLite object cache against a counting wasi-sdk copy; about five minutes
 #   cargo deny check            # needs cargo-deny; uses deny.toml
 #
 #   sh scripts/test-try.sh && sh scripts/test-install.sh && python3 -I scripts/check-links.py
@@ -178,6 +179,10 @@ jobs:
 
       - name: End-to-end smoke test and server integration test
         run: CARGO_TARGET_DIR="$HOME/.cache/spared-e2e-target" scripts/e2e.sh
+
+      - name: SQLite build cache
+        # Counts compiler runs on sqlite3.c in a throwaway HOME; takes about five minutes.
+        run: scripts/sqlite-cache-test.sh
 
   templates:
     # Optional: not a required check. Builds and exercises every `spared new --template`.
