@@ -35,6 +35,17 @@ So after it starts, `spared serve` reads the stored components into the page cac
 
 Measured on one 4 vCPU VM with a local virtio disk and 7 MB components (each embeds SQLite), the server on one CPU, 500 different apps, one request at a time (`bench/results/d2-passD-*`, five rounds): with the page cache dropped just before the start, as after a reboot, the first request to each of 499 apps took 5.4 ms at p50 without the pass. With `--prefetch-mb 4096`, which covers all 500 components, and the request run after the pass had finished, it took 1.8 ms. With the default 1024, which covers about a third of these components, it took 3.3 ms. With the page cache warm it takes 1.6 ms. Reading the 3.4 GB took 1.4 s and 0.35 s of CPU, and the server's anonymous memory did not change. If the cache is dropped after the server has started, the pass does not help and the check at wake brings the first request to 3.3 ms from 5.8 ms. Components larger or smaller than these 7 MB, other disks and network storage were not measured. A fleet whose components add up to more than the default needs a larger `--prefetch-mb`.
 
+## The SQLite build cache
+
+Every app links SQLite as C code, and compiling it with wasi-sdk is most of a first build: 49 to 54 of 56 to 68 seconds on a 4-core VM. `spared setup` compiles it once and keeps the object file in `~/.spared/lib` (`$SPARED_LIB_DIR` moves it). The CLI points the build's C compiler at `~/.spared/lib/bin/spared-cc`, a symlink to the `spared` binary that forwards every command to wasi-sdk clang, except a compile of `sqlite3.c`, which it answers from the cache when it can. The libsqlite3-sys build script still runs as before, so the flags, the VFS and the bindings are the ones a build without the cache uses, and nothing in an app's `Cargo.toml` or `Cargo.lock` changes.
+
+- An entry is `~/.spared/lib/sqlite-<sqlite version>-<key>/`, holding `sqlite3.o` and a `key.txt` that lists what went into the key. The key is a SHA-256 over the bytes of `sqlite3.c`, every compiler argument in order (the optimization level, each `-D`, the sysroot) and the wasi-sdk identity: clang's version banner and wasi-sdk's `VERSION` file. A different SQLite, flag or SDK gets a different entry, so an entry cannot be stale. `LIBSQLITE3_FLAGS` and an app's `opt-level` change the arguments, so they get their own entries.
+- A missing, damaged or unwritable cache is not an error. The wrapper runs clang as it would have, keeps the object when the compile succeeds and checks the SHA-256 of an entry before it uses it. A build that misses takes about a minute, the same as before the cache. `rm -rf ~/.spared/lib` is always safe.
+- Apps that lock another libsqlite3-sys than the one `spared new` writes miss once and fill their own entry during that build.
+- `spared doctor` reports whether this wasi-sdk has a cached SQLite (a `WARN` is only a slower first build), and `spared setup --dry-run` shows the step. `SPARED_NO_SQLITE_CACHE=1` builds without the wrapper.
+- After upgrading to a spared with this cache, an existing `~/.spared/target` rebuilds libsqlite3-sys and rusqlite once, because the C compiler path is an input of the build script. That took 3.9 seconds with the cache filled, and takes about a minute without it.
+- `scripts/sqlite-cache-test.sh` checks all of this against a counting copy of the SDK.
+
 ## The admin API
 
 The admin API deploys code. It needs a bearer token. The CLI reads it from `$SPARED_TOKEN` or `~/.spared/token`, which `spared serve` writes on first start. Keep the admin listener on loopback.

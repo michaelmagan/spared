@@ -1,6 +1,6 @@
 # Getting started
 
-By the end of this guide you will have a Rust app with its own SQLite database running on spared. Plan on about ten minutes, most of it waiting for downloads and the first build.
+By the end of this guide you will have a Rust app with its own SQLite database running on spared. Plan on about ten minutes, most of it waiting for downloads and `spared setup`.
 
 spared is an early preview, so the CLI and manifest can change and the sandbox has had no outside audit. Read [what spared is and is not for](faq.md#what-is-spared-for-and-what-is-it-not-for) before you put anything real on it.
 
@@ -46,7 +46,7 @@ spared setup --dry-run   # show the plan
 spared setup
 ```
 
-This adds the `wasm32-wasip2` Rust target with `rustup` and downloads wasi-sdk 25 into `~/.spared/wasi-sdk`. It does nothing for a part that is already there, so you can run it again safely. If you keep wasi-sdk somewhere else, set `WASI_SDK_PATH` to its directory and `spared setup` will find it.
+This adds the `wasm32-wasip2` Rust target with `rustup`, downloads wasi-sdk 25 into `~/.spared/wasi-sdk` and compiles SQLite for Wasm once into `~/.spared/lib`. The SQLite step takes about a minute and is why the first app build is short. It does nothing for a part that is already there, so you can run it again safely. If you keep wasi-sdk somewhere else, set `WASI_SDK_PATH` to its directory and `spared setup` will find it.
 
 > **What just happened.** Your machine can now compile Rust to a Wasm component, with SQLite built in. Nothing about spared itself was installed system-wide: the SDK lives under `~/.spared`.
 
@@ -89,7 +89,7 @@ spared test --path /
 spared test --path / --path /api/notes
 ```
 
-The first build compiles SQLite for Wasm and takes about a minute. It is cached in `~/.spared/target`, so later builds take seconds. (On a warm cache, building a small app took 2 to 5 seconds in testing for this guide.)
+The first build compiles the app's dependencies, which took 12 seconds on a 4-core Linux VM. It reuses the SQLite that `spared setup` compiled. If you skipped that step, or `~/.spared/lib` is gone, the first build compiles SQLite itself and takes about a minute, then keeps it. The build is cached in `~/.spared/target`, so later builds take seconds. (On a warm cache, building a small app took 2 to 5 seconds in testing for this guide.)
 
 `spared test` builds the app, runs it in a throwaway sandbox with a temporary data directory, sends a GET to each `--path`, and prints the status and the first 200 bytes of each body. It also prints the app's log. It exits with code 1 on a trap, a deadline, or any 5xx status; 4xx statuses pass. It only sends GET requests. To try a POST, deploy and use `curl`.
 

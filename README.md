@@ -26,7 +26,7 @@ Apps are Rust crates, so you need Rust from [rustup](https://rustup.rs). Then:
 
 ```sh
 export PATH="$HOME/.spared/bin:$PATH"
-spared setup                                      # once: adds the wasm32-wasip2 target with rustup and puts wasi-sdk 25 in ~/.spared
+spared setup                                      # once: adds the wasm32-wasip2 target with rustup, puts wasi-sdk 25 in ~/.spared and compiles SQLite
 spared serve --data-dir ./data &                  # the server: apps on 127.0.0.1:8080, admin on 127.0.0.1:8081
 spared new my-app && cd my-app && spared deploy   # scaffold a notes app, build it, deploy it
 ```
@@ -36,7 +36,7 @@ curl -X POST -d '{"text":"first note"}' http://my-app.localhost:8080/api/notes
 curl http://my-app.localhost:8080/api/notes
 ```
 
-The first build compiles SQLite to Wasm and takes about a minute. Later builds take seconds. The full walk-through is [docs/getting-started.md](docs/getting-started.md).
+`spared setup` compiles SQLite to Wasm once, which takes about a minute. The first build of an app then took 12 seconds on a 4-core Linux VM, and later builds take seconds. Without that step the first build compiles SQLite itself and takes about a minute. The full walk-through is [docs/getting-started.md](docs/getting-started.md).
 
 Prefer to let a coding agent do it? Paste this into Claude Code or Codex:
 
