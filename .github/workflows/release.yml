@@ -124,7 +124,10 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install --target wasm32-wasip2
+          # With no toolchain name, rustup installs the one in rust-toolchain.toml and ignores --target,
+          # so add the target as its own step.
+          rustup toolchain install
+          rustup target add wasm32-wasip2
 
       - name: Cache wasi-sdk
         id: wasi-sdk-cache

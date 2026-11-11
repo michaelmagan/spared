@@ -67,7 +67,10 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install --target wasm32-wasip2
+          # With no toolchain name, rustup installs the one in rust-toolchain.toml and ignores --target,
+          # so add the target as its own step.
+          rustup toolchain install
+          rustup target add wasm32-wasip2
           rustc --version
           cargo --version
 
@@ -187,7 +190,10 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install --target wasm32-wasip2
+          # With no toolchain name, rustup installs the one in rust-toolchain.toml and ignores --target,
+          # so add the target as its own step.
+          rustup toolchain install
+          rustup target add wasm32-wasip2
 
       - name: Cache cargo and build outputs
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
