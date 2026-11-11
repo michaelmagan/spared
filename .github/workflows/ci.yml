@@ -71,6 +71,9 @@ jobs:
           # so add the target as its own step.
           rustup toolchain install
           rustup target add wasm32-wasip2
+          # Apps that scripts/e2e.sh and templates-test.py scaffold live outside the repo, where
+          # rust-toolchain.toml does not apply, so make the pinned toolchain the default as well.
+          rustup default "$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)"
           rustc --version
           cargo --version
 
@@ -194,6 +197,9 @@ jobs:
           # so add the target as its own step.
           rustup toolchain install
           rustup target add wasm32-wasip2
+          # Apps that scripts/e2e.sh and templates-test.py scaffold live outside the repo, where
+          # rust-toolchain.toml does not apply, so make the pinned toolchain the default as well.
+          rustup default "$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)"
 
       - name: Cache cargo and build outputs
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
