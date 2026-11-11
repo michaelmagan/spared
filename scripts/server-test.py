@@ -124,11 +124,18 @@ class Server:
         for _ in range(100):
             if self.p.poll() is not None:
                 raise SystemExit("FAIL - server exited during startup")
+            # The ports open before the token is written and copied to ~/.spared/token, so wait
+            # for an HTTP answer: the server answers only after both are done.
             try:
-                socket.create_connection(("127.0.0.1", self.adm), timeout=1).close()
-                break
-            except OSError:
-                time.sleep(0.1)
+                c = http.client.HTTPConnection("127.0.0.1", self.pub, timeout=1)
+                c.request("GET", "/healthz")
+                ok = c.getresponse().status == 200
+                c.close()
+                if ok:
+                    break
+            except (OSError, http.client.HTTPException):
+                pass
+            time.sleep(0.1)
         self.token = open(os.path.join(self.data, "admin-token")).read().strip()
         self.auth = {"Authorization": f"Bearer {self.token}"}
 

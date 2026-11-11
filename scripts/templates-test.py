@@ -63,6 +63,9 @@ class Server:
         self.home = os.path.join(tmp, "home")
         os.makedirs(self.home)
         self.env = dict(os.environ, HOME=self.home)
+        # Keep finding the Rust toolchain after HOME changes.
+        for var, default in (("RUSTUP_HOME", "~/.rustup"), ("CARGO_HOME", "~/.cargo")):
+            self.env.setdefault(var, os.path.expanduser(default))
         self.log = open(os.path.join(tmp, "serve.log"), "w")
         self.proc = subprocess.Popen(
             [BIN, "serve", "--data-dir", os.path.join(tmp, "data"),
