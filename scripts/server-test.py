@@ -1283,6 +1283,23 @@ def deep_trees(s):
     _sh.rmtree(os.path.join(s.data, "backups/deep"), ignore_errors=True)
 
 
+def engine_version(blob):
+    """(start, end) of the wasmtime version string in a compiled file: the `.wasmtime.engine` ELF
+    section holds a format byte (0), the version's length, the version, then the target triple."""
+    import struct
+    assert blob[:6] == b"\x7fELF\x02\x01", "the compiled file is not a little-endian ELF64 file"
+    shoff, = struct.unpack_from("<Q", blob, 0x28)
+    size, count, names = struct.unpack_from("<HHH", blob, 0x3A)
+    sec = lambda i: struct.unpack_from("<IIQQQQ", blob, shoff + i * size)
+    strtab = sec(names)[4]
+    for i in range(count):
+        name, _, _, _, off, _ = sec(i)
+        if blob[strtab + name:blob.index(b"\0", strtab + name)] == b".wasmtime.engine":
+            assert blob[off] == 0, "unknown engine section format"
+            return off + 2, off + 2 + blob[off + 1]
+    raise AssertionError("no .wasmtime.engine section in the compiled file")
+
+
 def restart(s, tmp):
     log = open(os.path.join(tmp, "serve.log"), errors="replace").read()
     check("one browser origin" in log, "path routing prints a warning at startup")
@@ -1314,9 +1331,10 @@ def restart(s, tmp):
     hfile = os.path.join(s.data, "apps/hostile/component.cwasm")
     hhash = open(os.path.join(s.data, "apps/hostile/component.sha256")).read().strip()
     blob = bytearray(open(hfile, "rb").read())
-    m = re.search(rb"\x00\x02(\d\d)\x18", bytes(blob[:4096]))
-    assert m, "no engine version tag found in the compiled file"
-    blob[m.start(1):m.end(1)] = b"49" if m.group(1) != b"49" else b"48"
+    vs, ve = engine_version(blob)
+    version = bytes(blob[vs:ve])
+    assert re.fullmatch(rb"\d+", version), f"unexpected engine version tag {version!r}"
+    blob[ve - 1] = ord("1") if version[-1:] == b"0" else ord("0")
     with open(hfile, "r+b") as f:
         f.write(blob)
     check(os.path.isfile(os.path.join(comps, hhash + ".wasm")), "the deployed wasm is kept in the store next to the compiled file")
@@ -1334,7 +1352,8 @@ def restart(s, tmp):
         check(st == 200, "the clamped app still serves")
         log2 = open(os.path.join(tmp, "serve.log"), errors="replace").read()
         stored = os.path.join(comps, hhash + ".cwasm")
-        check("recompiled from the stored wasm" in log2 and os.stat(hfile).st_ino == os.stat(stored).st_ino and m.group(0) in open(stored, "rb").read(4096),
+        fresh = open(stored, "rb").read()
+        check("recompiled from the stored wasm" in log2 and os.stat(hfile).st_ino == os.stat(stored).st_ino and fresh[slice(*engine_version(fresh))] == version,
               "a compiled file from another wasmtime version is recompiled from the stored wasm and relinked")
         left = sorted(os.listdir(comps))
         check(not any(f.startswith("0000") or f.endswith(".tmp") for f in left), "orphaned and partial components are swept at start", left)
