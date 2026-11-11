@@ -14,6 +14,7 @@ mod prefetch;
 mod sandbox;
 mod server;
 mod signals;
+mod sqlite_cache;
 use clap::{Parser, Subcommand};
 use grants::Maxima;
 use std::path::PathBuf;
@@ -180,6 +181,9 @@ enum Cmd {
 const MIN_SERVER_WORKERS: usize = 4;
 
 fn main() -> Result<()> {
+    if sqlite_cache::is_wrapper_invocation() {
+        sqlite_cache::wrapper_main();
+    }
     let cli = Cli::parse();
     if let Cmd::CompileWorker {
         memory_mb,
