@@ -232,6 +232,20 @@ assert app["requests"] >= 3, app
 step "spared logs"
 "$SPARED_BIN" logs smoke-app --lines 20 >/dev/null 2>&1 || fail "spared logs exited nonzero"
 
+step "app tokens: a token for smoke-app redeploys it, a token for another app cannot"
+"$SPARED_BIN" token create smoke-app --name e2e >"$tmp/apptoken" 2>"$tmp/apptoken.err" || { cat "$tmp/apptoken.err" >&2; fail "spared token create exited nonzero"; }
+apptoken=$(cat "$tmp/apptoken")
+case "$apptoken" in spt_*) ;; *) fail "spared token create did not print an spt_ token alone on stdout";; esac
+SPARED_TOKEN="$apptoken" "$SPARED_BIN" deploy >"$tmp/appdeploy.out" 2>"$tmp/appdeploy.err" || { cat "$tmp/appdeploy.out" "$tmp/appdeploy.err" >&2; fail "spared deploy with an app token for the app failed"; }
+grep -q '^deployed smoke-app' "$tmp/appdeploy.out" || { cat "$tmp/appdeploy.out" >&2; fail "spared deploy with an app token printed no deployed line"; }
+SPARED_TOKEN="$apptoken" "$SPARED_BIN" ps | grep -q 'smoke-app' || fail "spared ps with the app token does not list its app"
+"$SPARED_BIN" token create other-app >"$tmp/othertoken" 2>/dev/null || fail "spared token create other-app exited nonzero"
+if SPARED_TOKEN=$(cat "$tmp/othertoken") "$SPARED_BIN" deploy >"$tmp/wrong.out" 2>"$tmp/wrong.err"; then fail "a token for other-app deployed smoke-app"; fi
+grep -q '^error\[wrong_scope\]: ' "$tmp/wrong.err" && grep -q '^fix: .*spared token create smoke-app' "$tmp/wrong.err" || { cat "$tmp/wrong.err" >&2; fail "deploying with another app's token did not say wrong_scope with a fix naming the app"; }
+for f in "$tmp/apptoken" "$tmp/othertoken"; do
+  if grep -rqF "$(cat "$f")" "$tmp/data" "$tmp/serve.log" "$tmp/access.log" "$tmp/home"; then fail "an app token reached the data dir, the server's output or its home"; fi
+done
+
 step "access log"
 sleep 0.3
 python3 -I -c '
