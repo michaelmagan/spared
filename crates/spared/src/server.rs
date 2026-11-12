@@ -750,7 +750,7 @@ fn cannot_create(name: &str) -> DeployError {
         format!(
             "this app token cannot create '{name}': it was made while an app of that name existed, or it has created it once already"
         ),
-        &format!(
+        format!(
             "deploy '{name}' once with the admin token, or have the operator make a new token for it (`spared token create {name}`)"
         ),
     )
