@@ -58,6 +58,7 @@ If the server refuses to start, it has changed nothing. The error has a kind and
 | Frozen apps | `apps/<name>/frozen` | Kept: a frozen app stays frozen. An older release does not know the marker and serves the app. Do not go back to an older release on a server whose apps were moved away with `spared move`: remove them first with `spared rm <name> --yes`. |
 | Epochs | `backups/<name>/.epoch` | Kept. A missing file means epoch 1, which is what every backup from before epochs uses, so they list and restore as before. An older release ignores the file and uploads at epoch 1. |
 | Admin token | `admin-token` | Kept, so the CLI's saved token keeps working. |
+| App tokens | `tokens/<id>.json` | Kept, with their revocations and expiry. An older release ignores the directory: app tokens stop working there and the admin token keeps working, so going back fails closed. An older release's `spared rm` does not revoke an app's tokens, but a token that has already created its app (or was made for an existing one) still cannot create it again after you upgrade. Revoke tokens you no longer want before going back. |
 | Lock file | `.lock` | Kept. The running server holds a lock on it, and the next server rewrites its pid. A copied one is harmless. |
 | Format stamp | `format.json` | Read first, then updated with the version that opened the directory. |
 

@@ -258,7 +258,7 @@ These are single-machine, loopback measurements. Methods, results and caveats fo
 - Cron and scheduled jobs.
 - Per-app disk quotas set in `spared.toml`. The data size cap (`--max-app-data-mb`) is an operator setting that applies to every app alike.
 - Browser sync.
-- TLS and users on the admin API. It uses one shared bearer token over plain HTTP.
+- TLS and users on the admin API. It takes bearer tokens over plain HTTP: the admin token, or an app token for one app ([operating](operating.md#give-each-app-its-own-token)).
 - Tracing and OpenTelemetry. There is a request log, a health check and a metrics endpoint.
 
 Whether it is ready for production: [FAQ](faq.md#is-it-production-ready). Next: [cookbook](cookbook.md) for working code, [FAQ](faq.md) for direct answers.

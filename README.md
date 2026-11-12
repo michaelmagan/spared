@@ -73,7 +73,7 @@ Next up:
 
 - Stronger resource limits.
 - Point-in-time restore.
-- Per-app deploy tokens and disk quotas in the manifest.
+- Disk quotas in the manifest.
 
 ## Early preview
 
