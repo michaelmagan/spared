@@ -16,6 +16,7 @@ mod sandbox;
 mod server;
 mod signals;
 mod sqlite_cache;
+mod tokens;
 use clap::{Parser, Subcommand};
 use grants::Maxima;
 use std::path::PathBuf;

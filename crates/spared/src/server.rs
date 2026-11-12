@@ -7,6 +7,7 @@ use crate::logcap::AppLog;
 use crate::obs::{AccessLine, ErrorKind, Evicted, Gauges, Listener, Metrics, RequestIds};
 use crate::prefetch;
 use crate::sandbox::{CallError, Guarded, TrapKind, call_handler};
+use crate::tokens::{self, Need, Principal, Scope, ct_eq};
 use base64::Engine as _;
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, Limited};
@@ -17,7 +18,7 @@ use hyper::{Method, Request, Response, StatusCode};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -126,6 +127,16 @@ pub struct Server {
     body_budget: Arc<BodyBudget>,
     /// The bucket backups are uploaded to, when `--backup-to` is set.
     remote: Option<Arc<crate::remote::Remote>>,
+    /// App tokens, by the SHA-256 of their secret (`<data-dir>/tokens/`).
+    tokens: Mutex<tokens::Store>,
+    /// Wrong tokens by source address, to slow down guessing.
+    auth_failures: tokens::AuthFailures,
+}
+
+/// Who an admin request speaks for.
+enum Caller {
+    Admin,
+    App(Principal),
 }
 
 /// The bytes of request bodies the server may hold in memory at once, over every connection and
@@ -349,11 +360,6 @@ fn admin_host_ok(host: &str) -> bool {
         None => (host, ""),
     };
     port_ok(port) && (name.eq_ignore_ascii_case("localhost") || name.parse::<Ipv4Addr>().is_ok())
-}
-
-/// Compare without an early exit, so the time taken does not reveal how much of a guess matched.
-fn ct_eq(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 pub fn check_admin_bind(
@@ -726,6 +732,47 @@ fn query_param<'a>(query: Option<&'a str>, key: &str) -> Option<&'a str> {
     query?
         .split('&')
         .find_map(|p| p.strip_prefix(key)?.strip_prefix('='))
+}
+
+/// Who may create an app with a deploy, when no app has the name yet.
+enum Creator {
+    Admin,
+    /// An app token made while the name was free, which has not created its app yet.
+    Token(String),
+    /// An app token that may only redeploy its app.
+    No(String),
+}
+
+impl Creator {
+    /// The app token a deploy was authenticated with.
+    fn token_id(&self) -> Option<&str> {
+        match self {
+            Creator::Admin => None,
+            Creator::Token(id) | Creator::No(id) => Some(id),
+        }
+    }
+}
+
+fn token_revoked(id: &str) -> DeployError {
+    DeployError::new(
+        StatusCode::UNAUTHORIZED,
+        "token_revoked",
+        format!("app token {id} was revoked"),
+        "ask the operator for a new token (`spared token create <app>` with the admin token)",
+    )
+}
+
+fn cannot_create(name: &str) -> DeployError {
+    DeployError::new(
+        StatusCode::FORBIDDEN,
+        "wrong_scope",
+        format!(
+            "this app token cannot create '{name}': it was made while an app of that name existed, or it has created it once already"
+        ),
+        format!(
+            "deploy '{name}' once with the admin token, or have the operator make a new token for it (`spared token create {name}`)"
+        ),
+    )
 }
 
 fn deploy_refused_frozen(name: &str) -> DeployError {
@@ -1189,6 +1236,7 @@ impl Server {
         create_private_dir(&cfg.data_dir.join(TRASH))?;
         std::fs::set_permissions(&cfg.data_dir, std::fs::Permissions::from_mode(0o700))?;
         crate::remote::recover(&cfg.data_dir);
+        let app_tokens = tokens::Store::open(&cfg.data_dir)?;
         let remote = match cfg.remote.take() {
             Some(s) => Some(Arc::new(
                 crate::remote::Remote::new(s, &cfg.data_dir).map_err(|e| {
@@ -1212,6 +1260,8 @@ impl Server {
             ids: RequestIds::new(),
             body_budget,
             remote,
+            tokens: Mutex::new(app_tokens),
+            auth_failures: tokens::AuthFailures::default(),
         });
         for e in std::fs::read_dir(s.cfg.data_dir.join("apps"))?.flatten() {
             let name = e.file_name().to_string_lossy().to_string();
@@ -2025,9 +2075,18 @@ impl Server {
         v
     }
 
-    async fn deploy(self: &Arc<Self>, name: &str, req: Request<Incoming>) -> Resp {
+    async fn deploy(
+        self: &Arc<Self>,
+        name: &str,
+        req: Request<Incoming>,
+        creator: Creator,
+    ) -> Resp {
         if let Err(e) = check_name(name) {
             return e.into_resp();
+        }
+        // Before the body is read and compiled; `install` checks again under the name lock.
+        if matches!(creator, Creator::No(_)) && !self.apps.read().unwrap().contains_key(name) {
+            return cannot_create(name).into_resp();
         }
         let mtoml = req
             .headers()
@@ -2095,7 +2154,7 @@ impl Server {
         let (server, name) = (self.clone(), name.to_string());
         detached(async move {
             match server
-                .install(&name, &manifest_text, &wasm, frozen_for_move)
+                .install(&name, &manifest_text, &wasm, frozen_for_move, &creator)
                 .await
             {
                 Ok(info) => json_resp(StatusCode::OK, info),
@@ -2105,12 +2164,38 @@ impl Server {
         .await
     }
 
+    /// The token that authenticated a deploy, asked again under the name lock: the body can take
+    /// minutes, and a token revoked, expired or spent since authentication changes nothing.
+    fn check_token_still_allows(
+        &self,
+        id: &str,
+        name: &str,
+        creating: bool,
+    ) -> std::result::Result<(), DeployError> {
+        let rec = self.tokens.lock().unwrap().get(id);
+        let Some(rec) = rec else {
+            return Err(token_revoked(id));
+        };
+        match rec.status(unix_now()) {
+            "revoked" => Err(token_revoked(id)),
+            "expired" => Err(DeployError::new(
+                StatusCode::UNAUTHORIZED,
+                "token_expired",
+                format!("app token {id} has expired"),
+                "ask the operator for a new token (`spared token create <app>` with the admin token)",
+            )),
+            _ if creating && !rec.may_create => Err(cannot_create(name)),
+            _ => Ok(()),
+        }
+    }
+
     async fn install(
         self: &Arc<Self>,
         name: &str,
         manifest_text: &str,
         wasm: &[u8],
         frozen_for_move: bool,
+        creator: &Creator,
     ) -> std::result::Result<serde_json::Value, DeployError> {
         check_name(name)?;
         let mut manifest = match Manifest::parse(manifest_text) {
@@ -2220,6 +2305,12 @@ impl Server {
         if !frozen_for_move && prev.as_ref().is_some_and(|a| a.is_frozen()) {
             return Err(deploy_refused_frozen(name));
         }
+        if let Some(id) = creator.token_id() {
+            self.check_token_still_allows(id, name, prev.is_none())?;
+        }
+        if prev.is_none() && matches!(creator, Creator::No(_)) {
+            return Err(cannot_create(name));
+        }
         let version = prev.as_ref().map(|a| a.version + 1).unwrap_or(1);
         // Stage the new release next to the old one, under temporary names. Until the commit
         // below, nothing the running or restarting server reads has changed.
@@ -2288,6 +2379,9 @@ impl Server {
         drop(old_live);
         if let Some(old) = &prev {
             self.release_component(&old.shared.hash);
+        }
+        if let (None, Creator::Token(id)) = (&prev, creator) {
+            self.tokens.lock().unwrap().created_app(id);
         }
         let mut info = self.one_app_json(app).await;
         info["data_kept"] = data_kept.into();
@@ -2380,6 +2474,15 @@ impl Server {
         let Some(a) = self.apps.write().unwrap().remove(name) else {
             return no_such_app(name);
         };
+        // The app is gone, and so is every token for it: a token never outlives its app to
+        // create a new one under the same name, also when the directory cannot be moved.
+        let (revoked, failed) = self.tokens.lock().unwrap().revoke_app(name, unix_now());
+        let revoke_failed = failed.is_some();
+        if let Some(e) = failed {
+            eprintln!(
+                "delete {name}: its tokens are revoked in this process, but writing that failed ({e}); they would work again after a restart. Revoke them with `spared token revoke <id>`"
+            );
+        }
         let mut g = a.live.lock().await;
         if g.take().is_some() {
             self.metrics.eviction(Evicted::Deploy);
@@ -2403,6 +2506,12 @@ impl Server {
         let removed = tokio::task::spawn_blocking(move || backup::remove_tree(&doomed)).await;
         self.release_component(&a.shared.hash);
         let mut out = serde_json::json!({"deleted": name});
+        if revoked > 0 {
+            out["tokens_revoked"] = revoked.into();
+        }
+        if revoke_failed {
+            out["tokens_revoke_failed"] = true.into();
+        }
         if let Err(e) = crate::remote::clear_restore_record(&self.cfg.data_dir, name) {
             eprintln!(
                 "delete {name}: the epoch file still names the remote backup it was restored from: {e}"
@@ -2678,6 +2787,166 @@ impl Server {
                 "public_port": self.cfg.listen.port(),
             }),
         )
+    }
+
+    /// `POST /v1/tokens` with `{"app", "scopes"?, "expires_in_secs"?, "label"?}`: mint an app
+    /// token. The response is the only place its secret ever appears.
+    async fn create_token(&self, req: Request<Incoming>) -> Resp {
+        let usage = r#"send {"app": "<name>", "scopes": ["deploy", "read", "evict"], "expires_in_secs": 2592000, "label": "ci"}; only app is required"#;
+        let body = match self.small_json_body(req, usage).await {
+            Ok(serde_json::Value::Null) => serde_json::json!({}),
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+        let bad = |kind: &'static str, m: String, fix: &str| {
+            err_resp(StatusCode::BAD_REQUEST, kind, m, fix)
+        };
+        let Some(app) = body["app"].as_str().filter(|a| valid_name(a)) else {
+            return bad(
+                "bad_name",
+                "the token needs the name of the app it is for".into(),
+                "pass an app name: 1 to 40 lowercase letters, digits or dashes",
+            );
+        };
+        let scopes = match &body["scopes"] {
+            serde_json::Value::Null => tokens::DEFAULT_SCOPES.to_vec(),
+            serde_json::Value::Array(a) if !a.is_empty() => {
+                match tokens::parse_scopes(a.iter().map(|w| w.as_str().unwrap_or("?"))) {
+                    Ok(s) => s,
+                    Err(w) => {
+                        return bad(
+                            "bad_scope",
+                            format!(
+                                "'{}' is not a scope",
+                                w.chars().take(40).collect::<String>()
+                            ),
+                            &format!("use some of: {}", tokens::scope_list()),
+                        );
+                    }
+                }
+            }
+            _ => {
+                return bad(
+                    "bad_scope",
+                    "scopes must be a non-empty list".into(),
+                    &format!("use some of: {}", tokens::scope_list()),
+                );
+            }
+        };
+        let now = unix_now();
+        let expires = match &body["expires_in_secs"] {
+            serde_json::Value::Null => None,
+            v => match v
+                .as_u64()
+                .filter(|&s| (1..=tokens::MAX_EXPIRES_SECS).contains(&s))
+            {
+                Some(s) => Some(now + s),
+                None => {
+                    return bad(
+                        "bad_expiry",
+                        "expires_in_secs must be a whole number of seconds from 1 to ten years"
+                            .into(),
+                        "pass --expires 30d (or 12h, 45m, 90s), or leave it out for a token that does not expire",
+                    );
+                }
+            },
+        };
+        let label = match &body["label"] {
+            serde_json::Value::Null => None,
+            serde_json::Value::String(l)
+                if !l.is_empty()
+                    && l.chars().count() <= tokens::MAX_LABEL
+                    && !l.chars().any(char::is_control) =>
+            {
+                Some(l.clone())
+            }
+            _ => {
+                return bad(
+                    "bad_label",
+                    format!(
+                        "the label must be 1 to {} characters, without control characters",
+                        tokens::MAX_LABEL
+                    ),
+                    "pass a short name such as --name ci",
+                );
+            }
+        };
+        let may_create = !self.apps.read().unwrap().contains_key(app);
+        let minted = self
+            .tokens
+            .lock()
+            .unwrap()
+            .mint(app, scopes, expires, label, may_create, now);
+        match minted {
+            Ok((secret, rec)) => {
+                let mut v = rec.public_json(now);
+                v["token"] = secret.into();
+                v["note"] = "this is the only time the token is shown; the server keeps only its SHA-256. Store it in a secret store now".into();
+                let mut r = json_resp(StatusCode::CREATED, v);
+                r.headers_mut()
+                    .insert("cache-control", "no-store".parse().unwrap());
+                r
+            }
+            Err(e) => err_resp(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "token_write_failed",
+                format!(
+                    "cannot write the token under <data-dir>/{}: {e}",
+                    tokens::DIR
+                ),
+                "check disk space and permissions under the data directory; no token was made",
+            ),
+        }
+    }
+
+    /// `GET /v1/tokens[?app=<name>]`: ids and metadata, never a secret or a hash.
+    fn list_tokens(&self, app: Option<&str>) -> Resp {
+        let now = unix_now();
+        let list: Vec<_> = self
+            .tokens
+            .lock()
+            .unwrap()
+            .list(app)
+            .iter()
+            .map(|r| r.public_json(now))
+            .collect();
+        json_resp(StatusCode::OK, serde_json::json!({"tokens": list}))
+    }
+
+    /// `DELETE /v1/tokens/{id}`: the token stops working at once.
+    fn revoke_token(&self, id: &str) -> Resp {
+        let now = unix_now();
+        let done = if tokens::valid_id(id) {
+            self.tokens.lock().unwrap().revoke(id, now)
+        } else {
+            None
+        };
+        let Some((rec, already, written)) = done else {
+            return err_resp(
+                StatusCode::NOT_FOUND,
+                "no_such_token",
+                format!(
+                    "no token with id '{}'",
+                    id.chars().take(40).collect::<String>()
+                ),
+                "list tokens with `spared token list` and pass an id from it",
+            );
+        };
+        if let Err(e) = written {
+            return err_resp(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "token_write_failed",
+                format!(
+                    "token {} is refused by this process, but writing its revocation failed ({e}); after a restart it would work again",
+                    rec.id
+                ),
+                "fix the disk under <data-dir>/tokens, then run `spared token revoke` again",
+            );
+        }
+        let mut v = rec.public_json(now);
+        v["revoked"] = true.into();
+        v["already_revoked"] = already.into();
+        json_resp(StatusCode::OK, v)
     }
 
     async fn backup(self: &Arc<Self>, name: &str) -> Resp {
@@ -3068,7 +3337,10 @@ impl Server {
                     continue;
                 }
             };
-            match self.install(&name, &manifest, &wasm, false).await {
+            match self
+                .install(&name, &manifest, &wasm, false, &Creator::Admin)
+                .await
+            {
                 Ok(_) => {
                     eprintln!("examples: deployed {name}");
                     deployed += 1;
@@ -3083,11 +3355,17 @@ impl Server {
     }
 
     /// Refuse browsers (any `Origin`), rebound DNS names (`Host` must be an IP or localhost),
-    /// and requests without the bearer token.
-    fn admin_refusal(&self, req: &Request<Incoming>) -> Option<Resp> {
+    /// and requests without a valid token; then say whose token it is. The admin token is
+    /// compared in constant time, an app token by the SHA-256 of what was sent. A source address
+    /// that sent too many wrong tokens is refused for a while, whatever it sends.
+    fn authenticate(
+        &self,
+        req: &Request<Incoming>,
+        peer: IpAddr,
+    ) -> std::result::Result<Caller, Resp> {
         let h = req.headers();
         if h.contains_key(hyper::header::ORIGIN) {
-            return Some(err_resp(
+            return Err(err_resp(
                 StatusCode::FORBIDDEN,
                 "origin_refused",
                 "admin requests from a web page (with an Origin header) are refused".into(),
@@ -3099,7 +3377,7 @@ impl Server {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
         if h.get_all(hyper::header::HOST).iter().count() > 1 {
-            return Some(err_resp(
+            return Err(err_resp(
                 StatusCode::FORBIDDEN,
                 "bad_host",
                 "admin requests must carry exactly one Host header".into(),
@@ -3107,7 +3385,7 @@ impl Server {
             ));
         }
         if !admin_host_ok(host) {
-            return Some(err_resp(
+            return Err(err_resp(
                 StatusCode::FORBIDDEN,
                 "bad_host",
                 format!("admin Host '{host}' is not localhost or an IP address"),
@@ -3118,16 +3396,119 @@ impl Server {
             .get(hyper::header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
-            .unwrap_or("");
-        if !ct_eq(given.trim().as_bytes(), self.cfg.admin_token.as_bytes()) {
-            return Some(err_resp(
+            .unwrap_or("")
+            .trim();
+        let unauthorized = || {
+            err_resp(
                 StatusCode::UNAUTHORIZED,
                 "unauthorized",
                 "missing or wrong admin token".into(),
                 "send `Authorization: Bearer <token>`; the CLI reads $SPARED_TOKEN, then ~/.spared/token. This server's token is in <data-dir>/admin-token",
-            ));
+            )
+        };
+        if given.is_empty() {
+            return Err(unauthorized());
         }
-        None
+        if ct_eq(given.as_bytes(), self.cfg.admin_token.as_bytes()) {
+            return Ok(Caller::Admin);
+        }
+        let now = Instant::now();
+        if let Some(secs) = self.auth_failures.retry_after(peer, now) {
+            let mut r = err_resp(
+                StatusCode::TOO_MANY_REQUESTS,
+                "auth_rate_limited",
+                format!(
+                    "too many wrong tokens from {peer}; every token from it is refused for {secs} s"
+                ),
+                "wait for the Retry-After seconds, or use the admin token, which is never limited; find what keeps sending a wrong token (a script with an old token)",
+            );
+            r.headers_mut()
+                .insert("retry-after", secs.to_string().parse().unwrap());
+            return Err(r);
+        }
+        let auth = self.tokens.lock().unwrap().authenticate(given, unix_now());
+        match auth {
+            tokens::Auth::Valid(p) => Ok(Caller::App(p)),
+            tokens::Auth::Expired(id) => Err(err_resp(
+                StatusCode::UNAUTHORIZED,
+                "token_expired",
+                format!("app token {id} has expired"),
+                "ask the operator for a new token (`spared token create <app>` with the admin token)",
+            )),
+            tokens::Auth::Revoked(id) => Err(err_resp(
+                StatusCode::UNAUTHORIZED,
+                "token_revoked",
+                format!("app token {id} was revoked"),
+                "ask the operator for a new token (`spared token create <app>` with the admin token)",
+            )),
+            tokens::Auth::Unknown => {
+                self.auth_failures.failed(peer, now);
+                Err(unauthorized())
+            }
+        }
+    }
+
+    /// Whether `caller` may use this route. An app token gets the same answer for another app's
+    /// route whether or not that app exists, and before anything is looked up.
+    fn authorize(
+        &self,
+        caller: &Caller,
+        method: &Method,
+        segs: &[&str],
+        query: &str,
+    ) -> Option<Resp> {
+        let Caller::App(p) = caller else {
+            return None;
+        };
+        let frozen = query_param(Some(query), "frozen").is_some();
+        let fix_admin = "use the admin token for this; an app token works only on its own app's routes (AGENTS.md lists them by scope)";
+        let wrong = |message: String, fix: &str| {
+            Some(err_resp(StatusCode::FORBIDDEN, "wrong_scope", message, fix))
+        };
+        match tokens::need(method.as_str(), segs, frozen) {
+            Need::Admin => wrong(
+                format!(
+                    "app token {} (for app '{}') cannot use {method} /{}",
+                    p.id,
+                    p.app,
+                    segs.join("/")
+                ),
+                fix_admin,
+            ),
+            Need::OwnList if !p.scopes.contains(&Scope::Read) => wrong(
+                format!("app token {} has no read scope", p.id),
+                "ask the operator for a token with the read scope (`spared token create <app> --scope deploy,read,evict`)",
+            ),
+            Need::OwnList => None,
+            Need::App(name, _) if name != p.app => wrong(
+                format!(
+                    "app token {} is for app '{}' and cannot act on '{name}'",
+                    p.id, p.app
+                ),
+                &format!(
+                    "use a token made for '{name}' (the operator runs `spared token create {name}`), or the admin token"
+                ),
+            ),
+            Need::App(_, scope) if !p.scopes.contains(&scope) => wrong(
+                format!(
+                    "app token {} has no {} scope (it has: {})",
+                    p.id,
+                    scope.word(),
+                    p.scopes
+                        .iter()
+                        .map(|s| s.word())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                &format!(
+                    "ask the operator for a token with the {} scope: `spared token create {} --scope ...,{}`",
+                    scope.word(),
+                    p.app,
+                    scope.word()
+                ),
+            ),
+            Need::App(..) => None,
+        }
     }
 
     /// The counters and gauges behind `GET /metrics`, in the Prometheus text format.
@@ -3157,20 +3538,40 @@ impl Server {
         })
     }
 
-    /// Handle an admin request. Returns the app the route names, if any, for the access log.
-    async fn handle_admin(self: Arc<Self>, req: Request<Incoming>) -> (Option<String>, Resp) {
-        if let Some(r) = self.admin_refusal(&req) {
-            return (None, r);
-        }
+    /// Handle an admin request. Returns the app the route names, if any, and the id of the app
+    /// token used, if any, for the access log.
+    async fn handle_admin(
+        self: Arc<Self>,
+        req: Request<Incoming>,
+        peer: IpAddr,
+    ) -> (Option<String>, Option<String>, Resp) {
+        let caller = match self.authenticate(&req, peer) {
+            Ok(c) => c,
+            Err(r) => return (None, None, r),
+        };
+        let token_id = match &caller {
+            Caller::App(p) => Some(p.id.clone()),
+            Caller::Admin => None,
+        };
         let path = req.uri().path().to_string();
-        let app = match path.trim_matches('/').split('/').collect::<Vec<_>>()[..] {
+        let segs: Vec<&str> = path.trim_matches('/').split('/').collect();
+        let app = match segs[..] {
             ["v1", "apps", name, ..] if valid_name(name) => Some(name.to_string()),
             _ => None,
         };
-        (app, self.admin_route(&path, req).await)
+        let query = req.uri().query().unwrap_or("");
+        if let Some(r) = self.authorize(&caller, req.method(), &segs, query) {
+            return (app, token_id, r);
+        }
+        (app, token_id, self.admin_route(&path, req, caller).await)
     }
 
-    async fn admin_route(self: Arc<Self>, path: &str, req: Request<Incoming>) -> Resp {
+    async fn admin_route(
+        self: Arc<Self>,
+        path: &str,
+        req: Request<Incoming>,
+        caller: Caller,
+    ) -> Resp {
         let query = req.uri().query().unwrap_or("").to_string();
         let segs: Vec<&str> = path.trim_matches('/').split('/').collect();
         match (req.method().clone(), segs.as_slice()) {
@@ -3180,13 +3581,26 @@ impl Server {
                 .unwrap(),
             (Method::GET, ["v1", "apps"]) => {
                 let mut v: Vec<_> = self.apps.read().unwrap().values().cloned().collect();
+                if let Caller::App(p) = &caller {
+                    v.retain(|a| a.name == p.app);
+                }
                 v.sort_by(|a, b| a.name.cmp(&b.name));
                 json_resp(
                     StatusCode::OK,
                     serde_json::json!({"apps": self.apps_json(v).await}),
                 )
             }
-            (Method::PUT, ["v1", "apps", name]) => self.deploy(name, req).await,
+            (Method::PUT, ["v1", "apps", name]) => {
+                let creator = match &caller {
+                    Caller::Admin => Creator::Admin,
+                    Caller::App(p) if p.may_create => Creator::Token(p.id.clone()),
+                    Caller::App(p) => Creator::No(p.id.clone()),
+                };
+                self.deploy(name, req, creator).await
+            }
+            (Method::POST, ["v1", "tokens"]) => self.create_token(req).await,
+            (Method::GET, ["v1", "tokens"]) => self.list_tokens(query_param(Some(&query), "app")),
+            (Method::DELETE, ["v1", "tokens", id]) => self.revoke_token(id),
             (Method::GET, ["v1", "apps", name]) => {
                 let app = self.apps.read().unwrap().get(*name).cloned();
                 match app {
@@ -3259,14 +3673,22 @@ impl Server {
 
     /// Answer one request on either listener, count it, and write its access-log line. The line
     /// holds the path without its query string, and no header or body.
-    async fn handle(self: Arc<Self>, listener: Listener, req: Request<Incoming>) -> Resp {
+    async fn handle(
+        self: Arc<Self>,
+        listener: Listener,
+        req: Request<Incoming>,
+        peer: IpAddr,
+    ) -> Resp {
         let (started, time) = (Instant::now(), SystemTime::now());
         let method: String = req.method().as_str().chars().take(16).collect();
         let path = req.uri().path().to_string();
         let id = self.ids.next();
-        let (app, mut resp) = match listener {
-            Listener::Public => self.clone().handle_public(req).await,
-            Listener::Admin => self.clone().handle_admin(req).await,
+        let (app, token_id, mut resp) = match listener {
+            Listener::Public => {
+                let (app, resp) = self.clone().handle_public(req).await;
+                (app, None, resp)
+            }
+            Listener::Admin => self.clone().handle_admin(req, peer).await,
         };
         let error = resp.extensions().get::<ErrorKind>().copied();
         let status = resp.status().as_u16();
@@ -3285,6 +3707,7 @@ impl Server {
                 duration: started.elapsed(),
                 id: &id,
                 error,
+                token_id: token_id.as_deref(),
             }
             .write();
         }
@@ -3718,8 +4141,8 @@ pub async fn serve(
                         _ = stop_requested(&mut stopping) => return,
                     };
                 }
-                let stream = match accepted {
-                    Ok((stream, _)) => stream,
+                let (stream, peer) = match accepted {
+                    Ok((stream, addr)) => (stream, addr.ip()),
                     Err(e) => {
                         if !accept_error_is_the_peers(&e) {
                             backoff.failed(&e, is_admin);
@@ -3741,7 +4164,9 @@ pub async fn serve(
                     };
                     let svc = service_fn(move |req| {
                         let s = server.clone();
-                        async move { Ok::<_, std::convert::Infallible>(s.handle(listener, req).await) }
+                        async move {
+                            Ok::<_, std::convert::Infallible>(s.handle(listener, req, peer).await)
+                        }
                     });
                     let io = TokioIo::new(WriteDeadline::new(stream, timeout));
                     let conn = http1::Builder::new()

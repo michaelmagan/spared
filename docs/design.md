@@ -9,7 +9,7 @@ spared is an early preview, so nothing here is a stable interface. The sandbox h
 One host process (`spared serve`, wasmtime 50.0.1) runs on a single node. It has two listeners:
 
 - The public listener (default `127.0.0.1:8080`) routes by the `Host` header: `<app>.localhost` goes to the app named `<app>`. With `--allow-path-routing`, `/_/<app>/` on any host also reaches the app, at the cost of putting every app on one browser origin, so apps could read each other's data in a visitor's browser; leave it off for code you did not write.
-- The admin listener (default `127.0.0.1:8081`) takes deploys, lists, logs and deletes, and serves the metrics. It needs a bearer token, refuses `Host` names that are not an IP or `localhost`, and refuses requests with an `Origin` header.
+- The admin listener (default `127.0.0.1:8081`) takes deploys, lists, logs and deletes, and serves the metrics. It needs a bearer token (the admin token, or an app token for one app's routes, see [App tokens](#app-tokens)), refuses `Host` names that are not an IP or `localhost`, and refuses requests with an `Origin` header.
 
 The public listener answers one path itself: `GET /healthz`, and only for a host that names no app (see [Observability](#observability)). Everything else on it is an app's or a 404.
 
@@ -151,6 +151,16 @@ Tested through the real server (`scripts/server-test.py`), including a writer th
 
 `spared bench <name>` times cold wakes (evict, then the first request's time to first byte, 20 cycles) and warm requests on one connection, and prints p50, p99 and max. It runs against a live server over HTTP, so its numbers include the loopback network path and differ from the in-process figures of the wake and workerd benchmarks.
 
+## App tokens
+
+The admin token can do everything. An app token can do some things to one app. `POST /v1/tokens` (admin token only) makes one: 32 bytes from `/dev/urandom`, written as `spt_` and 64 hex digits, so a secret scanner can match the prefix. The response is the only place the token appears. The server keeps `{id, app, scopes, sha256, created, expires, last_used, label, revoked, may_create}` in `<data-dir>/tokens/<id>.json` (directory 0700, file 0600, written to a temporary name, synced and renamed, then the directory synced). The id is the first 12 hex digits of the SHA-256. A file that does not parse is skipped with a warning at start, so a damaged record lets nothing in. `last_used` is written at most once a minute per token.
+
+Authentication runs after the `Origin` and `Host` checks, which are unchanged. A bearer equal to the admin token (compared in constant time) is the admin. Otherwise its SHA-256 is compared with every stored hash in full, without an early exit. A match that is revoked or expired is refused with its own kind, and no match is `unauthorized`. Wrong tokens are counted per source address: 30 in a minute shut that address out for the rest of the minute, for every app token and unknown token, so a guess cannot be confirmed while it is shut out. The admin token is compared first and is never shut out, so the operator can always get in to find what keeps sending the wrong token. Requests with no token are not counted, because the CLI sends one before every deploy to check that the server is up.
+
+Authorization is a table from method and path to what a route needs (`crates/spared/src/tokens.rs`, `need`): an app and a scope, the token's own app (`GET /v1/apps`, filtered), or the admin token. Anything not in the table needs the admin token, so a new route is closed to app tokens until it is added. The check runs before the route looks anything up, so a request for another app's route gets the same 403 `wrong_scope` whether that app exists or not. A deploy by an app token also passes a creation rule into the deploy, checked again under the app's name lock, where the token is also looked up again: one revoked or expired since the request began (the body can take minutes) changes nothing, and one that no longer may create the app cannot. A token made while the name was free may create the app once, and then only redeploy it. A token made for an existing app may only redeploy. Deleting an app revokes its tokens, so no token outlives its app.
+
+Not built: tokens with a narrower scope than an app (one route, one backup), per-token rate limits, token use counted in `/metrics`, and handing tokens to another server with `spared move`.
+
 ## Versions and the data directory format
 
 `spared --version` prints the release version from `Cargo.toml` and the git commit the binary was built from (`crates/spared/build.rs` asks git, or takes `SPARED_GIT_SHA` where the build has no checkout, as in the image build). The server prints the same line when it starts and reports the version in `/healthz` and in `spared_build_info`.
@@ -169,7 +179,7 @@ Tested in `scripts/server-test.py`: a directory with no stamp opens, is stamped 
 
 Three things, all in `crates/spared/src/obs.rs` and the request wrapper in `server.rs`. No new dependency, and no OpenTelemetry: this is a log and a metrics endpoint, not traces.
 
-**Access log.** One JSON object per line on stdout for every request on either listener; the server's own messages go to stderr, so the two can be split. Fields: `time` (UTC, RFC 3339, milliseconds), `listener` (`public` or `admin`), `app` (the app the request was routed to, or `null`), `method`, `path`, `status`, `duration_ms` (from the request's headers arriving to the response being ready to send) and `request_id`; plus `error`, the error kind, when spared itself produced the response (`app_trap`, `deadline`, `no_such_app`, `unauthorized` and so on). The line is built from the request's method and path only. It never holds the query string, a header, a cookie or a body, and the admin token cannot reach it. Every string goes through a JSON encoder, so a request path cannot forge a second line; paths are cut at 512 characters. `--access-log off` (env `SPARED_ACCESS_LOG=off`) stops it. Not logged: connections that never send a complete request head (they time out inside the HTTP layer), and the time spent writing the response to a slow client.
+**Access log.** One JSON object per line on stdout for every request on either listener; the server's own messages go to stderr, so the two can be split. Fields: `time` (UTC, RFC 3339, milliseconds), `listener` (`public` or `admin`), `app` (the app the request was routed to, or `null`), `method`, `path`, `status`, `duration_ms` (from the request's headers arriving to the response being ready to send) and `request_id`; plus `error`, the error kind, when spared itself produced the response (`app_trap`, `deadline`, `no_such_app`, `unauthorized` and so on), and `token_id` when an admin request carried a valid app token. The line is built from the request's method and path only. It never holds the query string, a header, a cookie or a body, and no token can reach it. Every string goes through a JSON encoder, so a request path cannot forge a second line; paths are cut at 512 characters. `--access-log off` (env `SPARED_ACCESS_LOG=off`) stops it. Not logged: connections that never send a complete request head (they time out inside the HTTP layer), and the time spent writing the response to a slow client.
 
 The request id is 16 hex digits, different for every request and not a counter, so it does not reveal request volume. It is returned to the client as the `x-spared-request-id` response header, on app responses too (the server overwrites a header of that name set by an app), so someone reporting a failure can quote it. The app itself is not given the id.
 
@@ -233,7 +243,7 @@ Only what we read or ran.
 - Cron and scheduled jobs.
 - Browser sync. SQLite in Wasm leaves the path open; no code exists.
 - Code sharing between apps with different binaries. Identical deployments share one compiled copy (see memory above).
-- Authentication on the admin API beyond one shared bearer token (no users, no TLS).
+- Users, roles or TLS on the admin API. It takes the admin token, or an app token for one app's routes ([App tokens](#app-tokens)).
 - Tracing and OpenTelemetry export. There is an access log and a Prometheus metrics endpoint (see [Observability](#observability)); nothing else.
 - Migration code for the data directory. One format exists; the stamp and the refusal are built, an in-place upgrade is not needed yet.
 - Power-loss durability testing.

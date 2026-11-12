@@ -138,6 +138,10 @@ pub enum UserCmd {
     /// Keys for encrypted remote backups.
     #[command(subcommand)]
     BackupKey(BackupKeyCmd),
+    /// App tokens: a token that works for one app only, within its scopes. Making, listing and
+    /// revoking them needs the admin token.
+    #[command(subcommand)]
+    Token(TokenCmd),
     /// Stop serving an app on this server and keep it stopped across restarts: public requests
     /// get 503 app_frozen. Admin commands (backup, restore, logs, rm) keep working; a deploy is
     /// refused until `spared thaw`.
@@ -196,6 +200,49 @@ pub enum UserCmd {
         /// GET path to request.
         #[arg(long, default_value = "/")]
         path: String,
+        /// Admin URL of the server to talk to. Default: $SPARED_URL, then http://127.0.0.1:8081.
+        #[arg(long, value_name = "URL")]
+        server: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum TokenCmd {
+    /// Make a token for one app and print it once, alone on stdout. The server keeps only its
+    /// SHA-256, so it cannot be shown again.
+    Create {
+        /// The app the token is for. It need not exist yet: a token made for a free name may
+        /// create that app with its first deploy.
+        app: String,
+        /// Comma-separated scopes: deploy, read, evict, backup, restore, freeze, rm. Default:
+        /// deploy,read,evict.
+        #[arg(long, value_name = "LIST")]
+        scope: Option<String>,
+        /// Lifetime, such as 30d, 12h or 45m. Default: it does not expire.
+        #[arg(long, value_name = "DURATION")]
+        expires: Option<String>,
+        /// A label shown by `spared token list`, such as ci or user-42.
+        #[arg(long, value_name = "LABEL")]
+        name: Option<String>,
+        /// Write the token to this new file (mode 0600) instead of printing it. An existing
+        /// file is never written over.
+        #[arg(long, value_name = "PATH")]
+        out: Option<PathBuf>,
+        /// Admin URL of the server to talk to. Default: $SPARED_URL, then http://127.0.0.1:8081.
+        #[arg(long, value_name = "URL")]
+        server: Option<String>,
+    },
+    /// List tokens (ids and metadata, never a token), for every app or one.
+    List {
+        app: Option<String>,
+        /// Admin URL of the server to talk to. Default: $SPARED_URL, then http://127.0.0.1:8081.
+        #[arg(long, value_name = "URL")]
+        server: Option<String>,
+    },
+    /// Revoke a token by its id; it stops working at once. A whole token is accepted too and is
+    /// turned into its id here, so the secret is never sent.
+    Revoke {
+        id: String,
         /// Admin URL of the server to talk to. Default: $SPARED_URL, then http://127.0.0.1:8081.
         #[arg(long, value_name = "URL")]
         server: Option<String>,
@@ -294,6 +341,18 @@ async fn dispatch(cmd: UserCmd, json: bool) -> R<()> {
             }
         }
         UserCmd::BackupKey(BackupKeyCmd::New { out }) => cmd_backup_key_new(out, json),
+        UserCmd::Token(TokenCmd::Create {
+            app,
+            scope,
+            expires,
+            name,
+            out,
+            server,
+        }) => cmd_token_create(&app, scope, expires, name, out, server, json).await,
+        UserCmd::Token(TokenCmd::List { app, server }) => cmd_token_list(app, server, json).await,
+        UserCmd::Token(TokenCmd::Revoke { id, server }) => {
+            cmd_token_revoke(&id, server, json).await
+        }
         UserCmd::Freeze {
             name,
             reason,
@@ -1567,7 +1626,17 @@ async fn cmd_deploy(server: Option<String>, json: bool) -> R<()> {
     token_present()?;
     let wasm = build(&dir, json)?;
     let token = token()?;
-    let mut v = push(&server, &token, &dir, &wasm).await?;
+    let mut v = match push(&server, &token, &dir, &wasm).await {
+        Err(mut e) if e.kind == "wrong_scope" => {
+            let name = read_manifest(&dir).map(|m| m.0.name).unwrap_or_default();
+            e.fix = format!(
+                "the CLI's token is an app token that cannot deploy '{name}', the name in spared.toml. Use a token made for '{name}' (the operator runs `spared token create {name}`) in SPARED_TOKEN, or the admin token; {}",
+                e.fix
+            );
+            return Err(e);
+        }
+        r => r?,
+    };
     let hints = deploy_hints(v["name"].as_str().unwrap_or(""));
     let warning = helper_warning(&dir);
     if json {
@@ -1692,18 +1761,31 @@ async fn cmd_rm(name: &str, yes: bool, server: Option<String>, json: bool) -> R<
         Bytes::new(),
     )
     .await?;
-    let kept = serde_json::from_slice::<Value>(&r.body)
-        .ok()
-        .and_then(|v| v["backups_kept"].as_u64())
-        .unwrap_or(0);
+    let answer = serde_json::from_slice::<Value>(&r.body).unwrap_or_default();
+    let kept = answer["backups_kept"].as_u64().unwrap_or(0);
+    let revoked = answer["tokens_revoked"].as_u64().unwrap_or(0);
     if json {
         let mut v = json!({"deleted": name});
         if kept > 0 {
             v["backups_kept"] = kept.into();
         }
+        if revoked > 0 {
+            v["tokens_revoked"] = revoked.into();
+        }
+        if answer["tokens_revoke_failed"] == true {
+            v["tokens_revoke_failed"] = true.into();
+        }
         out_json(v);
     } else {
         println!("deleted {name} and its data");
+        if revoked > 0 {
+            println!("revoked its {revoked} app token(s)");
+        }
+        if answer["tokens_revoke_failed"] == true {
+            eprintln!(
+                "warning: writing the revocation of {name}'s tokens failed; run `spared token list {name}` and revoke the active ones"
+            );
+        }
         if kept > 0 {
             println!(
                 "note: {kept} backup(s) of {name} remain under <data-dir>/backups/{name}/; deploy the name again and `spared restore` brings them back"
@@ -1884,22 +1966,26 @@ async fn cmd_remote_backups(name: &str, server: Option<String>, json: bool) -> R
     Ok(())
 }
 
+/// Create `path` as a new file with mode 0600; an existing file is never opened.
+fn open_new_private(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+}
+
 fn cmd_backup_key_new(out: Option<PathBuf>, json: bool) -> R<()> {
     let key = crate::remote::seal::BackupKey::generate()
         .map_err(|e| err("random_failed", e.to_string(), "report this"))?;
     let note = "keep a copy of this key off this machine (a password manager, a secret store): the encrypted backups cannot be restored without it, and a key that lives only on the server's disk is lost with that disk";
     if let Some(p) = &out {
         use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let written = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(p)
-            .and_then(|mut f| {
-                f.write_all(format!("{}\n", key.to_hex()).as_bytes())?;
-                f.sync_all()
-            });
+        let written = open_new_private(p).and_then(|mut f| {
+            f.write_all(format!("{}\n", key.to_hex()).as_bytes())?;
+            f.sync_all()
+        });
         if let Err(e) = written {
             return Err(err(
                 "write_failed",
@@ -2037,8 +2123,9 @@ async fn cmd_restore(
 /// Phase one of a remote restore: have the server download, verify and unpack the remote backup
 /// into a new local backup, and wait for it. The app keeps serving meanwhile.
 async fn fetch_remote(base: &str, token: &str, name: &str, rid: &str, json: bool) -> R<Value> {
-    // The restore that follows needs the app; say so before a long download.
-    admin(
+    // The restore that follows needs the app; say so before a long download. An app token
+    // without the read scope cannot ask, and the restore says it instead.
+    match admin(
         base,
         token,
         "GET",
@@ -2046,7 +2133,11 @@ async fn fetch_remote(base: &str, token: &str, name: &str, rid: &str, json: bool
         &[],
         Bytes::new(),
     )
-    .await?;
+    .await
+    {
+        Err(e) if e.kind != "wrong_scope" => return Err(e),
+        _ => {}
+    }
     let r = admin(
         base,
         token,
@@ -2094,6 +2185,209 @@ async fn fetch_remote(base: &str, token: &str, name: &str, rid: &str, json: bool
         );
     }
     Ok(v)
+}
+
+async fn cmd_token_create(
+    app: &str,
+    scope: Option<String>,
+    expires: Option<String>,
+    label: Option<String>,
+    out: Option<PathBuf>,
+    server: Option<String>,
+    json: bool,
+) -> R<()> {
+    check_app_name(app)?;
+    let mut body = json!({ "app": app });
+    if let Some(s) = scope {
+        body["scopes"] = json!(s.split(',').map(str::trim).collect::<Vec<_>>());
+    }
+    if let Some(e) = expires {
+        let secs = crate::tokens::parse_duration(&e).ok_or_else(|| {
+            err(
+                "bad_expiry",
+                format!("--expires '{e}' is not a duration"),
+                "pass a whole number with s, m, h or d, such as --expires 30d",
+            )
+        })?;
+        body["expires_in_secs"] = secs.into();
+    }
+    if let Some(l) = label {
+        body["label"] = l.into();
+    }
+    // The file is created before the token is, so a path that cannot be used mints nothing.
+    let mut file = match &out {
+        Some(p) => Some(open_new_private(p).map_err(|e| {
+            err(
+                "write_failed",
+                format!("cannot create {}: {e}", p.display()),
+                "pick a path that does not exist yet. A token is never written over another file",
+            )
+        })?),
+        None => None,
+    };
+    let sent = admin(
+        &server_url(server),
+        &token()?,
+        "POST",
+        "/v1/tokens",
+        &[("content-type", "application/json".to_string())],
+        Bytes::from(body.to_string()),
+    )
+    .await
+    .and_then(|r| json_body(&r));
+    let mut v = match sent {
+        Ok(v) => v,
+        Err(e) => {
+            if let Some(p) = &out {
+                let _ = std::fs::remove_file(p);
+            }
+            return Err(e);
+        }
+    };
+    if let (Some(f), Some(p)) = (file.as_mut(), &out) {
+        use std::io::Write;
+        let written = f
+            .write_all(format!("{}\n", v["token"].as_str().unwrap_or("")).as_bytes())
+            .and_then(|_| f.sync_all());
+        if let Err(e) = written {
+            return Err(err(
+                "write_failed",
+                format!(
+                    "token {} was made but cannot be written to {}: {e}",
+                    v["id"].as_str().unwrap_or(""),
+                    p.display()
+                ),
+                "revoke it with `spared token revoke <id>` and make another",
+            ));
+        }
+        if let Some(o) = v.as_object_mut() {
+            o.remove("token");
+        }
+        v["file"] = p.display().to_string().into();
+    }
+    if json {
+        out_json(v);
+        return Ok(());
+    }
+    match &out {
+        // `--out` keeps the token off stdout, so it never reaches a terminal log or a pipe.
+        Some(p) => println!("wrote the token to {} (mode 0600)", p.display()),
+        // The token alone on stdout. Redirecting it makes a file the umask decides the mode of:
+        // use `--out`, or `(umask 077; spared token create my-app > FILE)`.
+        None => println!("{}", v["token"].as_str().unwrap_or("")),
+    }
+    eprintln!(
+        "token {} for app {} (scopes: {}; expires: {})",
+        v["id"].as_str().unwrap_or(""),
+        v["app"].as_str().unwrap_or(""),
+        scope_words(&v),
+        v["expires_at"].as_str().unwrap_or("never")
+    );
+    eprintln!(
+        "this is the only time it is shown: store it in a secret store now. Use it as SPARED_TOKEN; revoke it with `spared token revoke {}`",
+        v["id"].as_str().unwrap_or("")
+    );
+    Ok(())
+}
+
+fn scope_words(v: &Value) -> String {
+    v["scopes"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .unwrap_or_default()
+}
+
+async fn cmd_token_list(app: Option<String>, server: Option<String>, json: bool) -> R<()> {
+    let path = match &app {
+        Some(a) => {
+            check_app_name(a)?;
+            format!("/v1/tokens?app={a}")
+        }
+        None => "/v1/tokens".to_string(),
+    };
+    let r = admin(
+        &server_url(server),
+        &token()?,
+        "GET",
+        &path,
+        &[],
+        Bytes::new(),
+    )
+    .await?;
+    let v = json_body(&r)?;
+    if json {
+        out_json(v);
+        return Ok(());
+    }
+    let list = v["tokens"].as_array().cloned().unwrap_or_default();
+    if list.is_empty() {
+        println!("no tokens; make one with `spared token create <app>`");
+        return Ok(());
+    }
+    println!(
+        "{:<12}  {:<20} {:<8} {:<22} {:<20} {:<20} {:<20} LABEL",
+        "ID", "APP", "STATUS", "SCOPES", "CREATED", "EXPIRES", "LAST USED"
+    );
+    for t in list {
+        let s = |k: &str, none: &'static str| t[k].as_str().unwrap_or(none).to_string();
+        println!(
+            "{:<12}  {:<20} {:<8} {:<22} {:<20} {:<20} {:<20} {}",
+            s("id", ""),
+            s("app", ""),
+            s("status", ""),
+            scope_words(&t),
+            s("created_at", ""),
+            s("expires_at", "never"),
+            s("last_used_at", "never"),
+            s("label", "")
+        );
+    }
+    Ok(())
+}
+
+async fn cmd_token_revoke(id: &str, server: Option<String>, json: bool) -> R<()> {
+    // A token pasted for its id would go into the URL, and from there into the access log.
+    let id = &if crate::tokens::looks_like_token(id) {
+        crate::tokens::id_of(id)
+    } else {
+        id.to_string()
+    };
+    if !crate::tokens::valid_id(id) {
+        return Err(err(
+            "no_such_token",
+            "that is not a token id: an id is 12 lowercase hex digits".to_string(),
+            "list tokens with `spared token list` and pass an id from it",
+        ));
+    }
+    let r = admin(
+        &server_url(server),
+        &token()?,
+        "DELETE",
+        &format!("/v1/tokens/{id}"),
+        &[],
+        Bytes::new(),
+    )
+    .await?;
+    let v = json_body(&r)?;
+    if json {
+        out_json(v);
+    } else if v["already_revoked"].as_bool() == Some(true) {
+        println!(
+            "token {id} (app {}) was already revoked",
+            v["app"].as_str().unwrap_or("")
+        );
+    } else {
+        println!(
+            "revoked token {id} (app {}); it stops working now",
+            v["app"].as_str().unwrap_or("")
+        );
+    }
+    Ok(())
 }
 
 async fn cmd_evict(name: &str, server: Option<String>, json: bool) -> R<()> {
@@ -2710,10 +3004,22 @@ async fn check_admin_token() -> Option<Check> {
     Some(match token() {
         Err(e) => check("admin-token", Level::Warn, e.message, e.fix),
         Ok(t) => match admin(base, &t, "GET", "/v1/apps", &[], Bytes::new()).await {
+            Ok(_) if t.starts_with(crate::tokens::PREFIX) => check(
+                "admin-token",
+                Level::Ok,
+                "the CLI's token is an app token the server on 8081 accepts; it works for one app only",
+                "",
+            ),
             Ok(_) => check(
                 "admin-token",
                 Level::Ok,
                 "the CLI's admin token is accepted by the server on 8081",
+                "",
+            ),
+            Err(e) if e.kind == "wrong_scope" => check(
+                "admin-token",
+                Level::Ok,
+                "the CLI's token is an app token the server on 8081 accepts; it works for one app only",
                 "",
             ),
             Err(e) => check(
