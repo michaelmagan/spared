@@ -4,7 +4,7 @@ Releases are published with generated notes on the repository's Releases page. T
 
 ## Unreleased
 
-- `spared setup` compiles SQLite for Wasm once and keeps the object in `~/.spared/lib` (`$SPARED_LIB_DIR` moves it, `SPARED_NO_SQLITE_CACHE=1` turns it off). The first build of an app reuses it: on a 4-core Linux VM the first `spared test` of a new notes app took 12 seconds instead of 57. A missing or stale cache is not an error: the build compiles SQLite as before and keeps the object. The key covers the SQLite source, every compiler flag and the wasi-sdk version, and apps, `Cargo.toml` and `Cargo.lock` are unchanged. `spared doctor` reports the cache. An existing `~/.spared/target` rebuilds libsqlite3-sys and rusqlite once after the upgrade (3.9 seconds with the cache filled). See [docs/operating.md](docs/operating.md#the-sqlite-build-cache).
+- `spared setup` compiles SQLite for Wasm once and keeps the object in `~/.spared/lib` (`$SPARED_LIB_DIR` moves it, `SPARED_NO_SQLITE_CACHE=1` turns it off). The first build of an app reuses it: on a 4-core Linux VM the first `spared test` of a new notes app took 12 seconds instead of 57. A missing or damaged cache is not an error: the build compiles SQLite as before and keeps the object. The key covers the SQLite source, every compiler flag and the wasi-sdk version, and apps, `Cargo.toml` and `Cargo.lock` are unchanged. `spared doctor` reports the cache. An existing `~/.spared/target` rebuilds libsqlite3-sys and rusqlite once after the upgrade (3.9 seconds with the cache filled). See [docs/operating.md](docs/operating.md#the-sqlite-build-cache).
 
 ## 0.0.1-preview - 2026-11-11
 

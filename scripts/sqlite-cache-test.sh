@@ -7,11 +7,12 @@
 #      `PRAGMA compile_options` and `sqlite_compileoption_get` list when the guest asks SQLite.
 #   5. A missing cache, a damaged object and a changed flag (LIBSQLITE3_FLAGS) each fall back to one
 #      plain compile and a working build; a changed flag keeps its own entry.
+#   6. A relative SPARED_LIB_DIR is made absolute, so the build finds the wrapper.
 # The compiler is counted by a wrapper script in a copy of the wasi-sdk directory (symlinks to the real files).
 #
 # Needs: a built host binary (cargo build --release -p spared), the wasm32-wasip2 Rust target,
 # wasi-sdk 25 ($WASI_SDK_PATH or what scripts/wasi-sdk-default.sh finds), python3, network access
-# or a warm cargo registry. Takes about three minutes: it builds SQLite three times.
+# or a warm cargo registry. Takes about three minutes: it builds SQLite six times.
 # Environment: SPARED_BIN (default: target/release/spared in this repo), KEEP_TMP=1 keeps the temp dir.
 set -eu
 set -o pipefail
@@ -210,5 +211,12 @@ grep -q 'DEFAULT_CACHE_SIZE=-4000' "$tmp/flag.txt" || { cat "$tmp/flag.txt" >&2;
 build_app "$tmp/t-plain-again" "$tmp/plain-again.txt"
 expect_compiles 5 "build after the flagged one"
 cmp -s "$tmp/plain-again.txt" "$tmp/cached.txt" || fail "the plain build changed after a flagged one"
+
+step "a relative SPARED_LIB_DIR still builds, in its own absolute directory"
+SPARED_LIB_DIR=rel-lib build_app "$tmp/t-relative" "$tmp/relative.txt"
+expect_compiles 6 "build with a relative SPARED_LIB_DIR"
+[ -x optapp/rel-lib/bin/spared-cc ] || fail "the wrapper was not set up under the relative SPARED_LIB_DIR"
+ls optapp/rel-lib/sqlite-*/sqlite3.o >/dev/null 2>&1 || fail "the relative SPARED_LIB_DIR got no cache entry"
+[ "$(cat "$tmp/relative.txt.sha")" = "$(cat "$tmp/cached.txt.sha")" ] || fail "the build with a relative SPARED_LIB_DIR differs"
 
 exit 0

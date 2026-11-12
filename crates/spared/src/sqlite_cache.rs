@@ -34,9 +34,17 @@ const KEY_FILE: &str = "key.txt";
 const COMPILE_ENV: &[&str] = &["CPATH", "C_INCLUDE_PATH", "CCC_OVERRIDE_OPTIONS", "SDKROOT"];
 
 /// Where the cache and the wrapper symlink live: `$SPARED_LIB_DIR`, else `~/.spared/lib`.
+/// A relative value is made absolute against the current directory, because cc-rs runs the
+/// compiler from the registry source directory, where a relative path no longer resolves.
 pub fn lib_dir(home: &Path) -> PathBuf {
-    match std::env::var_os(ENV_LIB_DIR) {
-        Some(d) if !d.is_empty() => PathBuf::from(d),
+    lib_dir_from(std::env::var_os(ENV_LIB_DIR), home)
+}
+
+fn lib_dir_from(env: Option<OsString>, home: &Path) -> PathBuf {
+    match env {
+        Some(d) if !d.is_empty() => {
+            std::path::absolute(PathBuf::from(d)).unwrap_or_else(|_| home.join(".spared/lib"))
+        }
         _ => home.join(".spared/lib"),
     }
 }
@@ -422,6 +430,23 @@ pub fn locked_crate_dir(lock: &str) -> Option<String> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn a_relative_lib_dir_becomes_absolute() {
+        let home = Path::new("/home/x");
+        let d = lib_dir_from(Some("rel-lib".into()), home);
+        assert!(d.is_absolute(), "{d:?}");
+        assert!(d.ends_with("rel-lib"), "{d:?}");
+        assert_eq!(
+            lib_dir_from(Some("/abs/lib".into()), home),
+            PathBuf::from("/abs/lib")
+        );
+        assert_eq!(lib_dir_from(None, home), home.join(".spared/lib"));
+        assert_eq!(
+            lib_dir_from(Some("".into()), home),
+            home.join(".spared/lib")
+        );
+    }
 
     struct Scratch(PathBuf);
     impl Scratch {
