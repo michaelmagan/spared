@@ -294,6 +294,8 @@ pub struct AccessLine<'a> {
     pub duration: Duration,
     pub id: &'a str,
     pub error: Option<ErrorKind>,
+    /// The id of the app token the admin request carried (never the token).
+    pub token_id: Option<&'a str>,
 }
 
 impl AccessLine<'_> {
@@ -319,6 +321,9 @@ impl AccessLine<'_> {
         );
         if let Some(ErrorKind(kind)) = self.error {
             o.push_str(&format!(",\"error\":{}", q(kind)));
+        }
+        if let Some(t) = self.token_id {
+            o.push_str(&format!(",\"token_id\":{}", q(t)));
         }
         o.push('}');
         o
@@ -347,6 +352,7 @@ mod tests {
             duration: Duration::from_micros(1234),
             id: "00000000deadbeef",
             error: None,
+            token_id: None,
         }
     }
 
