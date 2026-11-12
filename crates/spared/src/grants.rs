@@ -11,6 +11,38 @@ pub struct Manifest {
     pub grants: Grants,
     #[serde(default)]
     pub limits: Limits,
+    /// Files the host serves itself from the app's origin (`[static]`); none when absent.
+    #[serde(default, rename = "static")]
+    pub statics: Option<Static>,
+}
+
+/// The `[static]` table: a directory of the app project whose files are uploaded with each
+/// deploy and served by the host for GET and HEAD.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Static {
+    pub dir: String,
+}
+
+impl Static {
+    /// `dir` must be a relative path inside the project: not empty, not absolute, no `..` part,
+    /// no NUL or backslash.
+    fn check(&self) -> Result<(), ManifestError> {
+        let d = &self.dir;
+        let ok = !d.is_empty()
+            && !d.starts_with('/')
+            && !d.contains('\\')
+            && !d.chars().any(char::is_control)
+            && d.split('/').all(|p| p != "..");
+        if ok {
+            return Ok(());
+        }
+        Err(ManifestError {
+            kind: "bad_manifest",
+            message: format!("[static] dir {d:?} is not a relative path inside the app directory"),
+            fix: "set dir to a directory of the app project, for example dir = \"static\"".into(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -39,7 +71,7 @@ pub const MANIFEST_SCHEMA: u32 = 1;
 pub const FETCH_ENTRY_FIX: &str =
     "fetch takes host names, for example example.com or *.example.com";
 
-pub const MANIFEST_KEYS_FIX: &str = "valid keys: schema, name, [grants] data, fetch, [limits] memory_mb, cpu_ms, deadline_ms, max_outbound";
+pub const MANIFEST_KEYS_FIX: &str = "valid keys: schema, name, [grants] data, fetch, [limits] memory_mb, cpu_ms, deadline_ms, max_outbound, [static] dir";
 
 /// Why a spared.toml cannot be used, with the same kind, message and fix the CLI and the server
 /// both report.
@@ -65,6 +97,9 @@ impl Manifest {
     pub fn parse(text: &str) -> Result<Manifest, ManifestError> {
         let manifest = Manifest::parse_unchecked(text)?;
         manifest.grants.check_fetch()?;
+        if let Some(st) = &manifest.statics {
+            st.check()?;
+        }
         Ok(manifest)
     }
 
@@ -657,5 +692,27 @@ mod tests {
         let e = Manifest::parse("name = \"x\"\nnmae = 1\n").unwrap_err();
         assert_eq!(e.kind, "bad_manifest");
         assert!(e.message.contains("nmae"), "{}", e.message);
+    }
+
+    #[test]
+    fn a_static_table_takes_one_relative_dir() {
+        let m = Manifest::parse("name = \"x\"\n[static]\ndir = \"web/dist\"\n").unwrap();
+        assert_eq!(m.statics.unwrap().dir, "web/dist");
+        assert!(Manifest::parse("name = \"x\"\n").unwrap().statics.is_none());
+        for (table, why) in [
+            ("", "missing field"),
+            ("dir = \"static\"\nheaders = 1\n", "headers"),
+            ("dir = \"\"\n", "relative"),
+            ("dir = \"/srv/www\"\n", "relative"),
+            ("dir = \"../shared\"\n", "relative"),
+            ("dir = \"a/../../b\"\n", "relative"),
+            ("dir = \"a\\\\b\"\n", "relative"),
+            ("dir = \"a\\u0000b\"\n", "relative"),
+            ("dir = 3\n", "string"),
+        ] {
+            let e = Manifest::parse(&format!("name = \"x\"\n[static]\n{table}")).unwrap_err();
+            assert_eq!(e.kind, "bad_manifest", "{table}");
+            assert!(e.message.contains(why), "{table}: {}", e.message);
+        }
     }
 }

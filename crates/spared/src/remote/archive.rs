@@ -523,10 +523,28 @@ pub fn build(
 
 /// Turns every read error into `InvalidData`: whatever fails while the archive is decrypted,
 /// decompressed or parsed is a corrupt archive. Also refuses to read past `left` bytes, so a
-/// decompression bomb stops at the cap.
+/// decompression bomb stops at the cap, with an error that [`is_cap_reached`] recognizes.
 struct Capped<R: Read> {
     inner: R,
     left: u64,
+    over: &'static str,
+}
+
+/// The decompressed stream passed the cap a [`Capped`] reader was given.
+#[derive(Debug)]
+struct CapReached(&'static str);
+
+impl std::fmt::Display for CapReached {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for CapReached {}
+
+/// Whether a read failed because the stream decompressed past its cap.
+pub(crate) fn is_cap_reached(e: &Error) -> bool {
+    e.get_ref().is_some_and(|i| i.is::<CapReached>())
 }
 
 impl<R: Read> Read for Capped<R> {
@@ -539,9 +557,7 @@ impl<R: Read> Read for Capped<R> {
             }
         })?;
         if n as u64 > self.left {
-            return Err(corrupt(
-                "the archive decompresses to more than the data cap allows (--max-app-data-mb)",
-            ));
+            return Err(Error::new(ErrorKind::InvalidData, CapReached(self.over)));
         }
         self.left -= n as u64;
         Ok(n)
@@ -810,6 +826,7 @@ fn untar(r: impl Read, dest: &Path, names: &Names, limits: &Limits) -> Result<Un
         r: Capped {
             inner: r,
             left: limits.max_stream(),
+            over: "the archive decompresses to more than the data cap allows (--max-app-data-mb)",
         },
     };
     let first = t.next()?.ok_or_else(|| corrupt("the archive is empty"))?;
@@ -914,6 +931,83 @@ fn decoder<R: Read>(r: R) -> Result<impl Read> {
     let mut d = zstd::stream::read::Decoder::new(r)?;
     d.window_log_max(ZSTD_WINDOW_LOG_MAX)?;
     Ok(d)
+}
+
+// ---------------------------------------------------------------- streams of plain files
+
+/// The most bytes the tar framing adds to one file: its header, a pax header for a long name with
+/// its record (names are at most 1 KiB where this is used) and the padding of each.
+pub(crate) const PER_FILE_OVERHEAD: u64 = 4 * BLOCK as u64 + 2048;
+
+/// A zstd-compressed tar stream of regular files only, in the order they are added, with no
+/// inner manifest: the upload format of an app's static files (`crate::statics`). The reader
+/// hashes what it takes in, so nothing here needs to be trusted.
+pub(crate) struct FileTarWriter<W: Write> {
+    z: zstd::stream::write::Encoder<'static, W>,
+}
+
+impl<W: Write> FileTarWriter<W> {
+    pub(crate) fn new(w: W) -> Result<Self> {
+        let mut z = zstd::stream::write::Encoder::new(w, ZSTD_LEVEL)?;
+        z.include_checksum(true)?;
+        Ok(FileTarWriter { z })
+    }
+
+    pub(crate) fn add(&mut self, path: &str, data: &[u8]) -> Result<()> {
+        write_entry(&mut self.z, path, ItemKind::File, data.len() as u64)?;
+        self.z.write_all(data)?;
+        pad(&mut self.z, data.len() as u64)
+    }
+
+    pub(crate) fn finish(mut self) -> Result<W> {
+        self.z.write_all(&[0u8; 2 * BLOCK])?;
+        self.z.finish()
+    }
+}
+
+/// Reads a [`FileTarWriter`] stream with the same strict tar reader the backups use: ustar only,
+/// pax only for a long name, and only regular files (a directory, a link, a device or a fifo is
+/// refused). Every error is `InvalidData`; a stream that decompresses past `max_stream` bytes
+/// fails with an error [`is_cap_reached`] recognizes, so a decompression bomb stops there.
+pub(crate) struct FileTarReader<R: Read> {
+    t: TarReader<Capped<R>>,
+}
+
+impl<'a> FileTarReader<Box<dyn Read + 'a>> {
+    pub(crate) fn new(compressed: &'a [u8], max_stream: u64, over: &'static str) -> Result<Self> {
+        let d = decoder(compressed).map_err(|e| corrupt(format!("not a zstd stream: {e}")))?;
+        Ok(FileTarReader {
+            t: TarReader {
+                r: Capped {
+                    inner: Box::new(d),
+                    left: max_stream,
+                    over,
+                },
+            },
+        })
+    }
+}
+
+impl<R: Read> FileTarReader<R> {
+    /// The next file's name and size, or `None` at the end of the stream.
+    pub(crate) fn next(&mut self) -> Result<Option<(String, u64)>> {
+        match self.t.next()? {
+            None => Ok(None),
+            Some(h) if h.kind == ItemKind::File => Ok(Some((h.path, h.size))),
+            Some(h) => Err(corrupt(format!(
+                "the archive holds a directory entry ({:?}); it may hold regular files only",
+                h.path.chars().take(200).collect::<String>()
+            ))),
+        }
+    }
+
+    /// The bytes of the file [`next`](Self::next) just returned, which is `size` long.
+    pub(crate) fn read_file(&mut self, size: u64) -> Result<Vec<u8>> {
+        let mut data = vec![0u8; size as usize];
+        read_exact_or(&mut self.t.r, &mut data, "a file")?;
+        self.t.skip_pad(size)?;
+        Ok(data)
+    }
 }
 
 #[cfg(test)]
