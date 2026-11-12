@@ -56,7 +56,7 @@ Tested on one Linux x86_64 VM (glibc 2.35 or newer): building and running apps, 
 
 Not tested: macOS, arm64 Linux, the release binaries for those platforms, Railway, Fly, an upgrade between two published releases, power loss, large databases, TLS and real networks. Nobody outside the project has reviewed its security.
 
-Known gaps: there are no per-app deploy tokens, no point-in-time restore and no disk quota set per app in the manifest, and local backups are kept by count only (`--max-backups-per-app`, 20 by default). Off-machine backups were tested against an S3 stand-in, not against AWS S3, R2 or another real store.
+Known gaps: there are no per-app deploy tokens, no point-in-time restore and no disk quota set per app in the manifest, and local backups are kept by count only (`--max-backups-per-app`, 20 by default). Off-machine backups and `spared move` were tested against an S3 stand-in, not against AWS S3, R2 or another real store. There is no failover: a move needs both servers up, and a second server serving the same app is detected only when it uploads a backup, not prevented.
 
 Data isolation is what spared enforces today, so do not host code that would cause serious harm if the sandbox failed. [Isolation, in plain words](isolation.md) says what is guaranteed and what is not.
 
@@ -105,7 +105,9 @@ Path routing is the other form: `http://<host>:<port>/_/<app>/`. It needs `--all
 
 ## How do I back up my data?
 
-`spared backup <name>` copies one app's data directory to `<data-dir>/backups/<name>/<UTC timestamp>/` and verifies the copy with SHA-256. `spared backups <name>` lists them, and `spared restore <name> --from <id> --yes` replaces the data, keeping the replaced data as a `pre-restore` copy. A backup holds data only, not code. It sits on the same disk. To survive losing the disk, start the server with `--backup-to s3://<bucket>/<prefix>` and a backup key: every backup is then also uploaded, encrypted, to that S3-compatible bucket, and `spared restore <name> --from remote:<id> --yes` brings one back on any server that has the key ([operating](operating.md#off-machine-backups)). spared never deletes in the bucket, so give the bucket a lifecycle rule. Copying `<data-dir>/backups/` elsewhere also works. Point-in-time restore is not built. Commands are in [getting started](getting-started.md#9-back-up-and-restore), and details in [AGENTS.md](../AGENTS.md#backups).
+`spared backup <name>` copies one app's data directory to `<data-dir>/backups/<name>/<UTC timestamp>/` and verifies the copy with SHA-256. `spared backups <name>` lists them, and `spared restore <name> --from <id> --yes` replaces the data, keeping the replaced data as a `pre-restore` copy. A backup holds data only, not code. It sits on the same disk. To survive losing the disk, start the server with `--backup-to s3://<bucket>/<prefix>` and a backup key: every backup is then also uploaded, encrypted, to that S3-compatible bucket, and `spared restore <name> --from remote:<id> --yes` brings one back on any server that has the key ([operating](operating.md#off-machine-backups)). spared never deletes in the bucket, so give the bucket a lifecycle rule. Copying `<data-dir>/backups/` elsewhere also works. Point-in-time restore is not built.
+
+To move an app to another server, start both with the same `--backup-to` and key and run `spared move <name> --to <target admin URL>`. It copies the code, freezes the app on the source, backs it up, restores it on the target and checks it, then tells you to point DNS at the target. Clients that still reach the old server get 503 `app_frozen` with `Retry-After`. Details, and what can still lose writes, are in [operating](operating.md#move-an-app-to-another-server). Commands are in [getting started](getting-started.md#9-back-up-and-restore), and details in [AGENTS.md](../AGENTS.md#backups).
 
 ## How do I see what the server is doing?
 

@@ -1,7 +1,7 @@
 //! A small S3 server for the remote backup tests: path-style PUT, GET, HEAD and
-//! ListObjectsV2 (two keys a page, so continuation tokens are exercised), If-None-Match on PUT,
-//! and faults to inject: 5xx, connection resets, truncated bodies, 412, a skewed clock,
-//! PermanentRedirect, and slow bodies.
+//! ListObjectsV2 (two keys a page, so continuation tokens are exercised, and `start-after`),
+//! If-None-Match on PUT, and faults to inject: 5xx, connection resets, truncated bodies, 412, a
+//! skewed clock, PermanentRedirect, slow bodies, and PUTs whose stored objects a test replaces.
 //!
 //! Every request's SigV4 signature is checked by [`signature`], written here from the AWS
 //! documentation and independent of the client in `src/remote/s3.rs`; it is itself checked
@@ -30,8 +30,15 @@ pub const ACCESS_KEY: &str = "AKIDFAKES3TEST";
 pub const SECRET_KEY: &str = "fake-s3-secret-dont-print-me-7d1c";
 pub const SESSION_TOKEN: &str = "fake-session-token-never-logged-93ab";
 
+/// Called with the key and body of each PUT; when it returns objects, those are stored instead.
+pub type OnPut = Arc<dyn Fn(&str, &[u8]) -> Option<Vec<(String, Vec<u8>)>> + Send + Sync>;
+
 #[derive(Default, Clone)]
 pub struct Faults {
+    /// Answer every PUT with 503 SlowDown (listings and GETs still work).
+    pub fail_put_5xx: bool,
+    /// Store what this returns instead of what a PUT sent.
+    pub on_put: Option<OnPut>,
     /// Answer this many of the next requests with 503 SlowDown (`u32::MAX`: all of them).
     pub fail_5xx: u32,
     /// Close the connection, without an answer, partway through a PUT of an archive.
@@ -517,12 +524,14 @@ async fn handle(st: Arc<Mutex<State>>, req: Request<Incoming>) -> Result<Resp, s
             let q = query_pairs(&raw_query);
             let get = |n: &str| q.iter().find(|(k, _)| k == n).map(|(_, v)| v.clone());
             let prefix = get("prefix").unwrap_or_default();
-            let after = get("continuation-token").map(|t| {
-                String::from_utf8_lossy(&percent_decode(
-                    t.trim_start_matches("t/").trim_end_matches("=="),
-                ))
-                .into_owned()
-            });
+            let after = get("continuation-token")
+                .map(|t| {
+                    String::from_utf8_lossy(&percent_decode(
+                        t.trim_start_matches("t/").trim_end_matches("=="),
+                    ))
+                    .into_owned()
+                })
+                .or_else(|| get("start-after"));
             let s = st.lock().unwrap();
             let all: Vec<(&String, &Vec<u8>)> = s
                 .objects
@@ -557,6 +566,20 @@ async fn handle(st: Arc<Mutex<State>>, req: Request<Incoming>) -> Result<Resp, s
         }
         ("PUT", Some(k)) if faults.fail_manifest_put && k.ends_with("/manifest.json") => {
             Ok(s3_error(500, "InternalError", "", &[]))
+        }
+        ("PUT", Some(_)) if faults.fail_put_5xx => Ok(s3_error(503, "SlowDown", "", &[])),
+        ("PUT", Some(k))
+            if faults
+                .on_put
+                .as_ref()
+                .is_some_and(|f| f(&k, &body).is_some()) =>
+        {
+            let objects = (faults.on_put.unwrap())(&k, &body).unwrap_or_default();
+            let mut s = st.lock().unwrap();
+            for (key, data) in objects {
+                s.objects.insert(key, data);
+            }
+            Ok(resp(200, &[("etag", "\"fake\"".into())], Bytes::new()))
         }
         ("PUT", Some(k)) => {
             let mut s = st.lock().unwrap();

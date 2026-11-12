@@ -8,336 +8,19 @@
 
 #[path = "support/fake_s3.rs"]
 mod fake_s3;
+#[path = "support/servers.rs"]
+mod servers;
 
-use base64::Engine as _;
 use fake_s3::Fake;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
-use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output, Stdio};
-use std::time::{Duration, Instant};
+use servers::*;
+use std::path::Path;
+use std::process::{Command, Stdio};
+use std::time::Duration;
 
-const SPARED: &str = env!("CARGO_BIN_EXE_spared");
-const HANDLER: &str = r#"(component
-  (import "wasi:http/types@0.2.4" (instance $types
-    (export "incoming-request" (type (sub resource)))
-    (export "response-outparam" (type (sub resource)))))
-  (alias export $types "incoming-request" (type $ireq))
-  (alias export $types "response-outparam" (type $rout))
-  (core module $m (func (export "handle") (param i32 i32)))
-  (core instance $i (instantiate $m))
-  (func $handle (param "request" (own $ireq)) (param "response-out" (own $rout))
-    (canon lift (core func $i "handle")))
-  (instance $h (export "handle" (func $handle)))
-  (export "wasi:http/incoming-handler@0.2.4" (instance $h)))"#;
 const SEGMENT: usize = 64 * 1024;
 /// A string written into the app data, which must never appear in an encrypted archive.
 const MARKER: &[u8] = b"PLAINTEXT-MARKER-0123456789-must-not-reach-the-bucket";
-
-struct Scratch(PathBuf);
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-fn scratch(tag: &str) -> Scratch {
-    let d = std::env::temp_dir().join(format!("spared-remote-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    Scratch(d)
-}
-
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
-
-/// Every variable a server or the CLI could pick up from the test runner's environment.
-const CLEARED: [&str; 16] = [
-    "AWS_ACCESS_KEY_ID",
-    "AWS_SECRET_ACCESS_KEY",
-    "AWS_SESSION_TOKEN",
-    "AWS_ACCESS_KEY_ID_FILE",
-    "AWS_SECRET_ACCESS_KEY_FILE",
-    "AWS_SESSION_TOKEN_FILE",
-    "AWS_REGION",
-    "SPARED_ADMIN_TOKEN",
-    "SPARED_TOKEN",
-    "SPARED_URL",
-    "SPARED_BACKUP_TO",
-    "SPARED_BACKUP_ENDPOINT",
-    "SPARED_BACKUP_REGION",
-    "SPARED_BACKUP_KEY_FILE",
-    "SPARED_BACKUP_ENCRYPTION",
-    "PORT",
-];
-
-fn cleared(cmd: &mut Command) -> &mut Command {
-    for v in CLEARED {
-        cmd.env_remove(v);
-    }
-    cmd
-}
-
-/// The environment a test server gets: the fake's credentials.
-fn creds() -> Vec<(&'static str, String)> {
-    vec![
-        ("AWS_ACCESS_KEY_ID", fake_s3::ACCESS_KEY.into()),
-        ("AWS_SECRET_ACCESS_KEY", fake_s3::SECRET_KEY.into()),
-        ("AWS_SESSION_TOKEN", fake_s3::SESSION_TOKEN.into()),
-    ]
-}
-
-/// Remote backup flags for a server that uploads to `fake` under `prefix`.
-fn remote_args(fake: &Fake, key: Option<&Path>) -> Vec<String> {
-    let mut a = vec![
-        "--backup-to".into(),
-        format!("s3://{}/prod/spared", fake_s3::BUCKET),
-        "--backup-endpoint".into(),
-        fake.endpoint(),
-        "--backup-region".into(),
-        fake_s3::REGION.into(),
-    ];
-    match key {
-        Some(k) => a.extend(["--backup-key-file".into(), k.display().to_string()]),
-        None => a.extend(["--backup-encryption".into(), "off".into()]),
-    }
-    a
-}
-
-struct Node {
-    root: PathBuf,
-    data: PathBuf,
-    public: u16,
-    admin: u16,
-    args: Vec<String>,
-    env: Vec<(&'static str, String)>,
-    child: Option<Child>,
-    token: String,
-    log: PathBuf,
-}
-
-impl Node {
-    fn start(root: &Path, tag: &str, args: Vec<String>, env: Vec<(&'static str, String)>) -> Node {
-        let root = root.join(tag);
-        std::fs::create_dir_all(root.join("home")).unwrap();
-        let mut n = Node {
-            data: root.join("data"),
-            log: root.join("serve.log"),
-            root,
-            public: 0,
-            admin: 0,
-            args,
-            env,
-            child: None,
-            token: String::new(),
-        };
-        n.spawn();
-        n
-    }
-
-    fn spawn(&mut self) {
-        self.public = free_port();
-        self.admin = free_port();
-        let log = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.log)
-            .unwrap();
-        let child = cleared(&mut Command::new(SPARED))
-            .args(["serve", "--data-dir"])
-            .arg(&self.data)
-            .args(["--listen", &format!("127.0.0.1:{}", self.public)])
-            .args(["--admin-listen", &format!("127.0.0.1:{}", self.admin)])
-            .args(&self.args)
-            .env("HOME", self.root.join("home"))
-            .envs(self.env.iter().map(|(k, v)| (*k, v.as_str())))
-            .stdout(log.try_clone().unwrap())
-            .stderr(log)
-            .spawn()
-            .unwrap();
-        self.child = Some(child);
-        let until = Instant::now() + Duration::from_secs(30);
-        loop {
-            if let Some(st) = self.child.as_mut().unwrap().try_wait().unwrap() {
-                panic!("the server exited at start ({st}):\n{}", self.log_text());
-            }
-            if http(self.public, "GET", "/healthz", "", &[], b"").0 == 200 {
-                break;
-            }
-            assert!(
-                Instant::now() < until,
-                "the server did not come up:\n{}",
-                self.log_text()
-            );
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        self.token = std::fs::read_to_string(self.data.join("admin-token"))
-            .unwrap()
-            .trim()
-            .to_string();
-    }
-
-    fn log_text(&self) -> String {
-        std::fs::read_to_string(&self.log).unwrap_or_default()
-    }
-
-    fn admin(&self, method: &str, path: &str, body: &[u8]) -> (u16, Value) {
-        let auth = format!("Bearer {}", self.token);
-        let (st, b) = http(
-            self.admin,
-            method,
-            path,
-            &format!("127.0.0.1:{}", self.admin),
-            &[("authorization", &auth)],
-            body,
-        );
-        (st, serde_json::from_slice(&b).unwrap_or(Value::Null))
-    }
-
-    fn deploy(&self, name: &str) {
-        let wasm = wat::parse_str(HANDLER).unwrap();
-        let manifest = format!("name = \"{name}\"\n[grants]\ndata = true\n");
-        let m = base64::engine::general_purpose::STANDARD.encode(manifest);
-        let auth = format!("Bearer {}", self.token);
-        let (st, b) = http(
-            self.admin,
-            "PUT",
-            &format!("/v1/apps/{name}"),
-            &format!("127.0.0.1:{}", self.admin),
-            &[("authorization", &auth), ("x-spared-manifest", &m)],
-            &wasm,
-        );
-        assert_eq!(st, 200, "deploy: {}", String::from_utf8_lossy(&b));
-        std::fs::create_dir_all(self.app_data(name)).unwrap();
-    }
-
-    fn app_data(&self, name: &str) -> PathBuf {
-        self.data.join("apps").join(name).join("data")
-    }
-
-    fn backups(&self, name: &str) -> PathBuf {
-        self.data.join("backups").join(name)
-    }
-
-    fn cli_cmd(&self, args: &[&str]) -> Command {
-        let mut c = Command::new(SPARED);
-        cleared(&mut c)
-            .args(args)
-            .args(["--server", &format!("http://127.0.0.1:{}", self.admin)])
-            .env("HOME", self.root.join("home"))
-            .env("SPARED_TOKEN", &self.token);
-        c
-    }
-
-    fn cli(&self, args: &[&str]) -> Output {
-        self.cli_cmd(args).output().unwrap()
-    }
-
-    /// `spared --json <args>`: exit code and the JSON it printed.
-    fn json(&self, args: &[&str]) -> (i32, Value) {
-        let mut a = vec!["--json"];
-        a.extend_from_slice(args);
-        let o = self.cli(&a);
-        let v = serde_json::from_slice(&o.stdout).unwrap_or_else(|_| {
-            panic!(
-                "not JSON from {args:?}: {}\n{}",
-                String::from_utf8_lossy(&o.stdout),
-                String::from_utf8_lossy(&o.stderr)
-            )
-        });
-        (o.status.code().unwrap_or(-1), v)
-    }
-
-    fn kill9(&mut self) {
-        if let Some(mut c) = self.child.take() {
-            c.kill().unwrap();
-            c.wait().unwrap();
-        }
-    }
-
-    fn restart(&mut self) {
-        self.kill9();
-        self.spawn();
-    }
-}
-
-impl Drop for Node {
-    fn drop(&mut self) {
-        self.kill9();
-    }
-}
-
-/// A plain HTTP/1.1 request on its own connection: status and body.
-fn http(
-    port: u16,
-    method: &str,
-    path: &str,
-    host: &str,
-    headers: &[(&str, &str)],
-    body: &[u8],
-) -> (u16, Vec<u8>) {
-    let Ok(mut s) = std::net::TcpStream::connect(("127.0.0.1", port)) else {
-        return (0, vec![]);
-    };
-    s.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
-    let host = if host.is_empty() {
-        format!("127.0.0.1:{port}")
-    } else {
-        host.to_string()
-    };
-    let mut req = format!(
-        "{method} {path} HTTP/1.1\r\nhost: {host}\r\ncontent-length: {}\r\nconnection: close\r\n",
-        body.len()
-    );
-    for (k, v) in headers {
-        req.push_str(&format!("{k}: {v}\r\n"));
-    }
-    req.push_str("\r\n");
-    if s.write_all(req.as_bytes()).is_err() || s.write_all(body).is_err() {
-        return (0, vec![]);
-    }
-    let mut out = vec![];
-    let _ = s.read_to_end(&mut out);
-    let Some(split) = out.windows(4).position(|w| w == b"\r\n\r\n") else {
-        return (0, vec![]);
-    };
-    let head = String::from_utf8_lossy(&out[..split]).to_string();
-    let status = head
-        .split_whitespace()
-        .nth(1)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    (status, out[split + 4..].to_vec())
-}
-
-/// Every entry under `p`, sorted: (relative path, kind and bytes).
-fn tree(p: &Path) -> Vec<(String, Option<Vec<u8>>)> {
-    let mut out = vec![];
-    let mut stack = vec![(p.to_path_buf(), String::new())];
-    while let Some((d, pre)) = stack.pop() {
-        for e in std::fs::read_dir(&d).unwrap().flatten() {
-            let n = format!("{pre}{}", e.file_name().to_string_lossy());
-            let t = e.file_type().unwrap();
-            if t.is_dir() {
-                out.push((n.clone(), None));
-                stack.push((e.path(), n + "/"));
-            } else if t.is_symlink() {
-                out.push((n, Some(b"<symlink>".to_vec())));
-            } else {
-                out.push((n, Some(std::fs::read(e.path()).unwrap())));
-            }
-        }
-    }
-    out.sort();
-    out
-}
 
 /// Bytes that do not compress, so an archive spans several sealed segments.
 fn noise(n: usize, seed: u64) -> Vec<u8> {
@@ -368,17 +51,6 @@ fn write_sample(data: &Path, big: usize) {
     std::fs::write(data.join("sub/deeper/x.txt"), b"nested").unwrap();
     std::fs::write(data.join("empty"), b"").unwrap();
     std::fs::write(data.join("sub").join("n".repeat(150)), b"long name").unwrap();
-}
-
-fn key_file(dir: &Path, name: &str) -> PathBuf {
-    let p = dir.join(name);
-    let o = cleared(&mut Command::new(SPARED))
-        .args(["backup-key", "new", "--out"])
-        .arg(&p)
-        .output()
-        .unwrap();
-    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
-    p
 }
 
 fn rid_dir(rid: &str) -> String {
@@ -416,26 +88,6 @@ fn assert_untouched(
         .filter(|e| e.file_name().to_string_lossy().starts_with(".tmp-"))
         .collect();
     assert!(staged.is_empty(), "staging left behind: {staged:?}");
-}
-
-fn local_ids(n: &Node, app: &str) -> Vec<String> {
-    let mut v: Vec<String> = std::fs::read_dir(n.backups(app))
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.file_name().to_string_lossy().to_string())
-        .filter(|n| !n.starts_with('.'))
-        .collect();
-    v.sort();
-    v
-}
-
-/// Backs up `app` on `n` and returns the CLI's JSON, which must say uploaded.
-fn backup_uploaded(n: &Node, app: &str) -> Value {
-    let (rc, v) = n.json(&["backup", app]);
-    assert_eq!(rc, 0, "{v}\n{}", n.log_text());
-    assert_eq!(v["remote"]["status"], "uploaded", "{v}");
-    v
 }
 
 #[test]
@@ -605,29 +257,6 @@ fn a_backup_round_trips_byte_for_byte_to_another_server_and_secrets_stay_out_of_
             );
         }
     }
-}
-
-fn sha_hex(b: &[u8]) -> String {
-    Sha256::digest(b)
-        .iter()
-        .map(|x| format!("{x:02x}"))
-        .collect()
-}
-
-fn walk_files(p: &Path) -> Vec<PathBuf> {
-    let mut out = vec![];
-    let mut stack = vec![p.to_path_buf()];
-    while let Some(d) = stack.pop() {
-        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
-            let t = e.file_type().unwrap();
-            if t.is_dir() {
-                stack.push(e.path());
-            } else if t.is_file() {
-                out.push(e.path());
-            }
-        }
-    }
-    out
 }
 
 #[test]
@@ -974,79 +603,14 @@ fn tampered_or_misnamed_backups_are_refused_and_the_data_is_untouched() {
 
 // ---------------------------------------------------------------- hostile archives
 
-/// A ustar header for a hand-built tar stream.
-fn tar_header(name: &str, flag: u8, size: usize, link: &str) -> Vec<u8> {
-    let mut h = vec![0u8; 512];
-    h[..name.len()].copy_from_slice(name.as_bytes());
-    let oct = |h: &mut Vec<u8>, at: usize, len: usize, v: usize| {
-        let s = format!("{:0w$o}\0", v, w = len - 1);
-        h[at..at + len].copy_from_slice(s.as_bytes());
-    };
-    oct(&mut h, 100, 8, 0o644);
-    oct(&mut h, 108, 8, 0);
-    oct(&mut h, 116, 8, 0);
-    oct(&mut h, 124, 12, size);
-    oct(&mut h, 136, 12, 0);
-    h[156] = flag;
-    h[157..157 + link.len()].copy_from_slice(link.as_bytes());
-    h[257..263].copy_from_slice(b"ustar\0");
-    h[263..265].copy_from_slice(b"00");
-    h[148..156].fill(b' ');
-    let sum: usize = h.iter().map(|&b| b as usize).sum();
-    h[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
-    h
-}
-
-fn tar_entry(name: &str, flag: u8, data: &[u8], link: &str) -> Vec<u8> {
-    let mut v = tar_header(name, flag, data.len(), link);
-    v.extend_from_slice(data);
-    v.resize(v.len().div_ceil(512) * 512, 0);
-    v
-}
-
 /// Plant an unencrypted backup of `app` whose tar stream lists `entries` in its inner manifest
 /// and holds `body` after it. Returns its remote id.
 fn plant(fake: &Fake, app: &str, n: u32, entries: Value, body: &[u8]) -> String {
     let rid = format!("20261112T0400{n:02}Z.0123456789ab.1");
-    let files = entries
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|e| e["type"] == "file")
-        .count();
-    let bytes: u64 = entries
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|e| e["size"].as_u64().unwrap_or(0))
-        .sum();
-    let inner = serde_json::to_vec(&json!({
-        "format": "spared-backup-contents-v1", "app": app, "remote_id": rid,
-        "local_id": rid_dir(&rid).split('.').next().unwrap(), "spared_version": "test",
-        "journal_clean": true, "files": files, "bytes": bytes, "entries": entries,
-    }))
-    .unwrap();
-    let mut tar = tar_entry(".spared-manifest.json", b'0', &inner, "");
-    tar.extend_from_slice(body);
-    tar.extend_from_slice(&[0u8; 1024]);
-    let z = zstd::stream::encode_all(&tar[..], 3).unwrap();
-    let manifest = json!({
-        "format": "spared-remote-backup-v1", "app": app, "remote_id": rid, "node": "0123456789ab",
-        "epoch": 1, "created_at": "2026-11-12T04:00:00Z", "local_id": "x",
-        "archive": {"bytes": z.len(), "sha256": sha_hex(&z)},
-        "files": files, "bytes": bytes, "encryption": {"alg": "none"},
-        "content_digest": sha_hex(&inner),
-    });
-    fake.put(&object(app, &rid, "archive"), z);
-    fake.put(
-        &object(app, &rid, "manifest.json"),
-        serde_json::to_vec(&manifest).unwrap(),
-    );
+    let (archive, manifest) = planted(app, &rid, entries, body);
+    fake.put(&object(app, &rid, "archive"), archive);
+    fake.put(&object(app, &rid, "manifest.json"), manifest);
     rid
-}
-
-fn file_entry(path: &str, data: &[u8]) -> Value {
-    json!({"path": path, "type": "file", "size": data.len(), "sha256": sha_hex(data)})
 }
 
 #[test]
@@ -1286,14 +850,6 @@ fn kill_9_during_an_upload_or_a_fetch_leaves_a_clean_state() {
     ]);
     assert_eq!(rc, 0, "{v}");
     assert_eq!(tree(&n.app_data("notes")), original);
-}
-
-fn wait_for(cond: impl Fn() -> bool) {
-    let until = Instant::now() + Duration::from_secs(30);
-    while !cond() {
-        assert!(Instant::now() < until, "timed out");
-        std::thread::sleep(Duration::from_millis(20));
-    }
 }
 
 #[test]

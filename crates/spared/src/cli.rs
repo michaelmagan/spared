@@ -15,6 +15,8 @@ use wasmtime_wasi::p2::pipe::MemoryOutputPipe;
 use wasmtime_wasi_http::io::TokioIo;
 use wasmtime_wasi_http::p2::bindings::ProxyPre;
 
+mod move_app;
+
 const DEFAULT_ADMIN: &str = "http://127.0.0.1:8081";
 const SDK_VERSION: &str = "25";
 
@@ -136,6 +138,48 @@ pub enum UserCmd {
     /// Keys for encrypted remote backups.
     #[command(subcommand)]
     BackupKey(BackupKeyCmd),
+    /// Stop serving an app on this server and keep it stopped across restarts: public requests
+    /// get 503 app_frozen. Admin commands (backup, restore, logs, rm) keep working; a deploy is
+    /// refused until `spared thaw`.
+    Freeze {
+        name: String,
+        /// Why, shown by `spared ps --json` (at most 200 characters).
+        #[arg(long)]
+        reason: Option<String>,
+        /// Admin URL of the server to talk to. Default: $SPARED_URL, then http://127.0.0.1:8081.
+        #[arg(long, value_name = "URL")]
+        server: Option<String>,
+    },
+    /// Serve a frozen app again on this server.
+    Thaw {
+        name: String,
+        /// Admin URL of the server to talk to. Default: $SPARED_URL, then http://127.0.0.1:8081.
+        #[arg(long, value_name = "URL")]
+        server: Option<String>,
+    },
+    /// Move an app to another spared server through the bucket both back up to: copy its code,
+    /// freeze it here, back it up, restore that backup there, check it, and serve it there.
+    /// Never changes DNS and never deletes the app here.
+    Move {
+        name: String,
+        /// Admin URL of the target server, by IP (for example through `ssh -L`).
+        #[arg(long, value_name = "URL")]
+        to: String,
+        /// File holding the target server's admin token. Default: $SPARED_TARGET_TOKEN. Never
+        /// taken as an argument.
+        #[arg(long, value_name = "PATH")]
+        to_token_file: Option<PathBuf>,
+        /// After the restore, GET / here with the app's Host header (<name>.localhost); a 5xx
+        /// or no answer fails the move, for example http://10.0.0.2:8080.
+        #[arg(long, value_name = "URL")]
+        smoke_url: Option<String>,
+        /// Check both servers and print the plan without changing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Admin URL of the source server. Default: $SPARED_URL, then http://127.0.0.1:8081.
+        #[arg(long, value_name = "URL")]
+        server: Option<String>,
+    },
     /// Drop an app's live instance now; the next request wakes a fresh one.
     Evict {
         name: String,
@@ -250,6 +294,33 @@ async fn dispatch(cmd: UserCmd, json: bool) -> R<()> {
             }
         }
         UserCmd::BackupKey(BackupKeyCmd::New { out }) => cmd_backup_key_new(out, json),
+        UserCmd::Freeze {
+            name,
+            reason,
+            server,
+        } => cmd_freeze(&name, reason, server, json).await,
+        UserCmd::Thaw { name, server } => cmd_thaw(&name, server, json).await,
+        UserCmd::Move {
+            name,
+            to,
+            to_token_file,
+            smoke_url,
+            dry_run,
+            server,
+        } => {
+            move_app::cmd_move(
+                move_app::Args {
+                    name,
+                    to,
+                    to_token_file,
+                    smoke_url,
+                    dry_run,
+                    server,
+                },
+                json,
+            )
+            .await
+        }
         UserCmd::Restore {
             name,
             from,
@@ -1239,6 +1310,7 @@ fn build(dir: &Path, json: bool) -> R<PathBuf> {
 
 struct Response {
     status: u16,
+    headers: hyper::HeaderMap,
     body: Bytes,
 }
 
@@ -1340,13 +1412,17 @@ async fn request_retrying(
         })?
         .map_err(|e| unreachable(e.to_string()))?;
     let status = resp.status().as_u16();
-    let body = resp
-        .into_body()
+    let (parts, body) = resp.into_parts();
+    let body = body
         .collect()
         .await
         .map_err(|e| unreachable(e.to_string()))?
         .to_bytes();
-    Ok(Response { status, body })
+    Ok(Response {
+        status,
+        headers: parts.headers,
+        body,
+    })
 }
 
 async fn admin(
@@ -2039,6 +2115,74 @@ async fn cmd_evict(name: &str, server: Option<String>, json: bool) -> R<()> {
             "evicted {name} (state: {}); the next request wakes a fresh instance",
             v["state"].as_str().unwrap_or("")
         );
+    }
+    Ok(())
+}
+
+async fn cmd_freeze(
+    name: &str,
+    reason: Option<String>,
+    server: Option<String>,
+    json: bool,
+) -> R<()> {
+    check_app_name(name)?;
+    let body = match &reason {
+        Some(r) => json!({"reason": r}),
+        None => json!({}),
+    };
+    let r = admin(
+        &server_url(server),
+        &token()?,
+        "POST",
+        &format!("/v1/apps/{name}/freeze"),
+        &[("content-type", "application/json".to_string())],
+        Bytes::from(body.to_string()),
+    )
+    .await?;
+    let v = json_body(&r)?;
+    if json {
+        out_json(v);
+        return Ok(());
+    }
+    let f = &v["freeze"];
+    if v["already_frozen"].as_bool() == Some(true) {
+        println!(
+            "{name} was already frozen ({}: {}), and is left as it was",
+            f["kind"].as_str().unwrap_or(""),
+            f["reason"].as_str().unwrap_or("")
+        );
+    } else {
+        println!("froze {name}: public requests get 503 app_frozen, here and after a restart");
+    }
+    println!(
+        "admin commands (backup, restore, logs, rm) still work. Serve it again with: spared thaw {name}"
+    );
+    Ok(())
+}
+
+async fn cmd_thaw(name: &str, server: Option<String>, json: bool) -> R<()> {
+    check_app_name(name)?;
+    let r = admin(
+        &server_url(server),
+        &token()?,
+        "POST",
+        &format!("/v1/apps/{name}/thaw"),
+        &[("content-type", "application/json".to_string())],
+        Bytes::from("{}"),
+    )
+    .await?;
+    let v = json_body(&r)?;
+    if json {
+        out_json(v);
+        return Ok(());
+    }
+    if v["was_frozen"].as_bool() == Some(true) {
+        println!("thawed {name}: it serves on this server again");
+    } else {
+        println!("{name} was not frozen");
+    }
+    if let Some(n) = v["note"].as_str() {
+        println!("note: {n}");
     }
     Ok(())
 }
