@@ -47,6 +47,128 @@ Every app links SQLite as C code, and compiling it with wasi-sdk is most of a fi
 - After upgrading to a spared with this cache, an existing `~/.spared/target` rebuilds libsqlite3-sys and rusqlite once, because the C compiler path is an input of the build script. That took 3.9 seconds with the cache filled, and takes about a minute without it.
 - `scripts/sqlite-cache-test.sh` checks all of this against a counting copy of the SDK.
 
+## Off-machine backups
+
+A backup under `<data-dir>/backups/` sits on the same disk as the data and is lost with it. `spared serve --backup-to s3://<bucket>/<prefix>` also uploads every backup to an S3-compatible bucket, and `spared restore --from remote:<id>` brings one back on this server or on a new one. This is a copy you can restore by hand. It is not replication, failover or a way to run one app on two servers.
+
+### Set it up
+
+1. Make a key, and keep a copy off this machine:
+
+   ```sh
+   spared backup-key new --out /etc/spared/backup.key
+   ```
+
+   Archives are encrypted and authenticated with this key. Without it the backups in the bucket cannot be restored, by spared or anyone else. Put a copy in a password manager or a secret store: a key that lives only on the server's disk is lost with that disk, which is the case the bucket is for. `spared backup-key new` without `--out` prints the key on stdout. The key id it prints (the first 8 bytes of the key's SHA-256) is safe to write down anywhere.
+2. Make a bucket, and an access key that may only use the prefix (the policy is below). Add a lifecycle rule, because spared never deletes anything in the bucket (below).
+3. Put the credentials in the server's environment: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and, for temporary credentials, `AWS_SESSION_TOKEN`. Each one has a `_FILE` twin that names a file holding the value (`AWS_SECRET_ACCESS_KEY_FILE=/run/secrets/aws_secret`), for container secrets. spared never reads credentials from a flag (every local user can read a process's arguments), from `spared.toml` or from the data directory. Apps and the compile worker never get the server's environment.
+4. Start the server:
+
+   ```sh
+   spared serve --data-dir /var/lib/spared \
+     --backup-to s3://my-backups/spared \
+     --backup-key-file /etc/spared/backup.key
+   ```
+
+   At start it prints one line with the bucket, the endpoint, the region, this server's node id and the key id. It never prints a credential or the key. Settings that cannot work stop the start with exit 1 before anything is written: `backup_key_required` (no key and no `--backup-encryption off`), `no_backup_credentials`, or `bad_backup_config` with the reason.
+
+| Flag | Env | Default | |
+|---|---|---|---|
+| `--backup-to s3://BUCKET/PREFIX` | `SPARED_BACKUP_TO` | off | The bucket follows the S3 naming rules. The prefix may hold `a-z`, `0-9`, `.`, `_`, `-` and `/`, with no `..` part. |
+| `--backup-endpoint URL` | `SPARED_BACKUP_ENDPOINT` | AWS S3 | `https://host[:port]` for R2, Tigris, MinIO-style stores and so on. No user name, password, path, query or fragment. `http://` only for a loopback address or with `--backup-allow-http`. |
+| `--backup-region` | `SPARED_BACKUP_REGION` | `$AWS_REGION`, then `us-east-1` | R2 takes `auto`. |
+| `--backup-addressing path\|virtual` | `SPARED_BACKUP_ADDRESSING` | virtual on AWS, path with `--backup-endpoint` | A bucket name with a dot needs `path` over https. |
+| `--backup-key-file PATH` | `SPARED_BACKUP_KEY_FILE` | none | 64 hex digits, from `spared backup-key new`. |
+| `--backup-encryption on\|off` | `SPARED_BACKUP_ENCRYPTION` | `on` | `off` uploads archives that anyone with read access to the bucket can read, and that anyone with write access can replace unnoticed. |
+| `--backup-allow-http` | `SPARED_BACKUP_ALLOW_HTTP` | off | Allows `http://` to a store that is not on loopback. |
+
+The client connects straight to the store: no HTTP proxy is used. A private CA goes in `SPARED_EXTRA_CA_FILE`, as for apps. The address is resolved once per connection, redirects are never followed (a store that answers 301 for another region gives `remote_wrong_region` with the region to pass), and every request signs the SHA-256 of its body with AWS Signature Version 4.
+
+### What a backup does
+
+`spared backup <name>` takes the local backup as before and lets the app serve again. Then the server builds the archive in a temporary file under `<data-dir>/backups/<name>/.remote/` and uploads it with one PUT, then its manifest. The app is not stopped during the upload and can be redeployed. The CLI waits for the upload and prints the remote id. If the upload fails, the local backup stands, the CLI prints its id and exits 1 with `remote_upload_failed`, and the message names the cause: `remote_unavailable` (DNS, connection, TLS, or a 5xx after three tries), `remote_auth_failed`, `remote_no_bucket`, `remote_wrong_region`, `remote_clock_skew` (the clocks differ by more than 15 minutes, and the message shows both), `remote_rejected` or `remote_backup_too_big`. A cron job sees the exit code. `--no-wait` returns once the local backup exists. `spared backups <name>` shows each backup's upload state, and a server that stops during an upload marks it `failed` with `remote_interrupted` when it starts again. To try again, take a new backup.
+
+There are no scheduled backups: run `spared backup <name>` from cron or a systemd timer.
+
+What is stored, for each backup:
+
+```
+<prefix>/spared/v1/<app>/e00000001/<backup id>.<node>/archive
+<prefix>/spared/v1/<app>/e00000001/<backup id>.<node>/manifest.json
+```
+
+- The remote id is `<backup id>.<node>.<epoch>`, for example `20261112T040506Z.7f3a9c0a1b2c.1`. The node is 6 random bytes that the server writes once into `<data-dir>/node-id` (mode 0600), so two servers never write the same names. The epoch is always 1 in this version.
+- The archive is a POSIX tar stream of the backup's files, compressed with zstd (level 3), then sealed: ChaCha20-Poly1305 in 64 KiB segments (the STREAM construction that age uses), with a key for each archive derived from your key and a random salt. Each segment is bound to the app name and the remote id, so an archive copied to another app or id does not open, and a cut one does not either. The first tar entry lists every file with its size and SHA-256.
+- `manifest.json` is written last, so a backup whose manifest is missing is never listed or restored. It holds the app name, the remote id, sizes, the archive's SHA-256, the key id and the SHA-256 of the inner file list (`content_digest`), not file names.
+- A reader of the bucket learns the compressed size of each backup. That is accepted.
+- This version sends each archive in one PUT and refuses an archive over 4 GiB with `remote_backup_too_big`. The local backup stands.
+
+### Restore from the bucket
+
+```sh
+spared backups notes --remote     # works before the app is deployed on this server
+spared deploy                     # on a new server: the app's code first
+spared restore notes --from remote:20261112T040506Z.7f3a9c0a1b2c.1 --yes
+```
+
+The restore has two steps. First the server downloads the backup, checks it and unpacks it into a new local backup, through a `.tmp-fetch-*` directory, while the app keeps serving. Then the ordinary restore puts that backup in place and keeps the current data as a `pre-restore-...` copy, which undoes it. The fetched backup stays as a local backup. The checks, in order:
+
+1. The manifest names this app and remote id, and this server's key id. Another key fails with `backup_key_mismatch` before the archive is downloaded.
+2. The archive's size matches the manifest and fits `--max-app-data-mb`.
+3. Its SHA-256 matches the manifest.
+4. Every sealed segment opens with this key, and the last one is marked last.
+5. The tar stream is read strictly: regular files and directories only, relative names with no `..`, at most 64 levels and 100,000 entries, at most `--max-app-data-mb` once decompressed, and the entries in exactly the order of the inner list.
+6. Each file's SHA-256 matches the inner list.
+
+Any failure removes the staging directory and leaves the app's data and its local backups as they were, with `remote_backup_corrupt`, `backup_key_mismatch` or `no_such_remote_backup`. Files are written relative to directory handles, never through a link, and the host never opens `app.db`. A server with a key refuses a backup that is not encrypted, because anyone who can write to the bucket could have put it there, and a server started with `--backup-encryption off` cannot read an encrypted one.
+
+### Bucket permissions
+
+spared uses PutObject, GetObject (and HEAD, which GetObject covers) and ListBucket. It never deletes, so leave `s3:DeleteObject` out: a stolen access key then cannot erase the backups. For AWS, with the bucket `my-backups` and the prefix `spared`:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["s3:PutObject", "s3:GetObject"],
+      "Resource": "arn:aws:s3:::my-backups/spared/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::my-backups",
+      "Condition": {"StringLike": {"s3:prefix": "spared/*"}}
+    }
+  ]
+}
+```
+
+PutObject can still overwrite an object. Turn on versioning or object lock on the bucket if a compromised server must not be able to replace the backups it wrote. Other stores have their own way to scope a token to a bucket.
+
+### Retention: a lifecycle rule
+
+spared never deletes an object in the bucket, so the bucket grows until a lifecycle rule expires old objects. Set one when you set up the bucket. On AWS, to keep 90 days:
+
+```sh
+aws s3api put-bucket-lifecycle-configuration --bucket my-backups --lifecycle-configuration \
+  '{"Rules":[{"ID":"spared-expiry","Status":"Enabled","Filter":{"Prefix":"spared/"},"Expiration":{"Days":90},"AbortIncompleteMultipartUpload":{"DaysAfterInitiation":1}}]}'
+```
+
+The same rule removes an archive whose manifest upload failed: it is never listed or restored, and spared leaves it where it is. With versioning on, also expire noncurrent versions. `--max-backups-per-app` counts local backups only.
+
+### Key custody
+
+- The key and the bucket credentials live in the server process only: from the key file and the environment at start, never in the data directory, the admin API or a log. Debug output prints `***` in their place.
+- Keep the key somewhere that does not depend on the server: a password manager, a secret store, a printed copy in a safe. Test a restore on another machine once, with the copy and not the server's file.
+- Losing the key loses every backup sealed with it. There is no recovery and no escrow.
+- A new key works for new backups only. Keep the old key while backups sealed with it are still wanted, because a restore needs the key the backup was taken with.
+
+### What was tested
+
+Tested through the real server against an S3 stand-in that runs inside the test process (`crates/spared/tests/remote_backups.rs`). The stand-in checks the SigV4 signature of every request with its own code, written from the AWS documentation and checked against vectors generated with botocore 1.44.1 (`scripts/sigv4-vectors.py`). The tests cover a byte-identical round trip to a second server, a store that is unreachable or answers 503, a wrong secret, a missing bucket, a skewed clock, a redirect to another region, a 412, a connection cut during an upload and during a download, a truncated, altered, renamed or foreign archive, archives with `../` names, links, devices or a decompression bomb, a wrong key, and `kill -9` of the server during an upload and during a download. Not tested against AWS S3, R2 or any other real store. Not measured: upload and download speed, and how well real databases compress.
+
 ## The admin API
 
 The admin API deploys code. It needs a bearer token. The CLI reads it from `$SPARED_TOKEN` or `~/.spared/token`, which `spared serve` writes on first start. Keep the admin listener on loopback.

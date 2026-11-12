@@ -173,7 +173,7 @@ spared restore my-app --from 20261110T040506Z --yes
 
 Use an id from `spared backups`. Without `--yes` the command refuses with `confirm_required`, because a restore replaces data. The replaced data is kept as `pre-restore-<timestamp>`, so you can undo a restore by restoring that id.
 
-> **What just happened.** A backup is a copy of one app's data. It has no code, no manifest and no logs. It sits on the same disk as the data, so copy `./data/backups/` somewhere else if you need protection from losing the disk. Restoring to an arbitrary moment (point-in-time restore) is not built: you can only go back to a backup you took.
+> **What just happened.** A backup is a copy of one app's data. It has no code, no manifest and no logs. It sits on the same disk as the data. For protection from losing the disk, a server started with `--backup-to s3://<bucket>/<prefix>` also uploads each backup to that bucket, encrypted ([operating](operating.md#off-machine-backups)), or you can copy `./data/backups/` somewhere else. Restoring to an arbitrary moment (point-in-time restore) is not built: you can only go back to a backup you took.
 
 ## 10. Clean up
 

@@ -195,7 +195,7 @@ Everything is under the data directory you pass to `spared serve --data-dir` (de
 
 The server sets its umask to 077: directories are 0700 and files 0600, readable only by the user running the server. The app log is rotated to `app.log.1` when it passes 4 MiB while the app runs, and when an instance wakes with the log over 1 MiB, so a busy app keeps at most two files.
 
-A backup copies one app's `data/` directory while its instance is stopped, hashes each file as it copies it and compares that with a read-back of the copy (the host never opens the database), and keeps the newest 20 per app by default (`--max-backups-per-app`). It does not hold code. Backups sit on the same disk, so they guard against bad writes and bad deploys, not against losing the disk. The [getting started](getting-started.md#9-back-up-and-restore) guide shows the commands, and [AGENTS.md](../AGENTS.md#backups) has the details.
+A backup copies one app's `data/` directory while its instance is stopped, hashes each file as it copies it and compares that with a read-back of the copy (the host never opens the database), and keeps the newest 20 per app by default (`--max-backups-per-app`). It does not hold code. Backups sit on the same disk, so they guard against bad writes and bad deploys, not against losing the disk, unless the server also uploads them to an S3-compatible bucket with `--backup-to` ([operating](operating.md#off-machine-backups)). The [getting started](getting-started.md#9-back-up-and-restore) guide shows the commands, and [AGENTS.md](../AGENTS.md#backups) has the details.
 
 `format.json` is read before anything else at start. A server that does not understand the layout it names refuses to start, with `data_dir_too_new` or `data_dir_too_old` and a fix, instead of misreading the directory; a directory with no stamp is taken as the first layout and stamped. An upgrade never rewrites an app's `data/`. When a new release brings a new wasmtime, the compiled `.cwasm` files no longer load, and the server compiles each one again from the stored `.wasm` at start. [Upgrading](upgrading.md) has the steps and the full rule.
 
@@ -251,7 +251,7 @@ These are single-machine, loopback measurements. Methods, results and caveats fo
 ## Not built
 
 - Point-in-time restore. You can go back to a backup you took, not to an arbitrary moment.
-- Backups off the machine. Nothing copies them away.
+- Scheduled backups, retention in the bucket, and moving an app between machines beyond a manual backup and restore. Backups can be uploaded to an S3-compatible bucket ([operating](operating.md#off-machine-backups)), but nothing runs them on a schedule or deletes old ones there.
 - Multi-node. It is one process on one machine.
 - WebSockets.
 - Cron and scheduled jobs.

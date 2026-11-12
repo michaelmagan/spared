@@ -72,7 +72,7 @@ The numbers and how to rerun them are in [docs/benchmarks.md](docs/benchmarks.md
 Next up:
 
 - Stronger resource limits.
-- Point-in-time restore and off-machine backups.
+- Point-in-time restore.
 - Per-app deploy tokens and disk quotas in the manifest.
 
 ## Early preview
