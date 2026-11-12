@@ -161,7 +161,7 @@ The same rule removes an archive whose manifest upload failed: it is never liste
 ### Key custody
 
 - The key and the bucket credentials live in the server process only: from the key file and the environment at start, never in the data directory, the admin API or a log. Debug output prints `***` in their place.
-- Keep the key somewhere that does not depend on the server: a password manager, a secret store, a printed copy in a safe. Test a restore on another machine once, with the copy and not the server's file.
+- Keep the key somewhere that does not depend on the server: a password manager, a secret store, a printed copy in a safe. Test a restore on another machine once (a restore drill), with the copy and not the server's file, and never run `spared backup` for that app there: see [Epochs and a stale server](#epochs-and-a-stale-server).
 - Losing the key loses every backup sealed with it. There is no recovery and no escrow.
 - A new key works for new backups only. Keep the old key while backups sealed with it are still wanted, because a restore needs the key the backup was taken with.
 
@@ -215,7 +215,7 @@ To undo before any client has written to the target: `spared freeze <app>` on th
 ### When a step fails
 
 - A check fails: nothing changed, and the error has the check's own kind.
-- A step before the restore on the target completed fails: `move_aborted`. Until then the source holds the truth, so the move thaws it again, if a move froze it. A freeze made with `spared freeze` or by a stale upload stays. The target keeps a frozen copy that does not serve and whose data was not replaced. The error's `state` says what each side holds, and `cause` has the step's own error.
+- A step before the restore on the target completed fails: `move_aborted`. Until then the source holds the truth, so the move thaws it again, if this run froze it. A freeze that was already there stays, whoever made it (`spared freeze`, a stale upload, an earlier move), and the error says so: a source an earlier move froze and that has since moved on must not serve again next to the target. The target keeps a frozen copy that does not serve and whose data was not replaced, unless the restore call itself timed out: `spared ps --json` on the target shows `restored_from_remote` when it went through. The error's `state` says what each side holds, and `cause` has the step's own error.
 - A step after the restore failed (the check of the target's copy, the thaw, the smoke request): `move_incomplete`. The source stays frozen, because the target now holds the newer copy. A failed smoke request freezes the target again. The error names each side's state and the command to run next.
 - A run that was cut off (Ctrl-C, a lost connection) leaves the state it reached.
 
@@ -227,11 +227,15 @@ Run the same command again in every case. It works out from both servers where a
 
 ### Epochs and a stale server
 
-Every remote backup carries an epoch, in its id and its object keys. An app starts at epoch 1 on every server. A restore from the bucket sets this server's epoch for the app to one above the highest epoch in the bucket (kept in `<data-dir>/backups/<app>/.epoch`, which `spared rm` leaves with the backups). A restore from a local backup keeps the epoch. `spared ps --json` shows each app's `epoch`, and `restored_from_remote` once a restore raised it.
+Every remote backup carries an epoch, in its id and its object keys. An app starts at epoch 1 on every server. A restore from the bucket sets this server's epoch for the app to one above the highest epoch in the bucket (kept in `<data-dir>/backups/<app>/.epoch`, which `spared rm` leaves with the backups). A restore from a local backup keeps the epoch. `spared ps --json` shows each app's `epoch`, and `restored_from_remote` while the app's data is the one a restore from the bucket put there: `spared rm` and a later restore from a local backup drop that record and keep the epoch.
 
 Before each upload a server looks for a higher epoch of the app in the bucket. If there is one, the app was restored on another server, so the copy here is stale: the upload is refused with `remote_superseded` (in `remote.error`, under `remote_upload_failed`), the local backup stands, and the server freezes the app. Listing orders backups by epoch, then by id.
 
 This detects a second writer after the fact. It does not prevent one: the look and the upload are separate requests, a stale server is only noticed when it backs up, and only once the other server has uploaded under its higher epoch. A fencing record written with conditional PUTs would prevent it. That is not built.
+
+- Any server on the same bucket and prefix that restores an app from the bucket, and later uploads one backup of it, makes every other server stale for that app: the original server's next `spared backup` is refused, the app freezes there (503 to every client), and every later upload is refused. So on a restore drill, or on a staging server refreshed from production backups, never run `spared backup` for that app there. Restore, look, and `spared rm`.
+- The check reads object names only, so anyone who can write under the prefix, a key like `<prefix>/spared/v1/<app>/e<higher>/...`, can freeze that app. That is an availability effect: no data is read or changed.
+- To recover, delete the higher-epoch objects from the bucket by hand (every key under `<prefix>/spared/v1/<app>/e<epoch>/` above the one the original server holds), then `spared thaw <app>` on the original server.
 
 ### What can still lose writes or leave two writers
 

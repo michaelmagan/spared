@@ -8,7 +8,7 @@
 //! it there. The source stays frozen and is never deleted, and DNS is the owner's to change.
 //!
 //! Until the restore on the target has completed, the source holds the truth: any failure before
-//! then thaws the source again (only a freeze a move made). After it, a failure leaves the source
+//! then thaws the source again (only a freeze this run made). After it, a failure leaves the source
 //! frozen and says what each side holds and what to run next. A rerun works out where an earlier
 //! run stopped from the two servers' state, so the move can be run again until it completes.
 //!
@@ -188,6 +188,8 @@ struct Mover {
     json: bool,
     steps: Vec<String>,
     smoke_url: Option<String>,
+    /// Set once the freeze call returns: whether this run, not an earlier one, froze the source.
+    froze_source: bool,
 }
 
 impl Mover {
@@ -199,29 +201,42 @@ impl Mover {
     }
 
     /// A failure before the restore completed on the target: the source still holds the truth,
-    /// so a freeze a move made there is lifted. Builds `move_aborted` around `cause`.
+    /// so a freeze this run made there is lifted. Builds `move_aborted` around `cause`.
     async fn abort(&mut self, cause: CliError) -> CliError {
         let name = self.name.clone();
-        let source = match self
-            .src
-            .post(&format!("/v1/apps/{name}/thaw"), json!({"if_kind": "move"}))
-            .await
-        {
-            Ok(v) if v["frozen"] == false && v["was_frozen"] == true => {
-                "thawed again by this move: it serves as before".to_string()
+        let source = if self.froze_source {
+            match self
+                .src
+                .post(&format!("/v1/apps/{name}/thaw"), json!({"if_kind": "move"}))
+                .await
+            {
+                Ok(v) if v["frozen"] == false && v["was_frozen"] == true => {
+                    "thawed again by this move: it serves as before".to_string()
+                }
+                Ok(v) if v["frozen"] == false => {
+                    "serving, as before (this move had not frozen it)".into()
+                }
+                Ok(v) => format!(
+                    "still frozen by something other than a move ({}: {}), as before the move",
+                    v["freeze"]["kind"].as_str().unwrap_or("?"),
+                    v["freeze"]["reason"].as_str().unwrap_or("")
+                ),
+                Err(e) => format!(
+                    "could not be thawed ({}: {}). It may still be frozen: run `spared thaw {name} --server {}`",
+                    e.kind, e.message, self.src.base
+                ),
             }
-            Ok(v) if v["frozen"] == false => {
-                "serving, as before (this move had not frozen it)".into()
+        } else {
+            match self.src.app(&name).await {
+                Ok(Some(a)) if a["frozen"] == true => format!(
+                    "still frozen, as before this run ({}: {}); `spared thaw {name} --server {}` if it should serve",
+                    a["freeze"]["kind"].as_str().unwrap_or("?"),
+                    a["freeze"]["reason"].as_str().unwrap_or(""),
+                    self.src.base
+                ),
+                Ok(a) => format!("{}, as before this run", describe(a.as_ref())),
+                Err(e) => format!("unknown ({}: {})", e.kind, e.message),
             }
-            Ok(v) => format!(
-                "still frozen by something other than a move ({}: {}), as before the move",
-                v["freeze"]["kind"].as_str().unwrap_or("?"),
-                v["freeze"]["reason"].as_str().unwrap_or("")
-            ),
-            Err(e) => format!(
-                "could not be thawed ({}: {}). It may still be frozen: run `spared thaw {name} --server {}`",
-                e.kind, e.message, self.src.base
-            ),
         };
         let target = match self.dst.app(&name).await {
             Ok(a) => describe(a.as_ref()),
@@ -333,6 +348,7 @@ impl Mover {
                 json!({"kind": "move", "reason": format!("moving to {}", self.dst.base)}),
             )
             .await?;
+        self.froze_source = f["already_frozen"] != true;
         self.step(format!(
             "froze {name} on the source ({}): its public requests get 503 app_frozen",
             if f["already_frozen"] == true {
@@ -541,8 +557,8 @@ async fn smoke(url: &str, host: &str) -> R<u16> {
     }
 }
 
-/// The source's newest backup that was uploaded: its remote id and content digest.
-async fn last_uploaded(src: &Side, name: &str) -> R<Option<(String, String)>> {
+/// The source's newest backup that was uploaded: its remote id, content digest and creation time.
+async fn last_uploaded(src: &Side, name: &str) -> R<Option<(String, String, String)>> {
     let v = src.get(&format!("/v1/apps/{name}/backups")).await?;
     Ok(v["backups"]
         .as_array()
@@ -556,6 +572,7 @@ async fn last_uploaded(src: &Side, name: &str) -> R<Option<(String, String)>> {
                     .as_str()
                     .unwrap_or("")
                     .to_string(),
+                b["created_at"].as_str().unwrap_or("").to_string(),
             )
         }))
 }
@@ -657,8 +674,17 @@ pub async fn cmd_move(a: Args, json: bool) -> R<()> {
             r["content_digest"].as_str()?.to_string(),
         ))
     };
+    let stayed_frozen = |l: &(String, String, String)| {
+        sapp["freeze"]["at"]
+            .as_str()
+            .is_some_and(|at| at <= l.2.as_str())
+    };
     let plan = match (&tapp, &last) {
-        (Some(t), Some(l)) if sapp["frozen"] == true && restored_from(t).as_ref() == Some(l) => {
+        (Some(t), Some(l))
+            if sapp["frozen"] == true
+                && stayed_frozen(l)
+                && restored_from(t).as_ref() == Some(&(l.0.clone(), l.1.clone())) =>
+        {
             // Only a freeze a move made is lifted; one the owner made after the move stays.
             if t["frozen"] == true && t["freeze"]["kind"] == "move" {
                 Plan::Verify {
@@ -757,6 +783,7 @@ pub async fn cmd_move(a: Args, json: bool) -> R<()> {
         json,
         steps: vec![],
         smoke_url: a.smoke_url,
+        froze_source: false,
     };
     let (rid, digest, already) = match plan {
         Plan::Full => match m.copy_and_restore().await {

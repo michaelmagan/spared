@@ -398,6 +398,23 @@ pub fn raise_epoch(
     Ok(now)
 }
 
+/// Drops the record of which remote backup this server's copy came from, and keeps the epoch.
+/// A copy that was removed or replaced by another restore no longer holds that backup, so the
+/// record must not vouch for it.
+pub fn clear_restore_record(data_dir: &Path, app: &str) -> std::io::Result<()> {
+    let p = epoch_path(data_dir, app);
+    let Some(rec) = read_json(&p) else {
+        return Ok(());
+    };
+    let Some(epoch) = rec["epoch"].as_u64() else {
+        return Ok(());
+    };
+    if rec.get("restored_from").is_none() && rec.get("content_digest").is_none() {
+        return Ok(());
+    }
+    write_json(&p, &json!({"epoch": epoch}))
+}
+
 /// The epoch of a key `<base>e<epoch:08>/<ts>.<node>/<leaf>`, and its node, when the key has
 /// that shape.
 fn key_epoch(base: &str, key: &str) -> Option<(u32, String)> {

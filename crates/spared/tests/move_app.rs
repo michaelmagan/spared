@@ -875,3 +875,129 @@ fn requests_an_earlier_cli_sends_still_work() {
     n.deploy_wat("one", RESPONDER);
     assert_eq!(public(&n, "one").0, 200);
 }
+
+#[test]
+fn review_undo_then_prefrozen_source_rerun_must_carry_new_writes() {
+    let s = scratch("move-rev1");
+    let fake = Fake::start();
+    let key = key_file(&s.0, "key");
+    let (a, b) = pair(&s, &fake, Some(&key));
+    let tf = token_file(&s, &b, "b");
+    a.deploy_wat("notes", RESPONDER);
+    write_data(&a.app_data("notes"), 1);
+    let (rc, v) = mv(&a, &b, &tf, "notes", &[]);
+    assert_eq!(rc, 0, "{v}");
+    // The undo the move prints: freeze the target, thaw the source.
+    assert_eq!(b.json(&["freeze", "notes"]).0, 0);
+    assert_eq!(a.json(&["thaw", "notes"]).0, 0);
+    assert_eq!(public(&a, "notes").0, 200);
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    std::fs::write(
+        a.app_data("notes").join("late"),
+        b"written on the source after the undo",
+    )
+    .unwrap();
+    // The operator freezes the source by hand, then moves again.
+    assert_eq!(a.json(&["freeze", "notes"]).0, 0);
+    let (rc, v) = mv(&a, &b, &tf, "notes", &[]);
+    eprintln!("REVIEW1 rc={rc} out={v}");
+    assert_eq!(rc, 0, "{v}");
+    assert_eq!(
+        tree(&b.app_data("notes")),
+        tree(&a.app_data("notes")),
+        "the move reported success but the target lacks the source's later write: {v}"
+    );
+    assert_eq!(v["already_moved"], false, "{v}");
+}
+
+#[test]
+fn review_failed_second_move_must_not_thaw_a_moved_away_source() {
+    let s = scratch("move-rev2");
+    let fake = Fake::start();
+    let key = key_file(&s.0, "key");
+    let (a, b) = pair(&s, &fake, Some(&key));
+    let c = Node::start(&s.0, "c", remote_args(&fake, Some(&key)), creds());
+    let (tb, tc) = (token_file(&s, &b, "b"), token_file(&s, &c, "c"));
+    a.deploy_wat("notes", RESPONDER);
+    write_data(&a.app_data("notes"), 1);
+    let (rc, v) = mv(&a, &b, &tb, "notes", &[]);
+    assert_eq!(rc, 0, "{v}");
+    assert_eq!(public(&a, "notes").0, 503);
+    assert_eq!(public(&b, "notes").0, 200);
+    // A second move from the old source to a third server fails at the upload.
+    fake.set(|f| f.fail_put_5xx = true);
+    let (rc, v) = mv(&a, &c, &tc, "notes", &[]);
+    fake.clear_faults();
+    eprintln!("REVIEW2 rc={rc} out={v}");
+    assert_eq!(rc, 1, "{v}");
+    assert_eq!(public(&b, "notes").0, 200, "the app lives on b");
+    assert_eq!(
+        public(&a, "notes").0,
+        503,
+        "the moved-away source serves again next to b: {v}"
+    );
+}
+
+#[test]
+fn review_rm_on_target_then_killed_rerun_must_not_thaw_an_empty_target() {
+    let s = scratch("move-rev3");
+    let fake = Fake::start();
+    let key = key_file(&s.0, "key");
+    let (a, b) = pair(&s, &fake, Some(&key));
+    let tf = token_file(&s, &b, "b");
+    // This app answers 502, so the smoke request fails after the restore.
+    a.deploy("notes");
+    write_data(&a.app_data("notes"), 11);
+    let smoke = format!("http://127.0.0.1:{}", b.public);
+    let (_, v) = mv(&a, &b, &tf, "notes", &["--smoke-url", &smoke]);
+    assert_eq!(v["error"]["kind"], "move_incomplete", "{v}");
+    // The operator wipes the target's copy and runs the move again; that run is killed while
+    // the source uploads its backup.
+    assert_eq!(b.json(&["rm", "notes", "--yes"]).0, 0);
+    b.deploy("notes");
+    let ps = b.json(&["ps"]).1;
+    let listed = ps["apps"]
+        .as_array()
+        .and_then(|a| a.iter().find(|x| x["name"] == "notes"))
+        .unwrap_or_else(|| panic!("{ps}"));
+    assert!(
+        listed.get("restored_from_remote").is_none() || listed["restored_from_remote"].is_null(),
+        "a redeploy after `spared rm` still shows the old restore: {ps}"
+    );
+    assert!(
+        app_info(&b, "notes")["restored_from_remote"].is_null(),
+        "a redeploy after `spared rm` still shows the old restore"
+    );
+    assert_eq!(b.json(&["freeze", "notes"]).0, 0);
+    fake.set(|f| f.slow_put_ms = 400);
+    fake.state.lock().unwrap().archive_put_started = false;
+    let mut cli = {
+        let mut args = vec!["--json".to_string(), "move".into(), "notes".into()];
+        args.extend(move_args(&b, &tf, &[]));
+        let a2: Vec<&str> = args.iter().map(String::as_str).collect();
+        a.cli_cmd(&a2)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    };
+    wait_for(|| fake.state.lock().unwrap().archive_put_started);
+    cli.kill().unwrap();
+    cli.wait().unwrap();
+    // Run it again at once.
+    let (rc, v) = mv(&a, &b, &tf, "notes", &[]);
+    fake.clear_faults();
+    let same = tree(&b.app_data("notes")) == tree(&a.app_data("notes"));
+    let t = app_info(&b, "notes");
+    eprintln!(
+        "REVIEW3 rc={rc} moved={} steps={} target_frozen={} target_files={} same_data={same}",
+        v["moved"],
+        v["steps"],
+        t["frozen"],
+        tree(&b.app_data("notes")).len()
+    );
+    assert!(
+        !(rc == 0 && !same),
+        "the move reported success and thawed a target whose data is not the source's"
+    );
+}

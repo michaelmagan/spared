@@ -2403,6 +2403,11 @@ impl Server {
         let removed = tokio::task::spawn_blocking(move || backup::remove_tree(&doomed)).await;
         self.release_component(&a.shared.hash);
         let mut out = serde_json::json!({"deleted": name});
+        if let Err(e) = crate::remote::clear_restore_record(&self.cfg.data_dir, name) {
+            eprintln!(
+                "delete {name}: the epoch file still names the remote backup it was restored from: {e}"
+            );
+        }
         if !matches!(removed, Ok(Ok(()))) {
             eprintln!("delete {name}: leftover files stay under {TRASH}/ until the next start");
             out["cleanup_pending"] = true.into();
@@ -3005,6 +3010,10 @@ impl Server {
                     .into();
                 }
             }
+        } else if let Err(e) = crate::remote::clear_restore_record(dd, name) {
+            eprintln!(
+                "app {name}: the epoch file still names the remote backup the app was restored from before: {e}"
+            );
         }
         if let Ok(e) = crate::remote::local_epoch(dd, name) {
             v["epoch"] = e.into();
