@@ -97,7 +97,7 @@ What is stored, for each backup:
 <prefix>/spared/v1/<app>/e00000001/<backup id>.<node>/manifest.json
 ```
 
-- The remote id is `<backup id>.<node>.<epoch>`, for example `20261112T040506Z.7f3a9c0a1b2c.1`. The node is 6 random bytes that the server writes once into `<data-dir>/node-id` (mode 0600), so two servers never write the same names. The epoch is always 1 in this version.
+- The remote id is `<backup id>.<node>.<epoch>`, for example `20261112T040506Z.7f3a9c0a1b2c.1`. The node is 6 random bytes that the server writes once into `<data-dir>/node-id` (mode 0600), so two servers never write the same names. A copy of the data directory carries the same node, so on a clone that will run next to the original, delete `<data-dir>/node-id` before its first start, or give it a different prefix; otherwise both write the same object keys when they back up in the same second. The epoch is always 1 in this version.
 - The archive is a POSIX tar stream of the backup's files, compressed with zstd (level 3), then sealed: ChaCha20-Poly1305 in 64 KiB segments (the STREAM construction that age uses), with a key for each archive derived from your key and a random salt. Each segment is bound to the app name and the remote id, so an archive copied to another app or id does not open, and a cut one does not either. The first tar entry lists every file with its size and SHA-256.
 - `manifest.json` is written last, so a backup whose manifest is missing is never listed or restored. It holds the app name, the remote id, sizes, the archive's SHA-256, the key id and the SHA-256 of the inner file list (`content_digest`), not file names.
 - A reader of the bucket learns the compressed size of each backup. That is accepted.
@@ -145,7 +145,7 @@ spared uses PutObject, GetObject (and HEAD, which GetObject covers) and ListBuck
 }
 ```
 
-PutObject can still overwrite an object. Turn on versioning or object lock on the bucket if a compromised server must not be able to replace the backups it wrote. Other stores have their own way to scope a token to a bucket.
+PutObject can still overwrite an object. Turn on versioning on the bucket if a compromised server must not be able to replace the backups it wrote. Object lock with a default retention period is not supported in this version: S3 then requires a `Content-MD5` or `x-amz-checksum-*` header on every PutObject, which spared does not send, so each upload would be rejected as `remote_rejected`. Other stores have their own way to scope a token to a bucket.
 
 ### Retention: a lifecycle rule
 

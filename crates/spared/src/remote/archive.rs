@@ -24,6 +24,8 @@ pub const INNER_MANIFEST: &str = ".spared-manifest.json";
 pub const CONTENTS_FORMAT: &str = "spared-backup-contents-v1";
 const BLOCK: usize = 512;
 const MAX_INNER_MANIFEST: u64 = 32 << 20;
+/// The largest value the 11 octal digits of a ustar size field hold, the most [`parse_octal`] reads.
+const MAX_TAR_SIZE: u64 = 0o77_777_777_777;
 const MAX_PAX: u64 = 16 << 10;
 const MAX_PATH: usize = 4096;
 const ZSTD_LEVEL: i32 = 3;
@@ -170,8 +172,19 @@ pub fn scan(root: &Path, limits: &Limits) -> Result<Vec<Item>> {
                 stack.push((child, format!("{path}/"), pending));
             }
             Kind::File => {
+                if e.len > MAX_TAR_SIZE {
+                    return Err(oversize(format!(
+                        "{path} is {} bytes, over the {MAX_TAR_SIZE} a tar entry holds",
+                        e.len
+                    )));
+                }
                 let mut f = dir.open_file(&e.name)?;
                 let (size, digest) = hash_reader(&mut f)?;
+                if size > MAX_TAR_SIZE {
+                    return Err(oversize(format!(
+                        "{path} is {size} bytes, over the {MAX_TAR_SIZE} a tar entry holds"
+                    )));
+                }
                 items.push(Item {
                     path,
                     kind: ItemKind::File,
@@ -240,8 +253,26 @@ impl std::fmt::Display for TooBig {
 
 impl std::error::Error for TooBig {}
 
+/// Something the archive format cannot hold: a file over the tar size field, a manifest over
+/// the reader's cap.
+#[derive(Debug)]
+struct Oversize(String);
+
+impl std::fmt::Display for Oversize {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Oversize {}
+
+fn oversize(what: impl Into<String>) -> Error {
+    Error::other(Oversize(what.into()))
+}
+
 pub fn is_too_big(e: &Error) -> bool {
-    e.get_ref().is_some_and(|i| i.is::<TooBig>())
+    e.get_ref()
+        .is_some_and(|i| i.is::<TooBig>() || i.is::<Oversize>())
 }
 
 impl<W: Write> Write for HashCount<W> {
@@ -290,20 +321,28 @@ impl<W: Write> Sink<W> {
     }
 }
 
-fn octal(field: &mut [u8], v: u64) {
-    let s = format!("{:0w$o}", v, w = field.len() - 1);
-    field[..s.len()].copy_from_slice(s.as_bytes());
-    field[field.len() - 1] = 0;
+fn octal(field: &mut [u8], v: u64) -> Result<()> {
+    let w = field.len() - 1;
+    let s = format!("{v:o}");
+    if s.len() > w {
+        return Err(oversize(format!(
+            "{v} does not fit a {w}-digit tar octal field"
+        )));
+    }
+    let s = format!("{v:0w$o}");
+    field[..w].copy_from_slice(s.as_bytes());
+    field[w] = 0;
+    Ok(())
 }
 
-fn tar_header(name: &[u8], kind: u8, size: u64, mode: u64) -> [u8; BLOCK] {
+fn tar_header(name: &[u8], kind: u8, size: u64, mode: u64) -> Result<[u8; BLOCK]> {
     let mut h = [0u8; BLOCK];
     h[..name.len()].copy_from_slice(name);
-    octal(&mut h[100..108], mode);
-    octal(&mut h[108..116], 0);
-    octal(&mut h[116..124], 0);
-    octal(&mut h[124..136], size);
-    octal(&mut h[136..148], 0);
+    octal(&mut h[100..108], mode)?;
+    octal(&mut h[108..116], 0)?;
+    octal(&mut h[116..124], 0)?;
+    octal(&mut h[124..136], size)?;
+    octal(&mut h[136..148], 0)?;
     h[156] = kind;
     h[257..263].copy_from_slice(b"ustar\0");
     h[263..265].copy_from_slice(b"00");
@@ -311,7 +350,7 @@ fn tar_header(name: &[u8], kind: u8, size: u64, mode: u64) -> [u8; BLOCK] {
     let sum: u64 = h.iter().map(|&b| b as u64).sum();
     let s = format!("{sum:06o}\0 ");
     h[148..156].copy_from_slice(s.as_bytes());
-    h
+    Ok(h)
 }
 
 fn pad(w: &mut impl Write, n: u64) -> Result<()> {
@@ -346,7 +385,7 @@ fn write_entry(w: &mut impl Write, path: &str, kind: ItemKind, size: u64) -> Res
             b'x',
             rec.len() as u64,
             0o600,
-        ))?;
+        )?)?;
         w.write_all(rec.as_bytes())?;
         pad(w, rec.len() as u64)?;
         let mut cut = 100;
@@ -359,7 +398,7 @@ fn write_entry(w: &mut impl Write, path: &str, kind: ItemKind, size: u64) -> Res
         ItemKind::Dir => (b'5', 0o700),
         ItemKind::File => (b'0', 0o600),
     };
-    w.write_all(&tar_header(short, flag, size, mode))
+    w.write_all(&tar_header(short, flag, size, mode)?)
 }
 
 /// What [`build`] wrote.
@@ -405,6 +444,13 @@ pub fn build(
         entries,
     };
     let manifest = serde_json::to_vec(&contents).map_err(Error::other)?;
+    if manifest.len() as u64 > MAX_INNER_MANIFEST {
+        return Err(oversize(format!(
+            "the inner manifest is {} bytes, over the {MAX_INNER_MANIFEST} the reader accepts",
+            manifest.len()
+        )));
+    }
+    check_contents(&contents, names, limits)?;
     let digest: [u8; 32] = Sha256::digest(&manifest).into();
     let counted = HashCount {
         inner: BufWriter::with_capacity(1 << 20, out),
@@ -1004,6 +1050,40 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_file_over_the_tar_size_field_is_refused_before_hashing() {
+        let s = scratch("huge");
+        let src = s.0.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        File::create(src.join("app.db"))
+            .unwrap()
+            .set_len(8 << 30)
+            .unwrap();
+        let t = std::time::Instant::now();
+        let e = build(
+            &src,
+            File::create(s.0.join("a")).unwrap(),
+            &NAMES,
+            None,
+            &Limits::new(u64::MAX),
+            u64::MAX,
+        )
+        .err()
+        .expect("an 8 GiB file must be refused");
+        println!("refused in {:?}: {e}", t.elapsed());
+        assert!(is_too_big(&e), "{e}");
+        assert!(t.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn the_size_field_holds_its_largest_value_and_refuses_more() {
+        let max = (8u64 << 30) - 1;
+        let h = tar_header(b"x", b'0', max, 0o600).unwrap();
+        assert_eq!(parse_octal(&h[124..136]), Some(max));
+        assert!(tar_header(b"x", b'0', 8 << 30, 0o600).is_err());
+        assert!(tar_header(b"x", b'0', u64::MAX, 0o600).is_err());
+    }
+
+    #[test]
     fn the_object_cap_stops_the_build() {
         let s = scratch("cap");
         sample(&s.0);
@@ -1084,7 +1164,9 @@ pub(crate) mod tests {
     }
 
     fn raw_entry(name: &[u8], flag: u8, data: &[u8]) -> Vec<u8> {
-        let mut v = tar_header(name, flag, data.len() as u64, 0o600).to_vec();
+        let mut v = tar_header(name, flag, data.len() as u64, 0o600)
+            .unwrap()
+            .to_vec();
         v.extend_from_slice(data);
         pad(&mut v, data.len() as u64).unwrap();
         v
@@ -1155,7 +1237,7 @@ pub(crate) mod tests {
             (b'g', "type 'g'"),
             (b'L', "type 'L'"),
         ] {
-            let mut e = tar_header(b"fine", flag, 0, 0o777);
+            let mut e = tar_header(b"fine", flag, 0, 0o777).unwrap();
             if flag == b'2' || flag == b'1' {
                 e[157..167].copy_from_slice(b"/etc/hosts");
                 e[148..156].fill(b' ');

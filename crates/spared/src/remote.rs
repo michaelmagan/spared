@@ -588,7 +588,7 @@ impl Remote {
             if archive::is_too_big(&e) {
                 s3_err(
                     "remote_backup_too_big",
-                    format!("the archive of {local_id} is over {} GiB, the most one upload sends in this version", MAX_OBJECT >> 30),
+                    format!("the archive of {local_id} is too big for one upload in this version: {e} (the object limit is {} GiB)", MAX_OBJECT >> 30),
                     "the local backup stands. Shrink the app's data, or copy <data-dir>/backups/ off the machine by other means",
                 )
             } else {
