@@ -177,7 +177,7 @@ nothing was installed"
   [ "$SETUP" = 1 ] || return 0
 
   say ""
-  say "spared setup installs the wasm32-wasip2 Rust target and wasi-sdk 25 into ~/.spared (needed to build apps)."
+  say "spared setup installs the wasm32-wasip2 Rust target and wasi-sdk 25 into ~/.spared (needed to build apps), then compiles SQLite once (about a minute)."
   run_setup=0
   if [ "$YES" = 1 ]; then
     run_setup=1

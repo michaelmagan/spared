@@ -1,5 +1,6 @@
 use crate::grants::{Manifest, Maxima, valid_name};
 use crate::sandbox::{CallError, Guarded, TrapKind, call_handler};
+use crate::sqlite_cache;
 use base64::Engine as _;
 use bytes::Bytes;
 use clap::Subcommand;
@@ -855,6 +856,56 @@ fn cmd_setup(dry_run: bool, json: bool) -> R<()> {
             say("wasi-sdk", "installed", dest.display().to_string());
         }
     }
+    let step = "sqlite precompile";
+    if sqlite_cache::disabled() {
+        say(
+            step,
+            "skipped",
+            format!("{} is set", sqlite_cache::ENV_DISABLE),
+        );
+    } else if let Some(sdk) = find_sdk() {
+        if sqlite_cache_is_warm(&sdk) {
+            say(step, "already built", lib_label());
+        } else if dry_run {
+            say(
+                step,
+                "would run",
+                format!(
+                    "compile SQLite once into {} (about a minute) so a first app build skips it",
+                    lib_label()
+                ),
+            );
+        } else {
+            if !json {
+                println!(
+                    "compiling SQLite once into {} (about a minute)",
+                    lib_label()
+                );
+            }
+            match precompile_sqlite(&sdk, json) {
+                Ok(()) if sqlite_cache_is_warm(&sdk) => say(step, "built", lib_label()),
+                Ok(()) => say(
+                    step,
+                    "skipped",
+                    "no object was cached; the first app build compiles SQLite".into(),
+                ),
+                Err(e) => say(
+                    step,
+                    "skipped",
+                    format!("{}; the first app build compiles SQLite instead", e.message),
+                ),
+            }
+        }
+    } else if dry_run {
+        say(
+            step,
+            "would run",
+            format!(
+                "compile SQLite once into {} after wasi-sdk is installed",
+                lib_label()
+            ),
+        );
+    }
     if json {
         out_json(json!({"dry_run": dry_run, "steps": steps}));
     }
@@ -929,6 +980,121 @@ fn release_unit_from_other_dir(dir: &Path, target_dir: &Path) -> R<()> {
     Ok(())
 }
 
+/// `cargo` set up to build guest code: wasi-sdk clang for C (through the SQLite cache when it can
+/// be set up), its archiver and the shared C flags, into `target_dir`. A build script never sees
+/// the admin token.
+fn guest_cargo(sdk: &Path, target_dir: &Path) -> Command {
+    let sdk_s = sdk.display().to_string();
+    let real_cc = sdk.join("bin/clang");
+    let cc = match home() {
+        Ok(h) => sqlite_cache::guest_cc(&real_cc, &sqlite_cache::lib_dir(&h)),
+        Err(_) => sqlite_cache::GuestCc {
+            cc: real_cc,
+            env: vec![],
+        },
+    };
+    let mut cmd = Command::new("cargo");
+    cmd.env("CC_wasm32_wasip2", &cc.cc)
+        .env("AR_wasm32_wasip2", format!("{sdk_s}/bin/llvm-ar"))
+        .env("CFLAGS_wasm32_wasip2", guest_cflags(&sdk_s))
+        .env("CARGO_TARGET_DIR", target_dir)
+        .env_remove("SPARED_TOKEN")
+        .env_remove("SPARED_ADMIN_TOKEN");
+    for (k, v) in cc.env {
+        cmd.env(k, v);
+    }
+    cmd
+}
+
+/// Where the SQLite cache lives, for messages: `~/.spared/lib` unless `$SPARED_LIB_DIR` moves it.
+fn lib_label() -> String {
+    match std::env::var_os(sqlite_cache::ENV_LIB_DIR) {
+        Some(d) if !d.is_empty() => PathBuf::from(d).display().to_string(),
+        _ => "~/.spared/lib".to_string(),
+    }
+}
+
+/// The SQLite objects cached for this wasi-sdk, or none when HOME or the compiler is unreadable.
+fn sqlite_cache_entries(sdk: &Path) -> Vec<sqlite_cache::Entry> {
+    let (Ok(h), Some(id)) = (home(), sqlite_cache::sdk_id(&sdk.join("bin/clang"))) else {
+        return vec![];
+    };
+    sqlite_cache::entries_for_sdk(&sqlite_cache::lib_dir(&h), &id)
+}
+
+fn sqlite_cache_has_entry(sdk: &Path) -> bool {
+    !sqlite_cache::disabled() && !sqlite_cache_entries(sdk).is_empty()
+}
+
+/// The libsqlite3-sys directory a new app locks (`libsqlite3-sys-0.39.1`).
+fn template_sqlite_crate() -> String {
+    sqlite_cache::locked_crate_dir(include_str!("../templates/Cargo.lock.template"))
+        .unwrap_or_default()
+}
+
+fn sqlite_cache_is_warm(sdk: &Path) -> bool {
+    let (Ok(h), Some(id)) = (home(), sqlite_cache::sdk_id(&sdk.join("bin/clang"))) else {
+        return false;
+    };
+    sqlite_cache::is_warm(&sqlite_cache::lib_dir(&h), &id, &template_sqlite_crate())
+}
+
+/// Compile SQLite into the cache by building libsqlite3-sys alone in a scratch project that has
+/// the same manifest, lock file and release profile as a new app, so the compile command (and so
+/// the cache key) is the one an app build issues. The scratch directory is removed afterwards.
+fn precompile_sqlite(sdk: &Path, json: bool) -> R<()> {
+    let lib = sqlite_cache::lib_dir(&home()?);
+    let dir = lib.join(format!("warm-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let run = || -> R<()> {
+        std::fs::create_dir_all(dir.join("src"))
+            .map_err(|e| io_err("create the scratch project", e))?;
+        let name = "spared-warm";
+        for (file, text) in [
+            (
+                "Cargo.toml",
+                include_str!("../templates/Cargo.toml.tmpl").replace("__NAME__", name),
+            ),
+            ("Cargo.lock", lock_for(name)),
+            ("src/main.rs", "fn main() {}\n".to_string()),
+        ] {
+            std::fs::write(dir.join(file), text)
+                .map_err(|e| io_err("write the scratch project", e))?;
+        }
+        let st = guest_cargo(sdk, &dir.join("target"))
+            .args([
+                "build",
+                "--release",
+                "--target",
+                "wasm32-wasip2",
+                "-p",
+                "libsqlite3-sys",
+                "--locked",
+            ])
+            .current_dir(&dir)
+            .stdout(Stdio::null())
+            .stderr(if json {
+                Stdio::null()
+            } else {
+                Stdio::inherit()
+            })
+            .status()
+            .map_err(|e| no_rust_tool("cargo", &e))?;
+        if st.success() {
+            Ok(())
+        } else {
+            Err(err(
+                "build_failed",
+                "cargo could not build libsqlite3-sys",
+                "check network access to crates.io, then rerun `spared setup`",
+            ))
+        }
+    };
+    let result = run();
+    let _ = std::fs::remove_dir_all(&dir);
+    result
+}
+
 fn build(dir: &Path, json: bool) -> R<PathBuf> {
     if !dir.join("Cargo.toml").exists() {
         return Err(err(
@@ -960,20 +1126,18 @@ fn build(dir: &Path, json: bool) -> R<PathBuf> {
         Some(t) => PathBuf::from(t),
         None => home()?.join(".spared/target"),
     };
-    let sdk_s = sdk.display().to_string();
-    let cflags = guest_cflags(&sdk_s);
     release_unit_from_other_dir(dir, &target_dir)?;
     if !json {
-        if sqlite_compiled(&target_dir) {
+        if sqlite_compiled(&target_dir) || sqlite_cache_has_entry(&sdk) {
             eprintln!("building {}", dir.display());
         } else {
             eprintln!(
-                "building {} (first build compiles SQLite and takes a minute)",
+                "building {} (first build compiles SQLite and takes a minute; `spared setup` precompiles it)",
                 dir.display()
             );
         }
     }
-    let out = Command::new("cargo")
+    let out = guest_cargo(&sdk, &target_dir)
         .args([
             "build",
             "--release",
@@ -982,12 +1146,6 @@ fn build(dir: &Path, json: bool) -> R<PathBuf> {
             "--message-format=json-render-diagnostics",
         ])
         .current_dir(dir)
-        .env("CC_wasm32_wasip2", format!("{sdk_s}/bin/clang"))
-        .env("AR_wasm32_wasip2", format!("{sdk_s}/bin/llvm-ar"))
-        .env("CFLAGS_wasm32_wasip2", cflags)
-        .env("CARGO_TARGET_DIR", &target_dir)
-        .env_remove("SPARED_TOKEN")
-        .env_remove("SPARED_ADMIN_TOKEN")
         .stdout(Stdio::piped())
         .stderr(if json {
             Stdio::piped()
@@ -2030,6 +2188,40 @@ fn check_target_dir() -> Vec<Check> {
     out
 }
 
+fn check_sqlite_cache() -> Option<Check> {
+    if sqlite_cache::disabled() {
+        return Some(check(
+            "sqlite-cache",
+            Level::Ok,
+            format!("off ({} is set)", sqlite_cache::ENV_DISABLE),
+            "",
+        ));
+    }
+    let sdk = find_sdk()?;
+    if sqlite_cache_is_warm(&sdk) {
+        let versions: Vec<String> = sqlite_cache_entries(&sdk)
+            .into_iter()
+            .map(|e| e.sqlite)
+            .collect();
+        return Some(check(
+            "sqlite-cache",
+            Level::Ok,
+            format!(
+                "SQLite {} is precompiled in {}",
+                versions.join(", "),
+                lib_label()
+            ),
+            "",
+        ));
+    }
+    Some(check(
+        "sqlite-cache",
+        Level::Warn,
+        "SQLite is not precompiled for this wasi-sdk, so the first app build compiles it (about a minute)",
+        "run `spared setup`",
+    ))
+}
+
 fn check_sdk() -> Check {
     match find_sdk() {
         Some(p) => check(
@@ -2180,6 +2372,7 @@ async fn cmd_doctor(json: bool) -> R<()> {
         )
     });
     checks.push(check_sdk());
+    checks.extend(check_sqlite_cache());
     checks.extend(check_target_dir());
     checks.push(check_port("port-8080", 8080, "apps").await);
     checks.push(check_port("port-8081", 8081, "admin").await);

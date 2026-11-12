@@ -30,7 +30,7 @@ source bench/env.sh
 cd probes/sqlite-probe && cargo build --release --target wasm32-wasip2
 ```
 
-The first guest build compiles SQLite and takes about a minute (AGENTS.md).
+Without the cache that `spared setup` fills, the first guest build compiles SQLite and takes about a minute (AGENTS.md describes the cache, and `scripts/sqlite-cache-test.sh` proves it).
 
 The C flags for that SQLite live in one file, `scripts/guest-cflags.txt`: `spared deploy`, `test` and `dev` embed it, and `bench/env.sh` and `scripts/build-examples.sh` read it. Change flags there and nowhere else. `-DHAVE_PREAD=1 -DHAVE_PWRITE=1` must stay: without them every SQLite page goes through a WASI stream that wasmtime-wasi runs on another thread, and SQLite in Wasm is about 3x native instead of 1.9x (see `docs/benchmarks.md`). A unit test (`guest_sqlite_uses_pread_and_pwrite`) and `scripts/e2e.sh` (the built component must import `descriptor.read` and `descriptor.write`) fail if they go.
 
