@@ -118,7 +118,7 @@ impl Drop for Fixture {
 async fn lock_idle_gives_up_on_a_retired_app_still_in_the_table() {
     let fx = Fixture::new();
     fx.server
-        .install("a", &manifest("a"), &wasm(HANDLER))
+        .install("a", &manifest("a"), &wasm(HANDLER), false)
         .await
         .unwrap();
     fx.app("a").unwrap().retired.store(true, Ordering::Release);
@@ -161,14 +161,14 @@ fn listed(server: &Server, name: &str) -> Option<(u64, String)> {
 async fn a_component_that_does_not_link_changes_nothing() {
     let fx = Fixture::new();
     fx.server
-        .install("a", &manifest("a"), &wasm(HANDLER))
+        .install("a", &manifest("a"), &wasm(HANDLER), false)
         .await
         .unwrap();
     let (before, listed_before) = (disk_state(&fx, "a"), listed(&fx.server, "a"));
     for bytes in [wasm(LINK_FAILS), vec![0u8; 53]] {
         let e = fx
             .server
-            .install("a", &manifest("a"), &bytes)
+            .install("a", &manifest("a"), &bytes, false)
             .await
             .expect_err("a component that does not link was installed");
         assert_eq!(e.kind, "invalid_component", "{}", e.message);
@@ -184,7 +184,7 @@ async fn a_first_deploy_that_does_not_link_leaves_no_app_directory() {
     let fx = Fixture::new();
     let e = fx
         .server
-        .install("new", &manifest("new"), &wasm(LINK_FAILS))
+        .install("new", &manifest("new"), &wasm(LINK_FAILS), false)
         .await
         .expect_err("installed");
     assert_eq!(e.kind, "invalid_component");
@@ -202,12 +202,12 @@ async fn a_first_deploy_that_does_not_link_leaves_no_app_directory() {
 async fn a_redeploy_replaces_the_whole_release_and_leaves_no_staged_file() {
     let fx = Fixture::new();
     fx.server
-        .install("a", &manifest("a"), &wasm(HANDLER))
+        .install("a", &manifest("a"), &wasm(HANDLER), false)
         .await
         .unwrap();
     let v1 = listed(&fx.server, "a").unwrap();
     fx.server
-        .install("a", &manifest("a"), &wasm(&handler_v2()))
+        .install("a", &manifest("a"), &wasm(&handler_v2()), false)
         .await
         .unwrap();
     let v2 = listed(&fx.server, "a").unwrap();
@@ -233,7 +233,7 @@ async fn a_redeploy_replaces_the_whole_release_and_leaves_no_staged_file() {
 async fn a_deploy_that_stopped_before_its_commit_leaves_the_old_release() {
     let fx = Fixture::new();
     fx.server
-        .install("a", &manifest("a"), &wasm(HANDLER))
+        .install("a", &manifest("a"), &wasm(HANDLER), false)
         .await
         .unwrap();
     let v1 = listed(&fx.server, "a").unwrap();
@@ -257,7 +257,7 @@ async fn a_deploy_that_stopped_before_its_commit_leaves_the_old_release() {
 async fn a_deploy_that_stopped_after_its_commit_is_finished_at_start() {
     let fx = Fixture::new();
     fx.server
-        .install("a", &manifest("a"), &wasm(HANDLER))
+        .install("a", &manifest("a"), &wasm(HANDLER), false)
         .await
         .unwrap();
     let v2 = wasm(&handler_v2());
@@ -285,7 +285,7 @@ async fn reading_ahead_after_a_restart_covers_each_distinct_component_once() {
         ("c", handler_v2()),
     ] {
         fx.server
-            .install(name, &manifest(name), &wasm(&wat))
+            .install(name, &manifest(name), &wasm(&wat), false)
             .await
             .unwrap();
     }
@@ -321,7 +321,7 @@ async fn reading_ahead_after_a_restart_covers_each_distinct_component_once() {
 async fn a_zero_budget_turns_reading_ahead_off_at_start_and_at_wake() {
     let fx = Fixture::with_prefetch(0);
     fx.server
-        .install("a", &manifest("a"), &wasm(HANDLER))
+        .install("a", &manifest("a"), &wasm(HANDLER), false)
         .await
         .unwrap();
     assert!(fx.server.start_prefetch().is_none());
@@ -334,7 +334,7 @@ async fn a_zero_budget_turns_reading_ahead_off_at_start_and_at_wake() {
 async fn the_first_wake_of_a_component_checks_it_and_later_wakes_do_not() {
     let fx = Fixture::with_prefetch(1024);
     fx.server
-        .install("a", &manifest("a"), &wasm(HANDLER))
+        .install("a", &manifest("a"), &wasm(HANDLER), false)
         .await
         .unwrap();
     let shared = fx.app("a").unwrap().shared.clone();
@@ -359,6 +359,7 @@ async fn serve_stops_promptly_while_the_prefetch_pass_is_running() {
                 &format!("app{i}"),
                 &manifest(&format!("app{i}")),
                 &wasm(&wat),
+                false,
             )
             .await
             .unwrap();
@@ -416,7 +417,7 @@ async fn a_store_that_cannot_hard_link_keeps_its_components_across_restarts() {
         return;
     };
     fx.server
-        .install("a", &manifest("a"), &wasm(HANDLER))
+        .install("a", &manifest("a"), &wasm(HANDLER), false)
         .await
         .unwrap();
     let hash = fx.app("a").unwrap().shared.hash.clone();
@@ -458,7 +459,7 @@ async fn a_component_two_apps_share_stays_when_one_goes_even_without_hard_links(
     };
     for n in ["a", "b"] {
         fx.server
-            .install(n, &manifest(n), &wasm(HANDLER))
+            .install(n, &manifest(n), &wasm(HANDLER), false)
             .await
             .unwrap();
     }
@@ -473,7 +474,7 @@ async fn a_component_two_apps_share_stays_when_one_goes_even_without_hard_links(
 async fn an_app_stored_with_a_fetch_entry_this_version_refuses_still_loads() {
     let fx = Fixture::new();
     fx.server
-        .install("a", &manifest("a"), &wasm(HANDLER))
+        .install("a", &manifest("a"), &wasm(HANDLER), false)
         .await
         .unwrap();
     std::fs::write(
