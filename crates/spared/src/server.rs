@@ -902,7 +902,7 @@ const FROZEN_RETRY_AFTER: &str = "30";
 /// The freeze recorded in `<app dir>/frozen`, when the app is frozen. A marker that cannot be read
 /// still freezes the app: the safe reading of a damaged marker is "do not serve".
 fn read_freeze_marker(dir: &Path) -> Option<serde_json::Value> {
-    let unreadable = || serde_json::json!({"kind": "unknown", "reason": "the frozen marker could not be read; `spared thaw <name>` replaces it"});
+    let unreadable = || serde_json::json!({"kind": "unknown", "reason": "the frozen marker could not be read. `spared thaw <name>` removes it"});
     match std::fs::read(dir.join(FROZEN_MARKER)) {
         Ok(b) => Some(
             serde_json::from_slice::<serde_json::Value>(&b)
@@ -942,7 +942,7 @@ fn app_frozen(name: &str) -> Resp {
         StatusCode::SERVICE_UNAVAILABLE,
         "app_frozen",
         format!("app '{name}' is frozen on this server and takes no requests here"),
-        "retry later; it may be moving to another server. The operator sees why with `spared ps` and serves it here again with `spared thaw <name>`",
+        "retry later. It may be moving to another server. The operator sees why with `spared ps` and serves it here again with `spared thaw <name>`",
     );
     r.headers_mut()
         .insert("retry-after", FROZEN_RETRY_AFTER.parse().unwrap());
@@ -2060,16 +2060,6 @@ impl Server {
                 );
             }
         };
-        if !frozen_for_move
-            && self
-                .apps
-                .read()
-                .unwrap()
-                .get(name)
-                .is_some_and(|a| a.is_frozen())
-        {
-            return deploy_refused_frozen(name).into_resp();
-        }
         let cap = self.cfg.compile.max_component_bytes;
         let collect = Limited::new(req.into_body(), cap).collect();
         let wasm = match tokio::time::timeout(DEPLOY_BODY_TIMEOUT, collect).await {
@@ -2091,6 +2081,17 @@ impl Server {
                 );
             }
         };
+        // Before the compile, which a frozen app would waste; `install` checks again under the
+        // name lock. After the body is read, so a client still sending is not cut off.
+        let frozen_now = self
+            .apps
+            .read()
+            .unwrap()
+            .get(name)
+            .is_some_and(|a| a.is_frozen());
+        if frozen_now && !frozen_for_move {
+            return deploy_refused_frozen(name).into_resp();
+        }
         let (server, name) = (self.clone(), name.to_string());
         detached(async move {
             match server
@@ -2992,7 +2993,7 @@ impl Server {
             let next = u32::try_from(next).unwrap_or(crate::remote::MAX_EPOCH);
             match crate::remote::raise_epoch(dd, name, next, rid, digest) {
                 Ok(e) => {
-                    eprintln!("app {name}: restored from remote backup {rid}; epoch is now {e}");
+                    eprintln!("app {name}: restored from remote backup {rid}, epoch now {e}");
                     v["restored_from_remote"] = rid.into();
                     v["content_digest"] = digest.into();
                 }
@@ -3815,6 +3816,43 @@ mod tests {
             r.extensions().get::<ErrorKind>().map(|k| k.0),
             Some("app_busy")
         );
+    }
+
+    #[test]
+    fn a_frozen_app_answers_503_with_retry_after_and_no_reason() {
+        let r = app_frozen("notes");
+        assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(r.headers()["retry-after"], FROZEN_RETRY_AFTER);
+        assert_eq!(
+            r.extensions().get::<ErrorKind>().map(|k| k.0),
+            Some("app_frozen")
+        );
+    }
+
+    #[test]
+    fn the_freeze_marker_survives_and_a_damaged_one_still_freezes() {
+        let dir = std::env::temp_dir().join(format!("spared-frozen-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(read_freeze_marker(&dir), None);
+        let info = serde_json::json!({"kind": "manual", "reason": "r", "at": "t"});
+        write_freeze_marker(&dir, &info).unwrap();
+        assert_eq!(read_freeze_marker(&dir), Some(info));
+        std::fs::write(dir.join(FROZEN_MARKER), b"\xff not json").unwrap();
+        assert_eq!(read_freeze_marker(&dir).unwrap()["kind"], "unknown");
+        remove_freeze_marker(&dir).unwrap();
+        remove_freeze_marker(&dir).unwrap();
+        assert_eq!(read_freeze_marker(&dir), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn query_params() {
+        assert_eq!(query_param(Some("frozen=move"), "frozen"), Some("move"));
+        assert_eq!(query_param(Some("a=1&frozen=x"), "frozen"), Some("x"));
+        assert_eq!(query_param(Some("unfrozen=move"), "frozen"), None);
+        assert_eq!(query_param(Some("frozen"), "frozen"), None);
+        assert_eq!(query_param(None, "frozen"), None);
     }
 
     #[test]

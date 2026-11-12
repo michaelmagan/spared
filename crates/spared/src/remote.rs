@@ -44,6 +44,8 @@ pub const MAX_EPOCH: u32 = 99_999_999;
 pub const EPOCH_FILE: &str = ".epoch";
 /// How many epochs a search for the highest one steps through before it gives up.
 const MAX_EPOCH_STEPS: usize = 1000;
+/// How many keys one look for a newer epoch reads.
+const EPOCH_LISTING: usize = 1000;
 /// The largest archive one upload sends (one PUT).
 pub const MAX_OBJECT: u64 = 4 << 30;
 const MANIFEST_FORMAT: &str = "spared-remote-backup-v1";
@@ -519,7 +521,7 @@ impl Remote {
         let after = format!("{base}e{epoch:08}/~");
         let (objects, _) = self
             .s3
-            .list_after(&format!("{base}e"), Some(&after), MAX_EPOCH_STEPS)
+            .list_after(&format!("{base}e"), Some(&after), EPOCH_LISTING)
             .await?;
         Ok(objects
             .iter()
@@ -539,7 +541,7 @@ impl Remote {
         Err(s3_err(
             "remote_rejected",
             format!("the bucket holds more than {MAX_EPOCH_STEPS} epochs of '{app}'"),
-            "list them with `spared backups <name> --remote`; that many restores of one app is not something spared makes",
+            "list them with `spared backups <name> --remote`. That many restores of one app is not something spared makes",
         ))
     }
 
@@ -722,10 +724,15 @@ impl Remote {
         }
         // Advisory: another server may restore between this listing and the upload below.
         if let Some((newer, node)) = rt.block_on(self.newer_epoch(app, epoch))? {
+            let own = if node == self.node {
+                " (that is this server's own node id: its epoch file, <data-dir>/backups/<app>/.epoch, was lost or replaced)"
+            } else {
+                ""
+            };
             return Err(s3_err(
                 "remote_superseded",
                 format!(
-                    "the bucket holds backups of '{app}' at epoch {newer} from node {node}, and this server holds epoch {epoch}: the app was restored on another server, so the copy here is stale. Nothing was uploaded, and this server froze the app"
+                    "the bucket holds backups of '{app}' at epoch {newer} from node {node}{own}, and this server holds epoch {epoch}: the app was restored on another server, so the copy here is stale. Nothing was uploaded, and this server froze the app"
                 ),
                 "if the app now lives on the other server, remove it here with `spared rm <name> --yes` once nothing points at this server. If this copy holds writes the other one lacks, copy them over by hand: there is no merge. `spared thaw <name>` serves it here again, and the next upload is refused again (docs/operating.md#move-an-app-to-another-server)",
             ));
@@ -1418,6 +1425,54 @@ mod tests {
         let e = Settings::from_flags(f, &env_of(&creds())).err().unwrap();
         assert_eq!(e.kind, "bad_backup_config");
         assert!(!e.message.contains("pw@"), "{}", e.message);
+    }
+
+    #[test]
+    fn epochs_start_at_1_and_a_restore_only_raises_them() {
+        let d = archive::tests::scratch("epoch");
+        assert_eq!(local_epoch(&d.0, "notes"), Ok(1));
+        assert_eq!(raise_epoch(&d.0, "notes", 3, "r3", "d3").unwrap(), 3);
+        assert_eq!(raise_epoch(&d.0, "notes", 2, "r2", "d2").unwrap(), 3);
+        assert_eq!(local_epoch(&d.0, "notes"), Ok(3));
+        assert_eq!(epoch_record(&d.0, "notes").unwrap()["restored_from"], "r2");
+        let mode = std::fs::metadata(epoch_path(&d.0, "notes"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+        for bad in ["", "{}", r#"{"epoch":0}"#, r#"{"epoch":100000000}"#, "1"] {
+            std::fs::write(epoch_path(&d.0, "notes"), bad).unwrap();
+            assert!(local_epoch(&d.0, "notes").is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn keys_name_their_epoch_and_node_only_in_the_layout() {
+        let base = "p/spared/v1/notes/";
+        assert_eq!(
+            key_epoch(
+                base,
+                "p/spared/v1/notes/e00000002/20261112T040506Z.7f3a9c0a1b2c/archive"
+            ),
+            Some((2, "7f3a9c0a1b2c".into()))
+        );
+        for bad in [
+            "p/spared/v1/notes/e2/20261112T040506Z.7f3a9c0a1b2c/archive",
+            "p/spared/v1/notes/e00000000/20261112T040506Z.7f3a9c0a1b2c/archive",
+            "p/spared/v1/notes/e00000002/20261112T040506Z/archive",
+            "p/spared/v1/notes/e00000002/x.7f3a9c0a1b2c/archive",
+            "p/spared/v1/other/e00000002/20261112T040506Z.7f3a9c0a1b2c/archive",
+            "p/spared/v1/notes/owner.json",
+        ] {
+            assert_eq!(key_epoch(base, bad), None, "{bad}");
+        }
+        // `~` sorts after every character of a backup's directory, so a listing that starts
+        // after `e<N>/~` skips exactly the keys of epochs up to N.
+        let after = format!("{base}e00000002/~");
+        assert!(format!("{base}e00000002/20261112T040506Z.7f3a9c0a1b2c/manifest.json") < after);
+        assert!(format!("{base}e00000003/20001112T040506Z.000000000000/archive") > after);
+        assert!(format!("{base}e00000010/20001112T040506Z.000000000000/archive") > after);
     }
 
     #[test]

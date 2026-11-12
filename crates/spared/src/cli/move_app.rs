@@ -228,7 +228,7 @@ impl Mover {
             Err(e) => format!("unknown ({}: {})", e.kind, e.message),
         };
         let fix = format!(
-            "{} Then run the same `spared move` again: it starts over and is safe to repeat. The target's copy of {name} is not serving; to give up instead, remove it there with `spared rm {name} --yes --server {}`",
+            "{} Then run the same `spared move` again: it starts over and is safe to repeat. The target's copy of {name} stays frozen and does not serve. If you give the move up, remove it there with `spared rm {name} --yes --server {}`",
             if cause.fix.is_empty() {
                 "fix the cause."
             } else {
@@ -320,7 +320,7 @@ impl Mover {
             .await?;
         let deployed = json_body(&deployed)?;
         self.step(format!(
-            "copied the code of {name} ({} bytes, sha256 {}) to the target, which compiled it; the app is frozen there (version {})",
+            "copied the code of {name} ({} bytes, sha256 {}) to the target, which compiled it. The app is frozen there (version {})",
             code.body.len(),
             &sha[..12],
             deployed["version"]
@@ -408,7 +408,7 @@ impl Mover {
         }
         let local = fetched["local_id"].as_str().unwrap_or("").to_string();
         self.step(format!(
-            "fetched {rid} on the target as local backup {local}; every hash and seal checked, and its content digest matches the source's"
+            "fetched {rid} on the target as local backup {local}. Every hash and seal checked, and its content digest matches the source's"
         ));
         // 5. Restore it on the target.
         let r = self
@@ -496,9 +496,9 @@ impl Mover {
                         format!(
                             "GET / on {url} with Host {host} {what}{}",
                             if refrozen {
-                                "; the target was frozen again"
+                                ". The target was frozen again"
                             } else {
-                                "; the target could not be frozen again and may serve"
+                                ". The target could not be frozen again and may serve"
                             }
                         ),
                         "",
@@ -511,7 +511,8 @@ impl Mover {
                 }
             }
         }
-        Ok(t)
+        // As it is now, thawed.
+        Ok(self.dst.app(&name).await.ok().flatten().unwrap_or(t))
     }
 }
 
@@ -568,7 +569,14 @@ pub async fn cmd_move(a: Args, json: bool) -> R<()> {
         label: "source",
     };
     let to = a.to.trim_end_matches('/').to_string();
-    if let Some(u) = &a.smoke_url {
+    for u in std::iter::once(&to).chain(a.smoke_url.as_ref()) {
+        if u.contains('@') {
+            return Err(err(
+                "bad_server_url",
+                "a URL given to spared move holds a user name or password",
+                "pass http://IP:PORT only. The target's token goes in --to-token-file or SPARED_TARGET_TOKEN",
+            ));
+        }
         parse_base(u.trim_end_matches('/'))?;
     }
     if parse_base(&to)? == parse_base(&src.base)? {
@@ -591,7 +599,7 @@ pub async fn cmd_move(a: Args, json: bool) -> R<()> {
             return Err(err(
                 "remote_backups_off",
                 format!(
-                    "the {} server {} was started without --backup-to; a move goes through the bucket both servers back up to",
+                    "the {} server {} was started without --backup-to, and a move goes through the bucket both servers back up to",
                     side.label, side.base
                 ),
                 "start both servers with the same --backup-to and the same --backup-key-file (docs/operating.md#move-an-app-to-another-server)",
@@ -617,7 +625,7 @@ pub async fn cmd_move(a: Args, json: bool) -> R<()> {
                 show(sr),
                 show(tr)
             ),
-            "start the target with the source's --backup-to and a copy of the source's backup key (--backup-key-file); the key id must match",
+            "start the target with the source's --backup-to and a copy of the source's backup key (--backup-key-file). The key id must match",
         ));
     }
     if si["node"] == ti["node"] {
@@ -634,7 +642,7 @@ pub async fn cmd_move(a: Args, json: bool) -> R<()> {
         return Err(err(
             "no_such_app",
             format!("the source server {} has no app '{name}'", src.base),
-            "check the name with `spared ps`; if the app was moved and removed here already, there is nothing to move",
+            "check the name with `spared ps`. If the app was moved and removed here already, there is nothing to move",
         ));
     };
     let tapp = dst.app(&name).await?;
@@ -651,7 +659,8 @@ pub async fn cmd_move(a: Args, json: bool) -> R<()> {
     };
     let plan = match (&tapp, &last) {
         (Some(t), Some(l)) if sapp["frozen"] == true && restored_from(t).as_ref() == Some(l) => {
-            if t["frozen"] == true {
+            // Only a freeze a move made is lifted; one the owner made after the move stays.
+            if t["frozen"] == true && t["freeze"]["kind"] == "move" {
                 Plan::Verify {
                     rid: l.0.clone(),
                     digest: l.1.clone(),
@@ -688,7 +697,7 @@ pub async fn cmd_move(a: Args, json: bool) -> R<()> {
         "key_id": sr["key_id"],
     });
     let smoke_line = a.smoke_url.as_ref().map(|u| {
-        format!("GET / on {u} with Host {name}.localhost; a 5xx or no answer freezes the target again and stops")
+        format!("GET / on {u} with Host {name}.localhost. A 5xx or no answer freezes the target again and stops")
     });
     let mut steps_planned: Vec<String> = match &plan {
         Plan::Full => vec![
@@ -704,7 +713,8 @@ pub async fn cmd_move(a: Args, json: bool) -> R<()> {
             format!("thaw {name} on the target"),
         ],
         Plan::Done { rid, .. } => vec![format!(
-            "nothing: an earlier run moved {name} ({rid}); the target serves it and the source is frozen"
+            "nothing: an earlier run moved {name} ({rid}) and the source is frozen. The target is {}",
+            describe(tapp.as_ref())
         )],
     };
     if !matches!(plan, Plan::Done { .. }) {
@@ -755,7 +765,7 @@ pub async fn cmd_move(a: Args, json: bool) -> R<()> {
         },
         Plan::Verify { rid, digest } => {
             m.step(format!(
-                "an earlier run restored {rid} on the target and stopped; checking it"
+                "an earlier run restored {rid} on the target and stopped. Checking it"
             ));
             (rid, digest, false)
         }
@@ -763,7 +773,8 @@ pub async fn cmd_move(a: Args, json: bool) -> R<()> {
     };
     let t = if already {
         m.step(format!(
-            "{name} was already moved: the target serves {rid} and the source is frozen"
+            "{name} was already moved: the target holds {rid} ({}) and the source is frozen",
+            describe(tapp.as_ref())
         ));
         tapp.unwrap_or_default()
     } else {
@@ -772,7 +783,7 @@ pub async fn cmd_move(a: Args, json: bool) -> R<()> {
     let (sb, tb) = (m.src.base.clone(), m.dst.base.clone());
     let next = vec![
         format!(
-            "point DNS (or your proxy) for {name} at the target {tb}'s public address; spared never changes DNS"
+            "point DNS (or your proxy) for {name} at the target {tb}'s public address. spared never changes DNS"
         ),
         format!(
             "keep the source frozen until the old DNS records have expired, then remove it there: spared rm {name} --yes --server {sb} (its backups stay)"
@@ -791,15 +802,15 @@ pub async fn cmd_move(a: Args, json: bool) -> R<()> {
         v["remote_id"] = rid.into();
         v["content_digest"] = digest.into();
         v["epoch"] = t["epoch"].clone();
-        v["state"] = json!({"source": "frozen", "target": "serving"});
+        v["state"] = json!({"source": "frozen", "target": describe(Some(&t))});
         v["steps"] = json!(m.steps);
         v["next"] = json!(next);
         v["undo"] = undo.into();
         out_json(v);
     } else {
         println!(
-            "moved {name}: the target serves it at epoch {}, and the source is frozen",
-            t["epoch"]
+            "moved {name}: the target is {}, and the source is frozen",
+            describe(Some(&t))
         );
         for n in &next {
             println!("next: {n}");

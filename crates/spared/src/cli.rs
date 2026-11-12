@@ -2147,7 +2147,7 @@ async fn cmd_freeze(
     let f = &v["freeze"];
     if v["already_frozen"].as_bool() == Some(true) {
         println!(
-            "{name} was already frozen ({}: {}); left as it was",
+            "{name} was already frozen ({}: {}), and is left as it was",
             f["kind"].as_str().unwrap_or(""),
             f["reason"].as_str().unwrap_or("")
         );
@@ -2155,7 +2155,7 @@ async fn cmd_freeze(
         println!("froze {name}: public requests get 503 app_frozen, here and after a restart");
     }
     println!(
-        "admin commands (backup, restore, logs, rm) still work; serve it again with: spared thaw {name}"
+        "admin commands (backup, restore, logs, rm) still work. Serve it again with: spared thaw {name}"
     );
     Ok(())
 }
