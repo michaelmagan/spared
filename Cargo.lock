@@ -1601,6 +1601,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "libc",
+ "ring",
  "rusqlite",
  "rustls",
  "serde",
@@ -1615,6 +1616,7 @@ dependencies = [
  "wasmtime-wasi-http",
  "wat",
  "webpki-roots",
+ "zstd",
 ]
 
 [[package]]

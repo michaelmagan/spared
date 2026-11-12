@@ -12,6 +12,8 @@ apps/demo-celld/.celld/
 .spared-data/
 .spared/
 data/
+# Test fixtures, not server data.
+!crates/spared/tests/data/
 .env
 .env.*
 *.pem

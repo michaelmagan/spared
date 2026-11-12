@@ -11,6 +11,7 @@ mod logcap;
 mod obs;
 mod pinned_send;
 mod prefetch;
+mod remote;
 mod sandbox;
 mod server;
 mod signals;
@@ -167,6 +168,37 @@ enum Cmd {
         /// duration and request id. Never the query string, a header or a body.
         #[arg(long, env = "SPARED_ACCESS_LOG", value_enum, default_value = "on")]
         access_log: OnOff,
+        /// After each backup, upload it to this S3-compatible bucket and prefix
+        /// (s3://BUCKET/PREFIX). Credentials come only from AWS_ACCESS_KEY_ID and
+        /// AWS_SECRET_ACCESS_KEY (or their _FILE twins) in the environment, never from a flag.
+        #[arg(long, env = "SPARED_BACKUP_TO", value_name = "s3://BUCKET/PREFIX")]
+        backup_to: Option<String>,
+        /// The store's URL when it is not AWS S3 (R2, Tigris, RustFS and so on): https://HOST[:PORT].
+        /// http:// only for a loopback address, or with --backup-allow-http.
+        #[arg(long, env = "SPARED_BACKUP_ENDPOINT", value_name = "URL")]
+        backup_endpoint: Option<String>,
+        /// The bucket's region. Default: $AWS_REGION, then us-east-1. R2 takes auto.
+        #[arg(long, env = "SPARED_BACKUP_REGION")]
+        backup_region: Option<String>,
+        /// Bucket in the path or in the host name. Default: virtual for AWS, path with
+        /// --backup-endpoint.
+        #[arg(long, env = "SPARED_BACKUP_ADDRESSING", value_enum)]
+        backup_addressing: Option<remote::s3::Addressing>,
+        /// File holding the key remote backups are encrypted with (`spared backup-key new`).
+        /// Keep a copy off this machine: without it the backups cannot be restored.
+        #[arg(long, env = "SPARED_BACKUP_KEY_FILE", value_name = "PATH")]
+        backup_key_file: Option<PathBuf>,
+        /// off uploads archives unencrypted and needs no key. Default on.
+        #[arg(
+            long,
+            env = "SPARED_BACKUP_ENCRYPTION",
+            value_enum,
+            default_value = "on"
+        )]
+        backup_encryption: OnOff,
+        /// Allow an http:// --backup-endpoint that is not a loopback address.
+        #[arg(long, env = "SPARED_BACKUP_ALLOW_HTTP", value_parser = clap::builder::BoolishValueParser::new())]
+        backup_allow_http: bool,
     },
     /// Compile the component on stdin and write the artifact to stdout; spawned by the server.
     #[command(hide = true)]
@@ -273,6 +305,13 @@ async fn run(cli: Cli) -> Result<std::convert::Infallible> {
             domain,
             examples_dir,
             access_log,
+            backup_to,
+            backup_endpoint,
+            backup_region,
+            backup_addressing,
+            backup_key_file,
+            backup_encryption,
+            backup_allow_http,
         } => {
             // First, so a SIGTERM during a slow start (compiling the examples) is seen.
             let stop = shutdown_on_signal()?;
@@ -284,6 +323,20 @@ async fn run(cli: Cli) -> Result<std::convert::Infallible> {
             if let Err(e) = server::check_admin_bind(admin_listen, admin_public_i_know) {
                 refuse(cli.json, &e);
             }
+            // Before anything is bound or written: remote backup settings that cannot work.
+            let remote = remote::Settings::from_flags(
+                remote::Flags {
+                    to: backup_to,
+                    endpoint: backup_endpoint,
+                    region: backup_region,
+                    addressing: backup_addressing,
+                    key_file: backup_key_file,
+                    encryption_off: backup_encryption == OnOff::Off,
+                    allow_http: backup_allow_http,
+                },
+                &|k| std::env::var(k).ok(),
+            )
+            .unwrap_or_else(|e| refuse(cli.json, &e));
             let listen = match (listen, std::env::var("PORT")) {
                 (Some(l), _) => l,
                 (None, Ok(p)) if !p.is_empty() => {
@@ -376,6 +429,7 @@ async fn run(cli: Cli) -> Result<std::convert::Infallible> {
                         threads: compile_threads.max(1),
                         ..compile::CompileLimits::isolated()
                     },
+                    remote,
                 },
                 sandbox::engine()?,
                 stop,

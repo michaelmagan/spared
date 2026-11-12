@@ -156,6 +156,30 @@ impl Dir {
         }
     }
 
+    /// Make the directory `name` (mode 0700) inside this one. Fails if anything has that name.
+    pub fn create_dir(&self, name: &OsStr) -> Result<()> {
+        cvt(unsafe { libc::mkdirat(self.fd(), cstr(name)?.as_ptr(), 0o700) }).map(|_| ())
+    }
+
+    /// Create the new regular file `name` (mode 0600) inside this one, for writing. Fails if
+    /// anything has that name, a link included.
+    pub fn create_file(&self, name: &OsStr) -> Result<File> {
+        let fd = cvt(unsafe {
+            libc::openat(
+                self.fd(),
+                cstr(name)?.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600 as libc::c_uint,
+            )
+        })?;
+        Ok(unsafe { File::from_raw_fd(fd) })
+    }
+
+    /// Flush this directory's entries to disk.
+    pub fn sync(&self) -> Result<()> {
+        cvt(unsafe { libc::fsync(self.fd()) }).map(|_| ())
+    }
+
     pub fn unlink(&self, name: &OsStr) -> Result<()> {
         cvt(unsafe { libc::unlinkat(self.fd(), cstr(name)?.as_ptr(), 0) }).map(|_| ())
     }
