@@ -1529,7 +1529,12 @@ def descriptors(tmp):
         time.sleep(0.2)
     check(ok_after, "once descriptors are free again, the public and admin listeners answer")
     st, _, d2, _ = s.app("notes", "/api/notes")
-    check(st == 200, "and an app serves")
+    if st != 200:
+        for log in (os.path.join(s.data, "apps/notes/app.log"), os.path.join(d, "serve.log")):
+            if os.path.exists(log):
+                print(f"--- tail of {log}", flush=True)
+                print("".join(open(log, errors="replace").readlines()[-40:]), flush=True)
+    check(st == 200, "and an app serves", (st, d2[:200]))
     s.stop()
 
     # the soft limit is raised to the hard limit
