@@ -98,6 +98,11 @@ pub struct App {
     retired: AtomicBool,
     /// Requests that are running or waiting for the instance.
     in_flight: AtomicUsize,
+    /// Set (under the `live` lock) while the app is frozen: public requests get 503 `app_frozen`.
+    /// The `frozen` marker in the app directory carries it across restarts and redeploys.
+    frozen: AtomicBool,
+    /// What the marker says: when, by what, and why.
+    freeze: Mutex<Option<serde_json::Value>>,
     hot: AtomicBool,
     last_ms: AtomicU64,
     requests: AtomicU64,
@@ -229,6 +234,23 @@ async fn collect_body(
 }
 
 type Resp = Response<Full<Bytes>>;
+
+impl App {
+    fn is_frozen(&self) -> bool {
+        self.frozen.load(Ordering::Acquire)
+    }
+
+    fn freeze_info(&self) -> Option<serde_json::Value> {
+        self.freeze.lock().unwrap().clone()
+    }
+
+    /// Record a freeze or a thaw in memory. The caller holds the `live` lock and has written or
+    /// removed the marker.
+    fn set_freeze(&self, info: Option<serde_json::Value>) {
+        self.frozen.store(info.is_some(), Ordering::Release);
+        *self.freeze.lock().unwrap() = info;
+    }
+}
 
 /// A place among the requests one app has running or waiting; given back when dropped.
 struct InFlight(Arc<App>);
@@ -698,6 +720,32 @@ fn check_remote_id(rid: &str) -> std::result::Result<(), DeployError> {
     ))
 }
 
+/// The value of `key` in a query string, as sent (no decoding: every value spared reads from a
+/// query is plain ASCII).
+fn query_param<'a>(query: Option<&'a str>, key: &str) -> Option<&'a str> {
+    query?
+        .split('&')
+        .find_map(|p| p.strip_prefix(key)?.strip_prefix('='))
+}
+
+fn deploy_refused_frozen(name: &str) -> DeployError {
+    DeployError::new(
+        StatusCode::CONFLICT,
+        "app_frozen",
+        format!(
+            "app '{name}' is frozen on this server, so the deploy was refused. Nothing changed"
+        ),
+        format!(
+            "`spared ps` shows why it is frozen. If this server should serve it again, run `spared thaw {name}`, then deploy. If it was moved to another server, deploy there instead"
+        ),
+    )
+}
+
+/// The current UTC time as `2026-11-12T04:05:06Z`.
+fn now_text() -> String {
+    backup::created_at(&backup::timestamp_id(unix_now()))
+}
+
 /// A remote operation that failed at the store (502) or here (500).
 fn remote_error(e: crate::remote::s3::S3Error) -> Resp {
     let status = if e.kind.starts_with("remote_") {
@@ -841,6 +889,64 @@ fn sync_dir(p: &Path) {
     if let Ok(f) = std::fs::File::open(p) {
         let _ = f.sync_all();
     }
+}
+
+/// The marker in an app directory that keeps the app frozen across restarts and redeploys.
+const FROZEN_MARKER: &str = "frozen";
+/// What can freeze an app, as the marker records it: `spared freeze`, `spared move`, or an upload
+/// that found a newer epoch in the bucket.
+const FREEZE_KINDS: [&str; 3] = ["manual", "move", "remote_superseded"];
+/// What a client of a frozen app is told to wait before it tries again, in seconds.
+const FROZEN_RETRY_AFTER: &str = "30";
+
+/// The freeze recorded in `<app dir>/frozen`, when the app is frozen. A marker that cannot be read
+/// still freezes the app: the safe reading of a damaged marker is "do not serve".
+fn read_freeze_marker(dir: &Path) -> Option<serde_json::Value> {
+    let unreadable = || serde_json::json!({"kind": "unknown", "reason": "the frozen marker could not be read; `spared thaw <name>` replaces it"});
+    match std::fs::read(dir.join(FROZEN_MARKER)) {
+        Ok(b) => Some(
+            serde_json::from_slice::<serde_json::Value>(&b)
+                .ok()
+                .filter(|v| v.is_object())
+                .unwrap_or_else(unreadable),
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => Some(unreadable()),
+    }
+}
+
+/// Write the marker through a temporary file and a rename, synced, so a crash leaves the old
+/// marker or the new one.
+fn write_freeze_marker(dir: &Path, v: &serde_json::Value) -> std::io::Result<()> {
+    let tmp = dir.join(format!("{FROZEN_MARKER}.tmp"));
+    write_private(&tmp, format!("{v}\n").as_bytes())?;
+    std::fs::rename(&tmp, dir.join(FROZEN_MARKER))?;
+    sync_dir(dir);
+    Ok(())
+}
+
+fn remove_freeze_marker(dir: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(dir.join(FROZEN_MARKER)) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    sync_dir(dir);
+    Ok(())
+}
+
+/// 503 for a public request to a frozen app. It names no reason and no other server: the client
+/// may be anyone.
+fn app_frozen(name: &str) -> Resp {
+    let mut r = err_resp(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "app_frozen",
+        format!("app '{name}' is frozen on this server and takes no requests here"),
+        "retry later; it may be moving to another server. The operator sees why with `spared ps` and serves it here again with `spared thaw <name>`",
+    );
+    r.headers_mut()
+        .insert("retry-after", FROZEN_RETRY_AFTER.parse().unwrap());
+    r
 }
 
 fn write_failed(e: std::io::Error) -> DeployError {
@@ -1373,6 +1479,7 @@ impl Server {
                 bad.join(", ")
             )));
         }
+        let freeze = read_freeze_marker(&dir);
         Ok(App {
             name: name.to_string(),
             dir,
@@ -1382,6 +1489,8 @@ impl Server {
             live: Arc::new(tokio::sync::Mutex::new(None)),
             retired: AtomicBool::new(false),
             in_flight: AtomicUsize::new(0),
+            frozen: AtomicBool::new(freeze.is_some()),
+            freeze: Mutex::new(freeze),
             hot: AtomicBool::new(false),
             last_ms: AtomicU64::new(0),
             requests: AtomicU64::new(0),
@@ -1484,6 +1593,9 @@ impl Server {
         req: Request<Incoming>,
         path_form: bool,
     ) -> Resp {
+        if app.is_frozen() {
+            return app_frozen(&app.name);
+        }
         let (parts, body) = req.into_parts();
         let max = (self.cfg.max.request_mb as u64) << 20;
         let declared = parts
@@ -1560,6 +1672,9 @@ impl Server {
                 _ = tx.closed() => return,
             };
             let resp = match locked {
+                // A freeze sets the flag while it holds the instance lock, so a request that was
+                // waiting for the lock sees it here and never runs after the freeze.
+                Ok((app, _)) if app.is_frozen() => app_frozen(&app.name),
                 Ok((app, guard)) => {
                     s.run_request(
                         app,
@@ -1865,11 +1980,20 @@ impl Server {
 
     fn app_json(&self, a: &App) -> serde_json::Value {
         let last = a.last_ms.load(Ordering::Relaxed);
+        let freeze = a.freeze_info();
+        let state = if freeze.is_some() {
+            "frozen"
+        } else if a.hot.load(Ordering::Relaxed) {
+            "hot"
+        } else {
+            "idle"
+        };
         let mut v = serde_json::json!({
             "name": a.name,
             "version": a.version,
             "component_sha256": a.shared.hash,
-            "state": if a.hot.load(Ordering::Relaxed) { "hot" } else { "idle" },
+            "state": state,
+            "frozen": freeze.is_some(),
             "requests": a.requests.load(Ordering::Relaxed),
             "wakes": a.wakes.load(Ordering::Relaxed),
             "errors": a.errors.load(Ordering::Relaxed),
@@ -1881,6 +2005,22 @@ impl Server {
         });
         if self.cfg.path_routing {
             v["path_url"] = format!("/_/{}/", a.name).into();
+        }
+        if let Some(f) = freeze {
+            v["freeze"] = f;
+        }
+        match crate::remote::local_epoch(&self.cfg.data_dir, &a.name) {
+            Ok(e) => v["epoch"] = e.into(),
+            Err(m) => v["epoch_error"] = m.into(),
+        }
+        if let Some(r) = crate::remote::epoch_record(&self.cfg.data_dir, &a.name)
+            && r["restored_from"].is_string()
+        {
+            v["restored_from_remote"] = serde_json::json!({
+                "remote_id": r["restored_from"],
+                "content_digest": r["content_digest"],
+                "at": r["at"],
+            });
         }
         v
     }
@@ -1905,6 +2045,31 @@ impl Server {
                 );
             }
         };
+        // `?frozen=move`: the app ends this deploy frozen, also when it is new, so it never serves
+        // here before `spared move` has restored its data. A plain deploy over a frozen app is
+        // refused.
+        let frozen_for_move = match query_param(req.uri().query(), "frozen") {
+            None => false,
+            Some("move") => true,
+            Some(_) => {
+                return err_resp(
+                    StatusCode::BAD_REQUEST,
+                    "bad_request",
+                    "the frozen query parameter takes only the value move".into(),
+                    "leave it out, or pass ?frozen=move (spared move does)",
+                );
+            }
+        };
+        if !frozen_for_move
+            && self
+                .apps
+                .read()
+                .unwrap()
+                .get(name)
+                .is_some_and(|a| a.is_frozen())
+        {
+            return deploy_refused_frozen(name).into_resp();
+        }
         let cap = self.cfg.compile.max_component_bytes;
         let collect = Limited::new(req.into_body(), cap).collect();
         let wasm = match tokio::time::timeout(DEPLOY_BODY_TIMEOUT, collect).await {
@@ -1928,7 +2093,10 @@ impl Server {
         };
         let (server, name) = (self.clone(), name.to_string());
         detached(async move {
-            match server.install(&name, &manifest_text, &wasm).await {
+            match server
+                .install(&name, &manifest_text, &wasm, frozen_for_move)
+                .await
+            {
                 Ok(info) => json_resp(StatusCode::OK, info),
                 Err(e) => e.into_resp(),
             }
@@ -1941,6 +2109,7 @@ impl Server {
         name: &str,
         manifest_text: &str,
         wasm: &[u8],
+        frozen_for_move: bool,
     ) -> std::result::Result<serde_json::Value, DeployError> {
         check_name(name)?;
         let mut manifest = match Manifest::parse(manifest_text) {
@@ -2047,6 +2216,9 @@ impl Server {
         let created = !dir.exists();
         let data_kept = dir.join("data").is_dir();
         let prev = self.apps.read().unwrap().get(name).cloned();
+        if !frozen_for_move && prev.as_ref().is_some_and(|a| a.is_frozen()) {
+            return Err(deploy_refused_frozen(name));
+        }
         let version = prev.as_ref().map(|a| a.version + 1).unwrap_or(1);
         // Stage the new release next to the old one, under temporary names. Until the commit
         // below, nothing the running or restarting server reads has changed.
@@ -2058,10 +2230,25 @@ impl Server {
                 return Err(e);
             }
         };
+        // Before the commit and before the new app is in the table, so it never serves unfrozen.
+        let marked = frozen_for_move && read_freeze_marker(&dir).is_none();
+        if marked {
+            let info = serde_json::json!({"kind": "move", "reason": "deployed frozen by spared move", "at": now_text()});
+            if let Err(e) = write_freeze_marker(&dir, &info) {
+                self.abandon_release(&dir, &hash, created);
+                return Err(write_failed(e));
+            }
+        }
         manifest.limits.clamp(&self.cfg.max);
+        let unmark = || {
+            if marked {
+                let _ = remove_freeze_marker(&dir);
+            }
+        };
         let app = match self.make_app(name, dir.clone(), manifest, shared, version) {
             Ok(a) => Arc::new(a),
             Err(e) => {
+                unmark();
                 self.abandon_release(&dir, &hash, created);
                 return Err(DeployError::new(
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -2089,6 +2276,7 @@ impl Server {
             if let Some(old) = &prev {
                 old.retired.store(false, Ordering::Release);
             }
+            unmark();
             self.abandon_release(&dir, &hash, created);
             return Err(write_failed(e));
         }
@@ -2287,7 +2475,206 @@ impl Server {
         }
     }
 
-    async fn backup(&self, name: &str) -> Resp {
+    /// Freeze `name`: under its name lock and its instance lock, drop the instance, write the
+    /// marker and set the flag, so no request runs after this returns and none runs after a
+    /// restart. An app that is already frozen keeps its freeze when `kind` is `move` (a move never
+    /// takes over a freeze something else made, so it never thaws one) or when that freeze came
+    /// from a newer epoch in the bucket; otherwise the new freeze replaces it.
+    async fn freeze_app(
+        &self,
+        name: &str,
+        kind: &str,
+        reason: &str,
+    ) -> std::result::Result<serde_json::Value, Resp> {
+        check_name(name).map_err(DeployError::into_resp)?;
+        let lock = self.name_lock(name);
+        let _serial = lock.lock().await;
+        let (app, _instance) = self.lock_idle(name).await?;
+        if let Some(info) = app.freeze_info() {
+            if kind == "move" || info["kind"] == kind || info["kind"] == "remote_superseded" {
+                return Ok(serde_json::json!({
+                    "name": name, "frozen": true, "already_frozen": true, "freeze": info,
+                }));
+            }
+        }
+        let info = serde_json::json!({"kind": kind, "reason": reason, "at": now_text()});
+        write_freeze_marker(&app.dir, &info).map_err(|e| {
+            io_fail("freeze_failed", "cannot write the frozen marker", e).into_resp()
+        })?;
+        app.set_freeze(Some(info.clone()));
+        eprintln!("app {name}: frozen ({kind}): {reason}");
+        Ok(serde_json::json!({
+            "name": name, "frozen": true, "already_frozen": false, "freeze": info,
+        }))
+    }
+
+    /// Thaw `name`: remove the marker and clear the flag. With `only_kind`, only a freeze of
+    /// that kind is lifted (the move's own clean-up), and any other is reported and kept.
+    async fn thaw_app(
+        &self,
+        name: &str,
+        only_kind: Option<&str>,
+    ) -> std::result::Result<serde_json::Value, Resp> {
+        check_name(name).map_err(DeployError::into_resp)?;
+        let lock = self.name_lock(name);
+        let _serial = lock.lock().await;
+        let (app, _instance) = self.lock_idle(name).await?;
+        let Some(info) = app.freeze_info() else {
+            return Ok(serde_json::json!({"name": name, "frozen": false, "was_frozen": false}));
+        };
+        if only_kind.is_some_and(|k| info["kind"] != k) {
+            return Ok(serde_json::json!({
+                "name": name, "frozen": true, "thawed": false, "freeze": info,
+            }));
+        }
+        remove_freeze_marker(&app.dir).map_err(|e| {
+            io_fail("thaw_failed", "cannot remove the frozen marker", e).into_resp()
+        })?;
+        app.set_freeze(None);
+        eprintln!("app {name}: thawed");
+        let mut v = serde_json::json!({
+            "name": name, "frozen": false, "was_frozen": true, "thawed": true, "was": info,
+        });
+        if info["kind"] == "remote_superseded" {
+            v["note"] = "this app was frozen because the bucket holds a newer epoch of it: another server restored it. It serves here again, and its next upload is refused and freezes it again".into();
+        }
+        Ok(v)
+    }
+
+    async fn freeze_route(&self, name: &str, req: Request<Incoming>) -> Resp {
+        let usage = r#"send nothing, or {"reason":"<text>"}"#;
+        let body = match self.small_json_body(req, usage).await {
+            Ok(b) => b,
+            Err(r) => return r,
+        };
+        let reason = body["reason"].as_str().unwrap_or("frozen by spared freeze");
+        let kind = body["kind"].as_str().unwrap_or("manual");
+        if reason.chars().count() > 200 || reason.chars().any(char::is_control) {
+            return err_resp(
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+                "the reason must be at most 200 characters, with no control characters".into(),
+                usage,
+            );
+        }
+        if !FREEZE_KINDS.contains(&kind) || kind == "remote_superseded" {
+            return err_resp(
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+                format!(
+                    "'{}' is not a kind of freeze",
+                    kind.chars().take(40).collect::<String>()
+                ),
+                "leave kind out (manual), or pass \"move\" (spared move does)",
+            );
+        }
+        match self.freeze_app(name, kind, reason).await {
+            Ok(v) => json_resp(StatusCode::OK, v),
+            Err(r) => r,
+        }
+    }
+
+    async fn thaw_route(&self, name: &str, req: Request<Incoming>) -> Resp {
+        let usage = r#"send nothing, or {"if_kind":"move"}"#;
+        let body = match self.small_json_body(req, usage).await {
+            Ok(b) => b,
+            Err(r) => return r,
+        };
+        match self.thaw_app(name, body["if_kind"].as_str()).await {
+            Ok(v) => json_resp(StatusCode::OK, v),
+            Err(r) => r,
+        }
+    }
+
+    /// An optional JSON object body of at most 4 KiB: `Null` when the body is empty.
+    async fn small_json_body(
+        &self,
+        req: Request<Incoming>,
+        usage: &str,
+    ) -> std::result::Result<serde_json::Value, Resp> {
+        let collect = Limited::new(req.into_body(), 4096).collect();
+        let bad = |m: &str| err_resp(StatusCode::BAD_REQUEST, "bad_request", m.into(), usage);
+        let body = match tokio::time::timeout(self.cfg.client_timeout, collect).await {
+            Ok(Ok(b)) => b.to_bytes(),
+            _ => return Err(bad("could not read the request body")),
+        };
+        if body.iter().all(u8::is_ascii_whitespace) {
+            return Ok(serde_json::Value::Null);
+        }
+        serde_json::from_slice::<serde_json::Value>(&body)
+            .ok()
+            .filter(serde_json::Value::is_object)
+            .ok_or_else(|| bad("the body must be a JSON object"))
+    }
+
+    /// The app's deployed code: the original wasm as the body and its `spared.toml` in the
+    /// `x-spared-manifest` header (base64), the shape a deploy takes, so `spared move` can deploy
+    /// it on another server, which compiles it itself. Never data, logs or the compiled file; a
+    /// manifest holds no secrets (a `[secrets]` table is refused at deploy).
+    async fn export_code(&self, name: &str) -> Resp {
+        let app = match check_name(name).map(|_| self.apps.read().unwrap().get(name).cloned()) {
+            Ok(Some(a)) => a,
+            Ok(None) => return no_such_app(name),
+            Err(e) => return e.into_resp(),
+        };
+        // Under the name lock, so a deploy cannot swap the files between the two reads.
+        let lock = self.name_lock(name);
+        let _serial = lock.lock().await;
+        let dir = app.dir.clone();
+        let read = tokio::task::spawn_blocking(move || -> std::io::Result<(Vec<u8>, String)> {
+            Ok((
+                std::fs::read(dir.join("component.wasm"))?,
+                std::fs::read_to_string(dir.join("manifest.toml"))?,
+            ))
+        })
+        .await;
+        let (wasm, manifest) = match read {
+            Ok(Ok(x)) => x,
+            Ok(Err(e)) => {
+                return err_resp(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "code_unavailable",
+                    format!("the deployed code of '{name}' cannot be read here: {e}"),
+                    "deploy the app on the other server from its source with `spared deploy`",
+                );
+            }
+            Err(e) => return backup_task_failed(e),
+        };
+        let hash = sha256_hex(&wasm);
+        if hash != app.shared.hash {
+            return err_resp(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "code_unavailable",
+                format!("the stored wasm of '{name}' does not match its recorded SHA-256"),
+                "redeploy the app here with `spared deploy`, or deploy it on the other server from its source",
+            );
+        }
+        Response::builder()
+            .header("content-type", "application/wasm")
+            .header(
+                "x-spared-manifest",
+                base64::engine::general_purpose::STANDARD.encode(manifest.as_bytes()),
+            )
+            .header("x-spared-component-sha256", hash)
+            .body(Full::new(Bytes::from(wasm)))
+            .unwrap()
+    }
+
+    /// `GET /v1/server`: this server's version, node id and the identity of its bucket (no
+    /// credential, no key), so `spared move` can check that two servers share a bucket and a key.
+    fn server_info(&self) -> Resp {
+        json_resp(
+            StatusCode::OK,
+            serde_json::json!({
+                "version": crate::VERSION,
+                "node": self.remote.as_ref().map(|r| r.node()),
+                "remote": self.remote.as_ref().map(|r| r.identity()),
+                "public_port": self.cfg.listen.port(),
+            }),
+        )
+    }
+
+    async fn backup(self: &Arc<Self>, name: &str) -> Resp {
         if let Err(e) = check_name(name) {
             return e.into_resp();
         }
@@ -2316,7 +2703,21 @@ impl Server {
         match taken {
             Ok(Ok(mut v)) => {
                 if let (Some(r), Some(id)) = (&self.remote, v["backup_id"].as_str()) {
-                    v["remote"] = r.start_upload(name, id, self.cfg.caps.max_data_bytes);
+                    // Run only when the bucket holds a newer epoch of the app: this copy is
+                    // stale, so it takes no more writes.
+                    let freeze = {
+                        let (s, n) = (self.clone(), name.to_string());
+                        Box::pin(async move {
+                            let why = "the bucket holds a newer epoch of this app: it was restored on another server";
+                            if let Err(r) = s.freeze_app(&n, "remote_superseded", why).await {
+                                eprintln!(
+                                    "app {n}: could not freeze it after a refused upload ({})",
+                                    r.status()
+                                );
+                            }
+                        })
+                    };
+                    v["remote"] = r.start_upload(name, id, self.cfg.caps.max_data_bytes, freeze);
                 }
                 json_resp(StatusCode::OK, v)
             }
@@ -2553,6 +2954,7 @@ impl Server {
             Ok(x) => x,
             Err(r) => return r,
         };
+        let (app_name, backup_id) = (name.to_string(), id.to_string());
         let (name, id, dir, keep, max_bytes, pinned) = (
             name.to_string(),
             id.to_string(),
@@ -2566,9 +2968,45 @@ impl Server {
         })
         .await
         {
-            Ok(Ok(v)) => json_resp(StatusCode::OK, v),
+            Ok(Ok(mut v)) => {
+                self.raise_epoch_after_restore(&app_name, &backup_id, &mut v);
+                json_resp(StatusCode::OK, v)
+            }
             Ok(Err(e)) => e.into_resp(),
             Err(e) => backup_task_failed(e),
+        }
+    }
+
+    /// After a restore of a backup fetched from the bucket: this server now holds the app's
+    /// newest lineage, so its epoch for the app goes to the one the fetch found free. The data is
+    /// in place first, so a crash between the two leaves the old epoch, never a raised epoch over
+    /// old data.
+    fn raise_epoch_after_restore(&self, name: &str, id: &str, v: &mut serde_json::Value) {
+        let dd = &self.cfg.data_dir;
+        let fetched = crate::remote::Remote::upload_status(dd, name, id)
+            .filter(|st| st["status"] == "fetched");
+        if let Some(st) = fetched
+            && let (Some(next), Some(rid)) = (st["next_epoch"].as_u64(), st["remote_id"].as_str())
+        {
+            let digest = st["content_digest"].as_str().unwrap_or("");
+            let next = u32::try_from(next).unwrap_or(crate::remote::MAX_EPOCH);
+            match crate::remote::raise_epoch(dd, name, next, rid, digest) {
+                Ok(e) => {
+                    eprintln!("app {name}: restored from remote backup {rid}; epoch is now {e}");
+                    v["restored_from_remote"] = rid.into();
+                    v["content_digest"] = digest.into();
+                }
+                Err(e) => {
+                    eprintln!("app {name}: restored, but the epoch could not be recorded: {e}");
+                    v["epoch_error"] = format!(
+                        "the data was restored, but the new epoch could not be written ({e}). Free disk space under the data dir and restore again"
+                    )
+                    .into();
+                }
+            }
+        }
+        if let Ok(e) = crate::remote::local_epoch(dd, name) {
+            v["epoch"] = e.into();
         }
     }
 
@@ -2620,7 +3058,7 @@ impl Server {
                     continue;
                 }
             };
-            match self.install(&name, &manifest, &wasm).await {
+            match self.install(&name, &manifest, &wasm, false).await {
                 Ok(_) => {
                     eprintln!("examples: deployed {name}");
                     deployed += 1;
@@ -2768,6 +3206,16 @@ impl Server {
                 self.upload_status(name, id).await
             }
             (Method::GET, ["v1", "apps", name, "remote-backups"]) => self.list_remote(name).await,
+            (Method::POST, ["v1", "apps", name, "freeze"]) => {
+                let name = name.to_string();
+                detached(async move { self.freeze_route(&name, req).await }).await
+            }
+            (Method::POST, ["v1", "apps", name, "thaw"]) => {
+                let name = name.to_string();
+                detached(async move { self.thaw_route(&name, req).await }).await
+            }
+            (Method::GET, ["v1", "apps", name, "code"]) => self.export_code(name).await,
+            (Method::GET, ["v1", "server"]) => self.server_info(),
             (Method::POST, ["v1", "apps", name, "fetch"]) => self.fetch(name, req).await,
             (Method::GET, ["v1", "apps", name, "fetch", rid]) => self.fetch_status(name, rid).await,
             (Method::GET, ["v1", "apps", name, "logs"]) => {

@@ -5,8 +5,15 @@
 //!
 //! Objects, under `<prefix>/spared/v1/<app>/e<epoch:08>/<local id>.<node>/`: `archive`, then
 //! `manifest.json`, written last, so a backup without its manifest is never listed. The remote id
-//! is `<local id>.<node>.<epoch>`. The epoch is always 1 in this slice. spared never deletes a
-//! remote object: retention is the bucket's lifecycle rule (docs/operating.md).
+//! is `<local id>.<node>.<epoch>`. spared never deletes a remote object: retention is the
+//! bucket's lifecycle rule (docs/operating.md).
+//!
+//! Epochs are advisory. An app starts at epoch 1 on every server. A restore from the bucket
+//! raises this server's epoch for the app (`<data-dir>/backups/<app>/.epoch`) to one above the
+//! highest epoch in the bucket, and before each upload a server looks for an epoch above its own:
+//! if there is one, the app was restored somewhere else, the upload is refused with
+//! `remote_superseded` and the server freezes the app. That detects a second writer after the
+//! fact; it does not prevent one (a fencing record written with conditional PUTs would).
 //!
 //! The jobs run on the blocking pool and block on the runtime's handle for each network call, so
 //! archive and file work never runs on the runtime's workers (an upload's body is read from its
@@ -29,9 +36,14 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-/// Every remote id carries an epoch so that a later slice can raise it after a move; this slice
-/// writes 1.
-pub const EPOCH: u32 = 1;
+/// The largest epoch: eight digits, as in the object keys and remote ids.
+pub const MAX_EPOCH: u32 = 99_999_999;
+/// The file under `<data-dir>/backups/<app>/` that holds this server's epoch for the app. A dot
+/// name is never a backup id, so listing and retention pass it by, and `spared rm` keeps it with
+/// the backups.
+pub const EPOCH_FILE: &str = ".epoch";
+/// How many epochs a search for the highest one steps through before it gives up.
+const MAX_EPOCH_STEPS: usize = 1000;
 /// The largest archive one upload sends (one PUT).
 pub const MAX_OBJECT: u64 = 4 << 30;
 const MANIFEST_FORMAT: &str = "spared-remote-backup-v1";
@@ -330,6 +342,75 @@ fn read_json(path: &Path) -> Option<Value> {
     serde_json::from_slice(&std::fs::read(path).ok()?).ok()
 }
 
+fn epoch_path(data_dir: &Path, app: &str) -> PathBuf {
+    data_dir.join("backups").join(app).join(EPOCH_FILE)
+}
+
+/// This server's epoch for `app`: 1 when no restore from the bucket ever raised it. An epoch file
+/// that cannot be read is an error, not a 1, so a damaged file never lets an upload go out under
+/// an epoch the server does not hold.
+pub fn local_epoch(data_dir: &Path, app: &str) -> Result<u32, String> {
+    let p = epoch_path(data_dir, app);
+    let bytes = match std::fs::read(&p) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(1),
+        Err(e) => return Err(format!("cannot read {}: {e}", p.display())),
+    };
+    serde_json::from_slice::<Value>(&bytes)
+        .ok()
+        .and_then(|v| v["epoch"].as_u64())
+        .and_then(|e| u32::try_from(e).ok())
+        .filter(|e| (1..=MAX_EPOCH).contains(e))
+        .ok_or_else(|| {
+            format!(
+                "{} is not an epoch file. Restore it from a copy of the data dir, or restore the app from the bucket again (`spared restore <name> --from remote:<id> --yes`), which writes a new one",
+                p.display()
+            )
+        })
+}
+
+/// The epoch file's record (epoch, and the remote backup a restore raised it with), if any.
+pub fn epoch_record(data_dir: &Path, app: &str) -> Option<Value> {
+    read_json(&epoch_path(data_dir, app))
+}
+
+/// After a restore from the bucket: raise this server's epoch for `app` to `epoch` (never lower
+/// it), and record which remote backup the data came from. Returns the epoch now held.
+pub fn raise_epoch(
+    data_dir: &Path,
+    app: &str,
+    epoch: u32,
+    remote_id: &str,
+    content_digest: &str,
+) -> std::io::Result<u32> {
+    let now = local_epoch(data_dir, app).unwrap_or(1).max(epoch);
+    write_json(
+        &epoch_path(data_dir, app),
+        &json!({
+            "epoch": now,
+            "restored_from": remote_id,
+            "content_digest": content_digest,
+            "at": now_text(),
+        }),
+    )?;
+    Ok(now)
+}
+
+/// The epoch of a key `<base>e<epoch:08>/<ts>.<node>/<leaf>`, and its node, when the key has
+/// that shape.
+fn key_epoch(base: &str, key: &str) -> Option<(u32, String)> {
+    let rest = key.strip_prefix(base)?;
+    let mut parts = rest.split('/');
+    let (e, dir) = (parts.next()?, parts.next()?);
+    let epoch = e
+        .strip_prefix('e')
+        .filter(|d| d.len() == 8 && d.bytes().all(|b| b.is_ascii_digit()))?
+        .parse::<u32>()
+        .ok()?;
+    let rid = format!("{dir}.{epoch}");
+    parse_remote_id(&rid).map(|(_, node, _)| (epoch, node.to_string()))
+}
+
 /// Removes a file or a tree when dropped.
 struct Cleanup(PathBuf);
 
@@ -403,8 +484,63 @@ impl Remote {
         )
     }
 
-    pub fn remote_id(&self, local_id: &str) -> String {
-        format!("{local_id}.{}.{EPOCH}", self.node)
+    pub fn remote_id(&self, local_id: &str, epoch: u32) -> String {
+        format!("{local_id}.{}.{epoch}", self.node)
+    }
+
+    /// This server's node id.
+    pub fn node(&self) -> &str {
+        &self.node
+    }
+
+    /// What identifies the bucket and the key, for `GET /v1/server`: nothing secret. Two servers
+    /// with the same bucket, prefix and key id read each other's backups.
+    pub fn identity(&self) -> Value {
+        json!({
+            "target": self.target(),
+            "bucket": self.s3.bucket,
+            "prefix": self.prefix,
+            "endpoint": self.s3.endpoint.url(),
+            "region": self.s3.region,
+            "encrypted": self.key.is_some(),
+            "key_id": self.key.as_ref().map(|k| k.key_id()),
+        })
+    }
+
+    /// The lowest epoch above `epoch` that has an object of `app` in the bucket, and the node
+    /// that wrote it. One listing that starts after every key of epoch `epoch` (`~` sorts after
+    /// every character a key holds).
+    pub async fn newer_epoch(
+        &self,
+        app: &str,
+        epoch: u32,
+    ) -> Result<Option<(u32, String)>, S3Error> {
+        let base = self.app_base(app);
+        let after = format!("{base}e{epoch:08}/~");
+        let (objects, _) = self
+            .s3
+            .list_after(&format!("{base}e"), Some(&after), MAX_EPOCH_STEPS)
+            .await?;
+        Ok(objects
+            .iter()
+            .filter_map(|o| key_epoch(&base, &o.key))
+            .find(|(e, _)| *e > epoch))
+    }
+
+    /// The highest epoch of `app` in the bucket, at least `from`: a step from epoch to epoch.
+    async fn highest_epoch(&self, app: &str, from: u32) -> Result<u32, S3Error> {
+        let mut e = from;
+        for _ in 0..MAX_EPOCH_STEPS {
+            match self.newer_epoch(app, e).await? {
+                Some((n, _)) => e = n,
+                None => return Ok(e),
+            }
+        }
+        Err(s3_err(
+            "remote_rejected",
+            format!("the bucket holds more than {MAX_EPOCH_STEPS} epochs of '{app}'"),
+            "list them with `spared backups <name> --remote`; that many restores of one app is not something spared makes",
+        ))
     }
 
     fn app_base(&self, app: &str) -> String {
@@ -464,16 +600,38 @@ impl Remote {
     }
 
     /// Upload the local backup `local_id` of `app` in the background, once the app's earlier
-    /// uploads are done. Returns the state the caller reports now.
-    pub fn start_upload(self: &Arc<Self>, app: &str, local_id: &str, max_bytes: u64) -> Value {
-        let rid = self.remote_id(local_id);
+    /// uploads are done, under this server's epoch for the app. Returns the state the caller
+    /// reports now. `on_superseded` runs (and is waited for) when the bucket holds a newer epoch,
+    /// before the failure is recorded: the server freezes the app there.
+    pub fn start_upload(
+        self: &Arc<Self>,
+        app: &str,
+        local_id: &str,
+        max_bytes: u64,
+        on_superseded: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+    ) -> Value {
         let path = self
             .root(app)
             .join(REMOTE_DIR)
             .join(format!("{local_id}.json"));
+        let epoch = match local_epoch(&self.data_dir, app) {
+            Ok(e) => e,
+            Err(m) => {
+                let state = json!({
+                    "local_id": local_id,
+                    "target": self.target(),
+                    "status": "failed",
+                    "error": {"kind": "remote_archive_failed", "message": m, "fix": "the local backup stands. Fix the epoch file as the message says, then take a new backup"},
+                });
+                let _ = write_json(&path, &state);
+                return state;
+            }
+        };
+        let rid = self.remote_id(local_id, epoch);
         let state = json!({
             "local_id": local_id,
             "remote_id": rid,
+            "epoch": epoch,
             "target": self.target(),
             "status": "uploading",
             "started_at": now_text(),
@@ -497,7 +655,9 @@ impl Remote {
             let _one_at_a_time = lock.lock_owned().await;
             let job = {
                 let (me, app, local_id) = (me.clone(), app.clone(), local_id.clone());
-                tokio::task::spawn_blocking(move || me.upload(&rt, &app, &local_id, max_bytes))
+                tokio::task::spawn_blocking(move || {
+                    me.upload(&rt, &app, &local_id, epoch, max_bytes)
+                })
             };
             let result = job.await.unwrap_or_else(|e| {
                 Err(s3_err(
@@ -510,6 +670,9 @@ impl Remote {
                 .lock()
                 .unwrap()
                 .remove(&(app.clone(), local_id.clone()));
+            if matches!(&result, Err(e) if e.kind == "remote_superseded") {
+                on_superseded.await;
+            }
             let mut done = started;
             done["finished_at"] = now_text().into();
             match result {
@@ -544,9 +707,10 @@ impl Remote {
         rt: &tokio::runtime::Handle,
         app: &str,
         local_id: &str,
+        epoch: u32,
         max_bytes: u64,
     ) -> Result<Value, S3Error> {
-        let rid = self.remote_id(local_id);
+        let rid = self.remote_id(local_id, epoch);
         let root = self.root(app);
         let src = root.join(local_id);
         if !src.is_dir() {
@@ -554,6 +718,16 @@ impl Remote {
                 "no_such_backup",
                 format!("the local backup {local_id} is gone"),
                 "take a new backup with `spared backup <name>`",
+            ));
+        }
+        // Advisory: another server may restore between this listing and the upload below.
+        if let Some((newer, node)) = rt.block_on(self.newer_epoch(app, epoch))? {
+            return Err(s3_err(
+                "remote_superseded",
+                format!(
+                    "the bucket holds backups of '{app}' at epoch {newer} from node {node}, and this server holds epoch {epoch}: the app was restored on another server, so the copy here is stale. Nothing was uploaded, and this server froze the app"
+                ),
+                "if the app now lives on the other server, remove it here with `spared rm <name> --yes` once nothing points at this server. If this copy holds writes the other one lacks, copy them over by hand: there is no merge. `spared thaw <name>` serves it here again, and the next upload is refused again (docs/operating.md#move-an-app-to-another-server)",
             ));
         }
         let tmp = root
@@ -596,8 +770,8 @@ impl Remote {
             }
         })?;
         let sha = archive::hex(&built.sha256);
-        let akey = self.object(app, local_id, &self.node, EPOCH, "archive");
-        let mkey = self.object(app, local_id, &self.node, EPOCH, "manifest.json");
+        let akey = self.object(app, local_id, &self.node, epoch, "archive");
+        let mkey = self.object(app, local_id, &self.node, epoch, "manifest.json");
         rt.block_on(self.s3.put(
             &akey,
             Payload::File {
@@ -613,7 +787,7 @@ impl Remote {
             "app": app,
             "remote_id": rid,
             "node": self.node,
-            "epoch": EPOCH,
+            "epoch": epoch,
             "created_at": now_text(),
             "local_id": local_id,
             "archive": {"bytes": built.bytes, "sha256": sha},
@@ -1010,6 +1184,15 @@ impl Remote {
             ));
         }
         let _ = std::fs::remove_file(&apath);
+        // The epoch a restore of this backup takes: one above the highest in the bucket.
+        let next_epoch = rt.block_on(self.highest_epoch(app, epoch))? + 1;
+        if next_epoch > MAX_EPOCH {
+            return Err(s3_err(
+                "remote_rejected",
+                format!("the bucket's epochs of '{app}' are used up ({MAX_EPOCH})"),
+                "report this",
+            ));
+        }
         // 6. A new local backup id.
         let _serial = rt.block_on(ctx.name_lock.lock());
         let id = backup::unique_id(&root, "", crate::server::unix_now());
@@ -1032,6 +1215,7 @@ impl Remote {
                 "status": "fetched",
                 "finished_at": now_text(),
                 "content_digest": digest,
+                "next_epoch": next_epoch,
             }),
         );
         let removed = backup::prune(&root, ctx.keep, &self.pinned(app));
@@ -1041,6 +1225,7 @@ impl Remote {
             "bytes": unpacked.contents.bytes,
             "content_digest": digest,
             "journal_clean": unpacked.contents.journal_clean,
+            "next_epoch": next_epoch,
         });
         if !removed.is_empty() {
             out["removed_old"] = removed.into();

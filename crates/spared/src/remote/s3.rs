@@ -982,10 +982,24 @@ impl Client {
     /// Every object under `prefix` (ListObjectsV2, page by page), up to `max` of them; the
     /// second value says whether there were more.
     pub async fn list(&self, prefix: &str, max: usize) -> Result<(Vec<Object>, bool), S3Error> {
+        self.list_after(prefix, None, max).await
+    }
+
+    /// Like [`Client::list`], starting after the key `after` (ListObjectsV2 `start-after`), so
+    /// a caller can skip to the keys that sort above it.
+    pub async fn list_after(
+        &self,
+        prefix: &str,
+        after: Option<&str>,
+        max: usize,
+    ) -> Result<(Vec<Object>, bool), S3Error> {
         let mut out = vec![];
         let mut token: Option<String> = None;
         loop {
             let mut q = vec![("list-type", "2"), ("prefix", prefix)];
+            if let (Some(a), None) = (after, &token) {
+                q.push(("start-after", a));
+            }
             if let Some(t) = &token {
                 q.push(("continuation-token", t));
             }
