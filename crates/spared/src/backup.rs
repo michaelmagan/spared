@@ -457,8 +457,9 @@ pub fn list(dir: &Path) -> Vec<Entry> {
 }
 
 /// Keep the newest `keep` plain backups and, separately, the newest `keep` pre-restore copies.
-/// Returns the ids removed.
-pub fn prune(dir: &Path, keep: usize) -> Vec<String> {
+/// Ids in `pinned` (backups a remote upload is reading) are never removed. Returns the ids
+/// removed.
+pub fn prune(dir: &Path, keep: usize, pinned: &std::collections::HashSet<String>) -> Vec<String> {
     let mut removed = vec![];
     for pre in [false, true] {
         let all: Vec<Entry> = list(dir)
@@ -466,11 +467,15 @@ pub fn prune(dir: &Path, keep: usize) -> Vec<String> {
             .filter(|e| e.pre_restore == pre)
             .collect();
         for e in all.into_iter().skip(keep) {
+            if pinned.contains(&e.id) {
+                continue;
+            }
             // Renamed out of the id namespace first, so a removal that fails half way leaves no
             // half-deleted backup in the list; `.tmp-` leftovers are cleared by the next backup.
             let doomed = dir.join(format!(".tmp-rm-{}", e.id));
             if std::fs::rename(dir.join(&e.id), &doomed).is_ok() {
                 let _ = remove_tree(&doomed);
+                let _ = std::fs::remove_file(dir.join(".remote").join(format!("{}.json", e.id)));
                 removed.push(e.id);
             }
         }
@@ -753,7 +758,9 @@ mod tests {
                 "20261110T000001Z"
             ]
         );
-        let removed = prune(&d, 2);
+        let pinned = std::collections::HashSet::from(["20261110T000001Z".to_string()]);
+        assert!(prune(&d, 2, &pinned).is_empty(), "a pinned backup stays");
+        let removed = prune(&d, 2, &Default::default());
         assert_eq!(removed, ["20261110T000001Z"]);
         assert_eq!(
             ids(list(&d)),

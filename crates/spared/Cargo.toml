@@ -29,6 +29,10 @@ rusqlite = { version = "0.41", features = ["bundled"], optional = true }
 libc = "0.2"
 wasmparser = "0.261.0"
 sha2 = "0.11.1"
+# Both already linked (ring through rustls, zstd through wasmtime); named here for remote backups:
+# SigV4 signing, the archive's encryption, and its compression.
+ring = "0.17.14"
+zstd = { version = "0.13.4", default-features = false }
 
 [features]
 default = []

@@ -33,7 +33,7 @@ docker run --rm -v spared-data:/data:ro -v "$PWD":/out debian:bookworm-slim tar 
 
 Copy a stopped server's directory. A copy taken while apps are writing can catch a database in the middle of a write.
 
-The lighter option, with the server running: `spared backup <name>` for each app. It copies that app's data (not its code or manifest) to `<data-dir>/backups/<name>/`, on the same disk, while the app's instance is stopped. It protects the data against a bad deploy, not against losing the disk or the directory. See [the backup section of getting started](getting-started.md#9-back-up-and-restore).
+The lighter option, with the server running: `spared backup <name>` for each app. It copies that app's data (not its code or manifest) to `<data-dir>/backups/<name>/`, on the same disk, while the app's instance is stopped. It protects the data against a bad deploy, not against losing the disk or the directory, unless the server also uploads backups to a bucket with `--backup-to` ([operating](operating.md#off-machine-backups)). See [the backup section of getting started](getting-started.md#9-back-up-and-restore).
 
 ## Upgrade
 
@@ -54,6 +54,7 @@ If the server refuses to start, it has changed nothing. The error has a kind and
 | Compiled code | `components/<sha256>.cwasm` | Kept while it loads. A compiled file loads only into the wasmtime version and settings that made it, so after a release that updates wasmtime the server recompiles each stored component from its stored wasm, once, at start, and logs `recompiled from the stored wasm`. That start takes longer. The wasm is checked against its SHA-256 first. |
 | Manifest, deploy counter, app log | `apps/<name>/manifest.toml`, `version`, `app.log` | Kept. Limits above the server's maximums are clamped at load, as on any start. |
 | Backups | `backups/<name>/` | Kept. `spared backups` and `spared restore` work on backups taken by an earlier release of the same data format. |
+| Remote backup state | `node-id`, `backups/<name>/.remote/` | Kept. `node-id` names this server in the bucket, so keep it with the data directory: a server with a new one still restores the old backups, and uploads under the new name. On a clone that will run next to the original, delete `<data-dir>/node-id` before its first start, or use a different prefix: two servers with the same node id, bucket, prefix, key and app name write the same object keys. An older release ignores both. |
 | Admin token | `admin-token` | Kept, so the CLI's saved token keeps working. |
 | Lock file | `.lock` | Kept. The running server holds a lock on it, and the next server rewrites its pid. A copied one is harmless. |
 | Format stamp | `format.json` | Read first, then updated with the version that opened the directory. |

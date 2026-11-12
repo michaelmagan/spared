@@ -75,24 +75,7 @@ pub async fn pinned_send_request(
         Err(..) => return Err(Error::ConnectionTimeout),
     };
     let stream = if use_tls {
-        // derived from https://github.com/rustls/rustls/blob/main/examples/src/bin/simpleclient.rs
-        let mut root_cert_store = rustls::RootCertStore {
-            roots: webpki_roots::TLS_SERVER_ROOTS.into(),
-        };
-        if let Some(path) =
-            std::env::var_os("SPARED_EXTRA_CA_FILE").or_else(|| std::env::var_os("SSL_CERT_FILE"))
-        {
-            use rustls::pki_types::pem::PemObject;
-            for cert in rustls::pki_types::CertificateDer::pem_file_iter(path)
-                .map_err(|e| Error::Tls(std::io::Error::other(e.to_string())))?
-                .flatten()
-            {
-                let _ = root_cert_store.add(cert);
-            }
-        }
-        let config = rustls::ClientConfig::builder()
-            .with_root_certificates(root_cert_store)
-            .with_no_client_auth();
+        let config = tls_client_config().map_err(Error::Tls)?;
         let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(config));
         let domain = tls_server_name(&authority)?;
         let stream = connector
@@ -222,6 +205,30 @@ pub async fn pinned_send_request(
         }
         Ok(())
     }))
+}
+
+/// The TLS client setup of every outbound connection the host makes (an app's fetch, the remote
+/// backup client): the webpki roots, plus the certificates in `SPARED_EXTRA_CA_FILE` or
+/// `SSL_CERT_FILE` when one is set.
+pub(crate) fn tls_client_config() -> std::io::Result<rustls::ClientConfig> {
+    // derived from https://github.com/rustls/rustls/blob/main/examples/src/bin/simpleclient.rs
+    let mut root_cert_store = rustls::RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.into(),
+    };
+    if let Some(path) =
+        std::env::var_os("SPARED_EXTRA_CA_FILE").or_else(|| std::env::var_os("SSL_CERT_FILE"))
+    {
+        use rustls::pki_types::pem::PemObject;
+        for cert in rustls::pki_types::CertificateDer::pem_file_iter(path)
+            .map_err(|e| std::io::Error::other(e.to_string()))?
+            .flatten()
+        {
+            let _ = root_cert_store.add(cert);
+        }
+    }
+    Ok(rustls::ClientConfig::builder()
+        .with_root_certificates(root_cert_store)
+        .with_no_client_auth())
 }
 
 /// Resolve the rustls [`ServerName`] used for TLS certificate verification from

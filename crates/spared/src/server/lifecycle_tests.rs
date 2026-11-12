@@ -91,6 +91,7 @@ impl Fixture {
             access_log: false,
             caps: Default::default(),
             compile: Default::default(),
+            remote: None,
         }
     }
 

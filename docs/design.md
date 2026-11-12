@@ -143,7 +143,9 @@ A backup holds app data only, not code. A restore (`POST /v1/apps/{name}/restore
 
 Deleting an app moves its directory to `<data-dir>/trash/` with one rename and removes it with an iterative walk (no recursion, two open directories, short paths), so an app that nested its data thousands of levels deep cannot crash the server when it is removed; backup deletion and retention work the same way.
 
-Backups are on the same disk as the data, so they protect against bad writes and bad deploys, not against losing the disk. Tested through the real server (`scripts/server-test.py`), including a writer thread acknowledging writes while three backups run; not tested: power loss during a backup, a full disk, and backups of databases in WAL mode.
+Local backups are on the same disk as the data, so on their own they protect against bad writes and bad deploys, not against losing the disk. With `spared serve --backup-to s3://<bucket>/<prefix>` the server also uploads each backup to an S3-compatible bucket, after the app serves again. The client is written for spared over the hyper, rustls and ring stack the binary already had, with no new crates: AWS Signature Version 4 over the body's SHA-256 (never `UNSIGNED-PAYLOAD`), no redirects followed, no proxy, and errors that carry the store's code, message and request id, never a header or a secret. Each backup becomes one archive (POSIX tar, zstd level 3, then ChaCha20-Poly1305 in 64 KiB STREAM segments under a key derived from the operator's key and a random salt, with the app name and remote id as associated data) and a `manifest.json` written last as the commit marker. The server refuses to start with `--backup-to` and no key unless `--backup-encryption off` is given, because the key has to be kept off the machine to be any use. A restore from the bucket downloads, verifies (size, SHA-256, every segment and the final-segment flag, a strict tar reader, each file's hash) and unpacks into a new local backup, then runs the local restore above, so a bad archive never reaches `data/`. spared never deletes in the bucket: retention is the bucket's lifecycle rule. Moving an app to another machine is a backup on one and a restore on the other, by hand, with traffic cut first: there is no freeze, failover or second writer detection. Tested against an S3 stand-in in the test process, not against AWS S3, R2 or any other store ([operating](operating.md#off-machine-backups)).
+
+Tested through the real server (`scripts/server-test.py`), including a writer thread acknowledging writes while three backups run; not tested: power loss during a backup, a full disk, and backups of databases in WAL mode.
 
 `spared bench <name>` times cold wakes (evict, then the first request's time to first byte, 20 cycles) and warm requests on one connection, and prints p50, p99 and max. It runs against a live server over HTTP, so its numbers include the loopback network path and differ from the in-process figures of the wake and workerd benchmarks.
 
@@ -222,7 +224,7 @@ Only what we read or ran.
 
 ## Not built yet
 
-- Point-in-time restore. Backups exist (see above), so you can go back to a backup you took, not to an arbitrary moment. Backups also stay on the server's own disk; nothing copies them off the machine.
+- Point-in-time restore. Backups exist (see above), so you can go back to a backup you took, not to an arbitrary moment. Backups can be uploaded to an S3-compatible bucket ([operating](operating.md#off-machine-backups)), but nothing schedules them, deletes old ones in the bucket, or moves an app between machines beyond a manual backup and restore.
 - Multi-node. One host process on one machine.
 - WebSockets.
 - Cron and scheduled jobs.

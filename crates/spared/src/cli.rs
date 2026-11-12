@@ -99,8 +99,12 @@ pub enum UserCmd {
     /// project's build scripts on your machine, like any cargo build.
     Dev,
     /// Copy an app's data directory to <data-dir>/backups/<name>/<timestamp>/ (data only, not code).
+    /// When the server has --backup-to, also upload it, and wait for the upload.
     Backup {
         name: String,
+        /// Return once the local backup exists; do not wait for the upload.
+        #[arg(long)]
+        no_wait: bool,
         /// Admin URL of the server to talk to. Default: $SPARED_URL, then http://127.0.0.1:8081.
         #[arg(long, value_name = "URL")]
         server: Option<String>,
@@ -108,6 +112,9 @@ pub enum UserCmd {
     /// List an app's backups, newest first.
     Backups {
         name: String,
+        /// List the backups in the server's bucket instead (works without the app deployed).
+        #[arg(long)]
+        remote: bool,
         /// Admin URL of the server to talk to. Default: $SPARED_URL, then http://127.0.0.1:8081.
         #[arg(long, value_name = "URL")]
         server: Option<String>,
@@ -115,7 +122,8 @@ pub enum UserCmd {
     /// Replace an app's data with a backup (the current data is kept as a pre-restore copy).
     Restore {
         name: String,
-        /// Backup id from `spared backups <name>`.
+        /// Backup id from `spared backups <name>`, or remote:<id> from `spared backups <name>
+        /// --remote` (fetched and verified into a new local backup first).
         #[arg(long = "from")]
         from: String,
         /// Confirm that the app's current data is replaced.
@@ -125,6 +133,9 @@ pub enum UserCmd {
         #[arg(long, value_name = "URL")]
         server: Option<String>,
     },
+    /// Keys for encrypted remote backups.
+    #[command(subcommand)]
+    BackupKey(BackupKeyCmd),
     /// Drop an app's live instance now; the next request wakes a fresh one.
     Evict {
         name: String,
@@ -144,6 +155,17 @@ pub enum UserCmd {
         /// Admin URL of the server to talk to. Default: $SPARED_URL, then http://127.0.0.1:8081.
         #[arg(long, value_name = "URL")]
         server: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum BackupKeyCmd {
+    /// Print a new random key for --backup-key-file. Keep a copy off this machine: without it the
+    /// encrypted backups cannot be restored.
+    New {
+        /// Write the key to this new file (mode 0600) instead of printing it.
+        #[arg(long, value_name = "PATH")]
+        out: Option<PathBuf>,
     },
 }
 
@@ -211,8 +233,23 @@ async fn dispatch(cmd: UserCmd, json: bool) -> R<()> {
         } => cmd_logs(name, lines, server, json).await,
         UserCmd::Rm { name, yes, server } => cmd_rm(&name, yes, server, json).await,
         UserCmd::Dev => cmd_dev(json).await,
-        UserCmd::Backup { name, server } => cmd_backup(&name, server, json).await,
-        UserCmd::Backups { name, server } => cmd_backups(&name, server, json).await,
+        UserCmd::Backup {
+            name,
+            no_wait,
+            server,
+        } => cmd_backup(&name, no_wait, server, json).await,
+        UserCmd::Backups {
+            name,
+            remote,
+            server,
+        } => {
+            if remote {
+                cmd_remote_backups(&name, server, json).await
+            } else {
+                cmd_backups(&name, server, json).await
+            }
+        }
+        UserCmd::BackupKey(BackupKeyCmd::New { out }) => cmd_backup_key_new(out, json),
         UserCmd::Restore {
             name,
             from,
@@ -1613,22 +1650,95 @@ fn check_app_name(name: &str) -> R<()> {
 
 const BACKUP_SCOPE: &str = "a backup holds the app's data only (data/, so /data/app.db), not its code; redeploy to restore code";
 
-async fn cmd_backup(name: &str, server: Option<String>, json: bool) -> R<()> {
+/// How often `spared backup` and `spared restore --from remote:` ask the server how a remote
+/// job is going. Each ask is its own short request, so a long upload never meets the 120 s
+/// request timeout.
+const POLL: Duration = Duration::from_millis(500);
+
+/// Ask `path` until `pending` says the job is no longer running; the last answer.
+async fn poll_job(base: &str, token: &str, path: &str, pending: &str) -> R<Value> {
+    loop {
+        let r = admin(base, token, "GET", path, &[], Bytes::new()).await?;
+        let v = json_body(&r)?;
+        if v["status"].as_str() != Some(pending) {
+            return Ok(v);
+        }
+        tokio::time::sleep(POLL).await;
+    }
+}
+
+async fn cmd_backup(name: &str, no_wait: bool, server: Option<String>, json: bool) -> R<()> {
     check_app_name(name)?;
+    let (base, token) = (server_url(server), token()?);
     let r = admin(
-        &server_url(server),
-        &token()?,
+        &base,
+        &token,
         "POST",
         &format!("/v1/apps/{name}/backup"),
         &[],
         Bytes::new(),
     )
     .await?;
-    let v = json_body(&r)?;
+    let mut v = json_body(&r)?;
+    let id = v["backup_id"].as_str().unwrap_or("").to_string();
+    if !json {
+        print_local_backup(name, &v);
+    }
+    if v["remote"]["status"].as_str() == Some("uploading") && !no_wait {
+        if !json {
+            eprintln!(
+                "uploading {id} to {} as {} ...",
+                v["remote"]["target"].as_str().unwrap_or(""),
+                v["remote"]["remote_id"].as_str().unwrap_or("")
+            );
+        }
+        let path = format!("/v1/apps/{name}/backups/{id}/remote");
+        v["remote"] = poll_job(&base, &token, &path, "uploading").await?;
+    }
+    let remote = &v["remote"];
+    if remote["status"].as_str() == Some("failed") {
+        let cause = &remote["error"];
+        let mut e = err(
+            "remote_upload_failed",
+            format!(
+                "the local backup {id} of {name} was taken, but uploading it failed: {}: {}",
+                cause["kind"].as_str().unwrap_or("unknown"),
+                cause["message"].as_str().unwrap_or("")
+            ),
+            format!(
+                "{} The local backup stands. Restore it with `spared restore {name} --from {id} --yes`",
+                cause["fix"].as_str().unwrap_or("")
+            ),
+        );
+        e.extra = Some(json!({"backup_id": id, "remote": remote}));
+        return Err(e);
+    }
     if json {
         out_json(v);
         return Ok(());
     }
+    match remote["status"].as_str() {
+        Some("uploaded") => println!(
+            "uploaded {id} to {} as {} ({} bytes, {})",
+            remote["target"].as_str().unwrap_or(""),
+            remote["remote_id"].as_str().unwrap_or(""),
+            remote["archive_bytes"],
+            if remote["encrypted"].as_bool() == Some(true) {
+                "encrypted"
+            } else {
+                "NOT encrypted"
+            }
+        ),
+        Some("uploading") => println!(
+            "uploading in the background as {}. `spared backups {name}` shows when it is done",
+            remote["remote_id"].as_str().unwrap_or("")
+        ),
+        _ => {}
+    }
+    Ok(())
+}
+
+fn print_local_backup(name: &str, v: &Value) {
     let id = v["backup_id"].as_str().unwrap_or("");
     println!(
         "backed up {name} as {id} ({} bytes in {} files, integrity {})",
@@ -1647,6 +1757,102 @@ async fn cmd_backup(name: &str, server: Option<String>, json: bool) -> R<()> {
         );
     }
     println!("restore with: spared restore {name} --from {id} --yes");
+}
+
+async fn cmd_remote_backups(name: &str, server: Option<String>, json: bool) -> R<()> {
+    check_app_name(name)?;
+    let r = admin(
+        &server_url(server),
+        &token()?,
+        "GET",
+        &format!("/v1/apps/{name}/remote-backups"),
+        &[],
+        Bytes::new(),
+    )
+    .await?;
+    let v = json_body(&r)?;
+    if json {
+        out_json(v);
+        return Ok(());
+    }
+    let target = v["target"].as_str().unwrap_or("");
+    let items = v["remote_backups"].as_array().cloned().unwrap_or_default();
+    if items.is_empty() {
+        println!("no backups of {name} in {target}");
+        return Ok(());
+    }
+    println!(
+        "{:<34} {:<21} {:>12} {:<13} {:>5}",
+        "REMOTE ID", "CREATED", "BYTES", "NODE", "EPOCH"
+    );
+    for b in &items {
+        println!(
+            "{:<34} {:<21} {:>12} {:<13} {:>5}",
+            b["remote_id"].as_str().unwrap_or(""),
+            b["created_at"].as_str().unwrap_or(""),
+            b["bytes"].to_string(),
+            format!(
+                "{}{}",
+                b["node"].as_str().unwrap_or(""),
+                if b["this_node"].as_bool() == Some(true) {
+                    "*"
+                } else {
+                    ""
+                }
+            ),
+            b["epoch"].to_string()
+        );
+    }
+    println!("in {target}. * marks backups this server uploaded");
+    println!("restore with: spared restore {name} --from remote:<REMOTE ID> --yes");
+    Ok(())
+}
+
+fn cmd_backup_key_new(out: Option<PathBuf>, json: bool) -> R<()> {
+    let key = crate::remote::seal::BackupKey::generate()
+        .map_err(|e| err("random_failed", e.to_string(), "report this"))?;
+    let note = "keep a copy of this key off this machine (a password manager, a secret store): the encrypted backups cannot be restored without it, and a key that lives only on the server's disk is lost with that disk";
+    if let Some(p) = &out {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let written = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(p)
+            .and_then(|mut f| {
+                f.write_all(format!("{}\n", key.to_hex()).as_bytes())?;
+                f.sync_all()
+            });
+        if let Err(e) = written {
+            return Err(err(
+                "write_failed",
+                format!("cannot create {}: {e}", p.display()),
+                "pick a path that does not exist yet. The key is never written over another file",
+            ));
+        }
+    }
+    if json {
+        let mut v = json!({"key_id": key.key_id(), "note": note});
+        match &out {
+            Some(p) => v["file"] = p.display().to_string().into(),
+            None => v["key"] = key.to_hex().into(),
+        }
+        out_json(v);
+        return Ok(());
+    }
+    match &out {
+        Some(p) => println!(
+            "wrote a new backup key to {} (key id {})",
+            p.display(),
+            key.key_id()
+        ),
+        None => println!("{}", key.to_hex()),
+    }
+    eprintln!("key id {}: {note}", key.key_id());
+    eprintln!(
+        "then: spared serve --backup-to s3://<bucket>/<prefix> --backup-key-file <file with the key>"
+    );
     Ok(())
 }
 
@@ -1672,17 +1878,21 @@ async fn cmd_backups(name: &str, server: Option<String>, json: bool) -> R<()> {
         return Ok(());
     }
     println!(
-        "{:<30} {:<12} {:<21} {:>10} {:>5}",
+        "{:<30} {:<12} {:<21} {:>10} {:>5}  REMOTE",
         "ID", "KIND", "CREATED", "BYTES", "FILES"
     );
     for b in items {
         println!(
-            "{:<30} {:<12} {:<21} {:>10} {:>5}",
+            "{:<30} {:<12} {:<21} {:>10} {:>5}  {}",
             b["backup_id"].as_str().unwrap_or(""),
             b["kind"].as_str().unwrap_or(""),
             b["created_at"].as_str().unwrap_or(""),
             b["bytes"].to_string(),
-            b["files"].to_string()
+            b["files"].to_string(),
+            match b["remote"]["status"].as_str() {
+                Some(st) => format!("{st} {}", b["remote"]["remote_id"].as_str().unwrap_or("")),
+                None => "-".into(),
+            }
         );
     }
     println!("keeping the newest {} of each kind", v["max_backups"]);
@@ -1706,22 +1916,36 @@ async fn cmd_restore(
             ),
         ));
     }
+    let (base, token) = (server_url(server), token()?);
+    let mut fetched = None;
+    let local = match from.strip_prefix("remote:") {
+        Some(rid) => {
+            let f = fetch_remote(&base, &token, name, rid, json).await?;
+            let id = f["local_id"].as_str().unwrap_or("").to_string();
+            fetched = Some(f);
+            id
+        }
+        None => from.to_string(),
+    };
     let r = admin(
-        &server_url(server),
-        &token()?,
+        &base,
+        &token,
         "POST",
         &format!("/v1/apps/{name}/restore"),
         &[("content-type", "application/json".to_string())],
-        Bytes::from(json!({"backup_id": from}).to_string()),
+        Bytes::from(json!({"backup_id": local}).to_string()),
     )
     .await?;
-    let v = json_body(&r)?;
+    let mut v = json_body(&r)?;
     if json {
+        if let Some(f) = fetched {
+            v["fetched"] = f;
+        }
         out_json(v);
         return Ok(());
     }
     println!(
-        "restored {name} from {from} ({} bytes in {} files)",
+        "restored {name} from {local} ({} bytes in {} files)",
         v["bytes"], v["files"]
     );
     println!("note: {BACKUP_SCOPE}");
@@ -1732,6 +1956,68 @@ async fn cmd_restore(
         );
     }
     Ok(())
+}
+
+/// Phase one of a remote restore: have the server download, verify and unpack the remote backup
+/// into a new local backup, and wait for it. The app keeps serving meanwhile.
+async fn fetch_remote(base: &str, token: &str, name: &str, rid: &str, json: bool) -> R<Value> {
+    // The restore that follows needs the app; say so before a long download.
+    admin(
+        base,
+        token,
+        "GET",
+        &format!("/v1/apps/{name}"),
+        &[],
+        Bytes::new(),
+    )
+    .await?;
+    let r = admin(
+        base,
+        token,
+        "POST",
+        &format!("/v1/apps/{name}/fetch"),
+        &[("content-type", "application/json".to_string())],
+        Bytes::from(json!({"remote_id": rid}).to_string()),
+    )
+    .await?;
+    let mut v = json_body(&r)?;
+    if v["status"].as_str() == Some("fetching") {
+        if !json {
+            eprintln!(
+                "fetching {rid} from {} and checking it ...",
+                v["target"].as_str().unwrap_or("")
+            );
+        }
+        v = poll_job(
+            base,
+            token,
+            &format!("/v1/apps/{name}/fetch/{rid}"),
+            "fetching",
+        )
+        .await?;
+    }
+    if v["status"].as_str() != Some("fetched") {
+        let e = &v["error"];
+        let mut ce = err(
+            e["kind"].as_str().unwrap_or("remote_fetch_failed"),
+            format!(
+                "{} (nothing was restored, and the app's data is unchanged)",
+                e["message"].as_str().unwrap_or("the fetch failed")
+            ),
+            e["fix"].as_str().unwrap_or(""),
+        );
+        ce.extra = Some(json!({"remote_id": rid}));
+        return Err(ce);
+    }
+    if !json {
+        println!(
+            "fetched {rid} as local backup {} ({} bytes in {} files, every hash and seal checked)",
+            v["local_id"].as_str().unwrap_or(""),
+            v["bytes"],
+            v["files"]
+        );
+    }
+    Ok(v)
 }
 
 async fn cmd_evict(name: &str, server: Option<String>, json: bool) -> R<()> {
@@ -2696,6 +2982,7 @@ async fn cmd_dev(json: bool) -> R<()> {
         access_log: false,
         caps: Default::default(),
         compile: crate::compile::CompileLimits::isolated(),
+        remote: None,
     };
     let server = tokio::spawn(crate::server::serve(
         cfg,

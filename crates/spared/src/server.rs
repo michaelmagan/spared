@@ -54,6 +54,8 @@ pub struct Config {
     /// What one app's guest may ask of the host's filesystem.
     pub caps: AppCaps,
     pub compile: CompileLimits,
+    /// Off-machine backups (`--backup-to`), checked at start; `None` when not configured.
+    pub remote: Option<crate::remote::Settings>,
 }
 
 const ADMIN_CONNECTIONS: usize = 32;
@@ -117,6 +119,8 @@ pub struct Server {
     ids: RequestIds,
     /// Request body bytes held in memory across all apps, before and while a request runs.
     body_budget: Arc<BodyBudget>,
+    /// The bucket backups are uploaded to, when `--backup-to` is set.
+    remote: Option<Arc<crate::remote::Remote>>,
 }
 
 /// The bytes of request bodies the server may hold in memory at once, over every connection and
@@ -679,6 +683,31 @@ fn check_backup_id(id: &str) -> std::result::Result<(), DeployError> {
     ))
 }
 
+fn check_remote_id(rid: &str) -> std::result::Result<(), DeployError> {
+    if crate::remote::parse_remote_id(rid).is_some() {
+        return Ok(());
+    }
+    Err(DeployError::new(
+        StatusCode::BAD_REQUEST,
+        "bad_remote_id",
+        format!(
+            "'{}' is not a remote backup id",
+            rid.chars().take(80).collect::<String>()
+        ),
+        "use an id from `spared backups <name> --remote`, like 20261112T040506Z.7f3a9c0a1b2c.1",
+    ))
+}
+
+/// A remote operation that failed at the store (502) or here (500).
+fn remote_error(e: crate::remote::s3::S3Error) -> Resp {
+    let status = if e.kind.starts_with("remote_") {
+        StatusCode::BAD_GATEWAY
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
+    err_resp(status, e.kind, e.message, &e.fix)
+}
+
 fn backup_task_failed(e: tokio::task::JoinError) -> Resp {
     err_resp(
         StatusCode::INTERNAL_SERVER_ERROR,
@@ -727,7 +756,7 @@ fn unique_suffix() -> String {
     format!("{ns}-{}", N.fetch_add(1, Ordering::Relaxed))
 }
 
-fn unix_now() -> u64 {
+pub(crate) fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -902,11 +931,14 @@ fn take_backup(
     root: &Path,
     keep: usize,
     max_bytes: u64,
+    pinned: &std::collections::HashSet<String>,
 ) -> std::result::Result<serde_json::Value, DeployError> {
     create_private_dir(root)
         .map_err(|e| io_fail("backup_failed", "cannot create the backup directory", e))?;
     for e in std::fs::read_dir(root).into_iter().flatten().flatten() {
-        if e.file_name().to_string_lossy().starts_with(".tmp-") {
+        let n = e.file_name().to_string_lossy().to_string();
+        // A fetch in progress stages under `.tmp-fetch-`; a restart clears those.
+        if n.starts_with(".tmp-") && !n.starts_with(crate::remote::FETCH_TMP) {
             let _ = backup::remove_tree(&e.path());
         }
     }
@@ -933,7 +965,7 @@ fn take_backup(
         ));
     }
     sync_dir(root);
-    let removed = backup::prune(root, keep);
+    let removed = backup::prune(root, keep, pinned);
     let mut v = serde_json::json!({
         "name": name,
         "backup_id": id,
@@ -965,6 +997,7 @@ fn do_restore(
     id: &str,
     keep: usize,
     max_bytes: u64,
+    pinned: &std::collections::HashSet<String>,
 ) -> std::result::Result<serde_json::Value, DeployError> {
     let data = app_dir.join("data");
     let tmp = app_dir.join(RESTORE_TMP);
@@ -1012,7 +1045,7 @@ fn do_restore(
     }
     sync_dir(app_dir);
     sync_dir(root);
-    backup::prune(root, keep);
+    backup::prune(root, keep, pinned);
     let mut v = serde_json::json!({
         "name": name,
         "restored_from": id,
@@ -1030,7 +1063,7 @@ fn do_restore(
 }
 
 impl Server {
-    pub fn new(cfg: Config, engine: Engine) -> Result<Arc<Server>> {
+    pub fn new(mut cfg: Config, engine: Engine) -> Result<Arc<Server>> {
         create_private_dir(&cfg.data_dir.join("apps"))?;
         let owner = std::fs::metadata(&cfg.data_dir)?.uid();
         let me = unsafe { libc::geteuid() };
@@ -1049,6 +1082,15 @@ impl Server {
         create_private_dir(&cfg.data_dir.join("backups"))?;
         create_private_dir(&cfg.data_dir.join(TRASH))?;
         std::fs::set_permissions(&cfg.data_dir, std::fs::Permissions::from_mode(0o700))?;
+        crate::remote::recover(&cfg.data_dir);
+        let remote = match cfg.remote.take() {
+            Some(s) => Some(Arc::new(
+                crate::remote::Remote::new(s, &cfg.data_dir).map_err(|e| {
+                    wasmtime::Error::msg(format!("remote backups cannot start: {e}"))
+                })?,
+            )),
+            None => None,
+        };
         let body_budget = BodyBudget::new(
             cfg.caps.body_buffer_bytes,
             (cfg.max.request_mb as u64) << 20,
@@ -1063,6 +1105,7 @@ impl Server {
             metrics: Metrics::default(),
             ids: RequestIds::new(),
             body_budget,
+            remote,
         });
         for e in std::fs::read_dir(s.cfg.data_dir.join("apps"))?.flatten() {
             let name = e.file_name().to_string_lossy().to_string();
@@ -2248,25 +2291,146 @@ impl Server {
         if let Err(e) = check_name(name) {
             return e.into_resp();
         }
-        let lock = self.name_lock(name);
-        let _serial = lock.lock().await;
-        let (app, _instance) = match self.lock_idle(name).await {
-            Ok(x) => x,
-            Err(r) => return r,
-        };
-        let (name, src, root, keep, max_bytes) = (
-            name.to_string(),
-            app.dir.join("data"),
-            self.backups_root(name),
-            self.cfg.max_backups,
-            self.cfg.caps.max_data_bytes,
-        );
-        match tokio::task::spawn_blocking(move || take_backup(&name, &src, &root, keep, max_bytes))
+        let taken = {
+            let lock = self.name_lock(name);
+            let _serial = lock.lock().await;
+            let (app, _instance) = match self.lock_idle(name).await {
+                Ok(x) => x,
+                Err(r) => return r,
+            };
+            let (name, src, root, keep, max_bytes, pinned) = (
+                name.to_string(),
+                app.dir.join("data"),
+                self.backups_root(name),
+                self.cfg.max_backups,
+                self.cfg.caps.max_data_bytes,
+                self.pinned(name),
+            );
+            tokio::task::spawn_blocking(move || {
+                take_backup(&name, &src, &root, keep, max_bytes, &pinned)
+            })
             .await
-        {
-            Ok(Ok(v)) => json_resp(StatusCode::OK, v),
+        };
+        // The instance lock and the name lock are released: the app serves again and can be
+        // redeployed while the upload runs.
+        match taken {
+            Ok(Ok(mut v)) => {
+                if let (Some(r), Some(id)) = (&self.remote, v["backup_id"].as_str()) {
+                    v["remote"] = r.start_upload(name, id, self.cfg.caps.max_data_bytes);
+                }
+                json_resp(StatusCode::OK, v)
+            }
             Ok(Err(e)) => e.into_resp(),
             Err(e) => backup_task_failed(e),
+        }
+    }
+
+    fn pinned(&self, name: &str) -> std::collections::HashSet<String> {
+        self.remote
+            .as_ref()
+            .map(|r| r.pinned(name))
+            .unwrap_or_default()
+    }
+
+    fn remote_or_refuse(&self) -> std::result::Result<&Arc<crate::remote::Remote>, Resp> {
+        self.remote.as_ref().ok_or_else(|| {
+            err_resp(
+                StatusCode::BAD_REQUEST,
+                "remote_backups_off",
+                "this server has no bucket for backups".into(),
+                "start `spared serve` with --backup-to s3://<bucket>/<prefix> (docs/operating.md, off-machine backups)",
+            )
+        })
+    }
+
+    /// The upload state of one local backup: what `spared backup` waits on.
+    async fn upload_status(&self, name: &str, id: &str) -> Resp {
+        if let Err(e) = check_name(name).and_then(|_| check_backup_id(id)) {
+            return e.into_resp();
+        }
+        match crate::remote::Remote::upload_status(&self.cfg.data_dir, name, id) {
+            Some(v) => json_resp(StatusCode::OK, v),
+            None if self.backups_root(name).join(id).is_dir() => json_resp(
+                StatusCode::OK,
+                serde_json::json!({"local_id": id, "status": "not_uploaded"}),
+            ),
+            None => no_such_backup(name, id),
+        }
+    }
+
+    /// The app's backups in the bucket. Works without the app deployed, so an operator can look
+    /// before deploying on a new machine.
+    async fn list_remote(&self, name: &str) -> Resp {
+        if let Err(e) = check_name(name) {
+            return e.into_resp();
+        }
+        let r = match self.remote_or_refuse() {
+            Ok(r) => r,
+            Err(resp) => return resp,
+        };
+        match r.list(name).await {
+            Ok(v) => json_resp(StatusCode::OK, v),
+            Err(e) => remote_error(e),
+        }
+    }
+
+    /// Start fetching a remote backup into a new local backup (`spared restore --from remote:`
+    /// polls the state, then restores the local id).
+    async fn fetch(&self, name: &str, req: Request<Incoming>) -> Resp {
+        if let Err(e) = check_name(name) {
+            return e.into_resp();
+        }
+        let r = match self.remote_or_refuse() {
+            Ok(r) => r.clone(),
+            Err(resp) => return resp,
+        };
+        let usage = r#"send {"remote_id":"<id>"} (ids: `spared backups <name> --remote`)"#;
+        let collect = Limited::new(req.into_body(), 4096).collect();
+        let body = match tokio::time::timeout(self.cfg.client_timeout, collect).await {
+            Ok(Ok(b)) => b.to_bytes(),
+            _ => {
+                return err_resp(
+                    StatusCode::BAD_REQUEST,
+                    "bad_request",
+                    "could not read the request body".into(),
+                    usage,
+                );
+            }
+        };
+        let rid = serde_json::from_slice::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v["remote_id"].as_str().map(str::to_string));
+        let Some(rid) = rid else {
+            return err_resp(
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+                "the body must be JSON with a string \"remote_id\"".into(),
+                usage,
+            );
+        };
+        if let Err(e) = check_remote_id(&rid) {
+            return e.into_resp();
+        }
+        let ctx = crate::remote::FetchCtx {
+            name_lock: self.name_lock(name),
+            keep: self.cfg.max_backups,
+            max_bytes: self.cfg.caps.max_data_bytes,
+        };
+        json_resp(StatusCode::ACCEPTED, r.start_fetch(name, &rid, ctx))
+    }
+
+    async fn fetch_status(&self, name: &str, rid: &str) -> Resp {
+        if let Err(e) = check_name(name).and_then(|_| check_remote_id(rid)) {
+            return e.into_resp();
+        }
+        match crate::remote::Remote::fetch_status(&self.cfg.data_dir, name, rid) {
+            Some(v) => json_resp(StatusCode::OK, v),
+            None => err_resp(
+                StatusCode::NOT_FOUND,
+                "no_such_fetch",
+                format!("no fetch of {rid} for app '{name}' was started"),
+                "start one with `spared restore <name> --from remote:<id> --yes`",
+            ),
         }
     }
 
@@ -2279,7 +2443,18 @@ impl Server {
         let items = tokio::task::spawn_blocking(move || backup::list(&root))
             .await
             .unwrap_or_default();
-        let items: Vec<_> = items.iter().map(backup_entry_json).collect();
+        let items: Vec<_> = items
+            .iter()
+            .map(|e| {
+                let mut v = backup_entry_json(e);
+                if let Some(r) =
+                    crate::remote::Remote::upload_status(&self.cfg.data_dir, name, &e.id)
+                {
+                    v["remote"] = r;
+                }
+                v
+            })
+            .collect();
         json_resp(
             StatusCode::OK,
             serde_json::json!({"name": name, "backups": items, "max_backups": keep, "contains": BACKUP_CONTAINS}),
@@ -2299,6 +2474,19 @@ impl Server {
         if !dir.is_dir() {
             return no_such_backup(name, id);
         }
+        if self.pinned(name).contains(id) {
+            return err_resp(
+                StatusCode::CONFLICT,
+                "backup_uploading",
+                format!("backup {id} of {name} is being uploaded to the bucket"),
+                "wait for the upload to end (`spared backups <name>` shows it), then delete it",
+            );
+        }
+        let _ = std::fs::remove_file(
+            self.backups_root(name)
+                .join(crate::remote::REMOTE_DIR)
+                .join(format!("{id}.json")),
+        );
         let doomed = self.backups_root(name).join(format!(".tmp-rm-{id}"));
         let removed = match std::fs::rename(&dir, &doomed) {
             Ok(()) => tokio::task::spawn_blocking(move || backup::remove_tree(&doomed))
@@ -2365,15 +2553,16 @@ impl Server {
             Ok(x) => x,
             Err(r) => return r,
         };
-        let (name, id, dir, keep, max_bytes) = (
+        let (name, id, dir, keep, max_bytes, pinned) = (
             name.to_string(),
             id.to_string(),
             app.dir.clone(),
             self.cfg.max_backups,
             self.cfg.caps.max_data_bytes,
+            self.pinned(name),
         );
         match tokio::task::spawn_blocking(move || {
-            do_restore(&name, &dir, &root, &id, keep, max_bytes)
+            do_restore(&name, &dir, &root, &id, keep, max_bytes, &pinned)
         })
         .await
         {
@@ -2575,6 +2764,12 @@ impl Server {
                 detached(async move { self.delete_backup(&name, &id).await }).await
             }
             (Method::POST, ["v1", "apps", name, "restore"]) => self.restore(name, req).await,
+            (Method::GET, ["v1", "apps", name, "backups", id, "remote"]) => {
+                self.upload_status(name, id).await
+            }
+            (Method::GET, ["v1", "apps", name, "remote-backups"]) => self.list_remote(name).await,
+            (Method::POST, ["v1", "apps", name, "fetch"]) => self.fetch(name, req).await,
+            (Method::GET, ["v1", "apps", name, "fetch", rid]) => self.fetch_status(name, rid).await,
             (Method::GET, ["v1", "apps", name, "logs"]) => {
                 let n: usize = query
                     .split('&')
@@ -3015,6 +3210,9 @@ pub async fn serve(
         "apps:  http://{listen} (hosts <app>.localhost{also}{path}; health check: GET /healthz)"
     );
     eprintln!("admin: http://{admin} (needs the bearer token; metrics: GET /metrics)");
+    if let Some(r) = &server.remote {
+        eprintln!("{}", r.describe());
+    }
     eprintln!(
         "access log: {}",
         if access_log {
