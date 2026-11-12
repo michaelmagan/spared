@@ -251,7 +251,8 @@ These are single-machine, loopback measurements. Methods, results and caveats fo
 ## Not built
 
 - Point-in-time restore. You can go back to a backup you took, not to an arbitrary moment.
-- Scheduled backups, retention in the bucket, and moving an app between machines beyond a manual backup and restore. Backups can be uploaded to an S3-compatible bucket ([operating](operating.md#off-machine-backups)), but nothing runs them on a schedule or deletes old ones there.
+- Scheduled backups and retention in the bucket. Backups can be uploaded to an S3-compatible bucket ([operating](operating.md#off-machine-backups)), but nothing runs them on a schedule or deletes old ones there.
+- Failover. `spared move` moves an app to another server while both are up ([operating](operating.md#move-an-app-to-another-server)). Nothing moves one off a server that is down.
 - Multi-node. It is one process on one machine.
 - WebSockets.
 - Cron and scheduled jobs.

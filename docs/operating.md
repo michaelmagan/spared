@@ -93,11 +93,11 @@ There are no scheduled backups: run `spared backup <name>` from cron or a system
 What is stored, for each backup:
 
 ```
-<prefix>/spared/v1/<app>/e00000001/<backup id>.<node>/archive
-<prefix>/spared/v1/<app>/e00000001/<backup id>.<node>/manifest.json
+<prefix>/spared/v1/<app>/e<epoch, 8 digits>/<backup id>.<node>/archive
+<prefix>/spared/v1/<app>/e<epoch, 8 digits>/<backup id>.<node>/manifest.json
 ```
 
-- The remote id is `<backup id>.<node>.<epoch>`, for example `20261112T040506Z.7f3a9c0a1b2c.1`. The node is 6 random bytes that the server writes once into `<data-dir>/node-id` (mode 0600), so two servers never write the same names. A copy of the data directory carries the same node, so on a clone that will run next to the original, delete `<data-dir>/node-id` before its first start, or give it a different prefix; otherwise both write the same object keys when they back up in the same second. The epoch is always 1 in this version.
+- The remote id is `<backup id>.<node>.<epoch>`, for example `20261112T040506Z.7f3a9c0a1b2c.1`. The node is 6 random bytes that the server writes once into `<data-dir>/node-id` (mode 0600), so two servers never write the same names. A copy of the data directory carries the same node, so on a clone that will run next to the original, delete `<data-dir>/node-id` before its first start, or give it a different prefix; otherwise both write the same object keys when they back up in the same second. The epoch starts at 1 and goes up when the app is restored from the bucket ([epochs](#epochs-and-a-stale-server)).
 - The archive is a POSIX tar stream of the backup's files, compressed with zstd (level 3), then sealed: ChaCha20-Poly1305 in 64 KiB segments (the STREAM construction that age uses), with a key for each archive derived from your key and a random salt. Each segment is bound to the app name and the remote id, so an archive copied to another app or id does not open, and a cut one does not either. The first tar entry lists every file with its size and SHA-256.
 - `manifest.json` is written last, so a backup whose manifest is missing is never listed or restored. It holds the app name, the remote id, sizes, the archive's SHA-256, the key id and the SHA-256 of the inner file list (`content_digest`), not file names.
 - A reader of the bucket learns the compressed size of each backup. That is accepted.
@@ -169,9 +169,85 @@ The same rule removes an archive whose manifest upload failed: it is never liste
 
 Tested through the real server against an S3 stand-in that runs inside the test process (`crates/spared/tests/remote_backups.rs`). The stand-in checks the SigV4 signature of every request with its own code, written from the AWS documentation and checked against vectors generated with botocore 1.44.1 (`scripts/sigv4-vectors.py`). The tests cover a byte-identical round trip to a second server, a store that is unreachable or answers 503, a wrong secret, a missing bucket, a skewed clock, a redirect to another region, a 412, a connection cut during an upload and during a download, a truncated, altered, renamed or foreign archive, archives with `../` names, links, devices or a decompression bomb, a wrong key, and `kill -9` of the server during an upload and during a download. Not tested against AWS S3, R2 or any other real store. Not measured: upload and download speed, and how well real databases compress.
 
+## Move an app to another server
+
+`spared move <app> --to <admin URL>` moves an app from the server it runs on (the source) to another spared server (the target), through the bucket both back up to. It is a planned move that an operator runs while both servers are up. It is not failover, it never changes DNS, and it never deletes the app on the source.
+
+### What it needs
+
+- Both servers run a spared with `spared move`. An older one answers `move_unsupported`.
+- Both back up to the same bucket and prefix with the same key: the same `--backup-to`, and a copy of the same `--backup-key-file` (or both `--backup-encryption off`). The move reads each server's bucket, prefix and key id from `GET /v1/server` (never a credential or the key) and refuses with `move_remote_mismatch` when they differ, or `remote_backups_off` when a server has no `--backup-to`. The endpoints may differ, for example a private address on one side.
+- Different node ids. A server started on a copy of the other's data directory has the same one, and the move refuses with `move_same_server` (delete `<data-dir>/node-id` on the copy before its first start).
+- One machine that reaches both admin APIs. The admin listener is on loopback by default and refuses a `Host` that is not an IP address or `localhost`, so forward each one over ssh and use the forwarded port:
+
+```sh
+ssh -N -L 9081:127.0.0.1:8081 old-host &    # the source's admin API, here on 127.0.0.1:9081
+ssh -N -L 9082:127.0.0.1:8081 new-host &    # the target's, on 127.0.0.1:9082
+ssh -N -L 9080:127.0.0.1:8080 new-host &    # the target's public listener, for --smoke-url
+(umask 077; ssh old-host cat /var/lib/spared/admin-token > ~/.spared/source-token)
+(umask 077; ssh new-host cat /var/lib/spared/admin-token > ~/.spared/target-token)
+export SPARED_TOKEN=$(cat ~/.spared/source-token)
+
+spared move notes --server http://127.0.0.1:9081 --to http://127.0.0.1:9082 \
+  --to-token-file ~/.spared/target-token --dry-run
+spared move notes --server http://127.0.0.1:9081 --to http://127.0.0.1:9082 \
+  --to-token-file ~/.spared/target-token --smoke-url http://127.0.0.1:9080
+```
+
+The source's token comes from `$SPARED_TOKEN` or `~/.spared/token`, as for every command. The target's comes from `--to-token-file` or `$SPARED_TARGET_TOKEN`, never from an argument, which every local user can read. Neither is printed, written to the data directories, or put in an error. A URL with a user name or password is refused.
+
+### What it does
+
+`--dry-run` runs the checks below and prints the plan without changing anything. Without it:
+
+1. Checks, which change nothing: both servers answer, share the bucket and the key, have different node ids, can list the bucket, the source has the app, and the target either has no app of that name or has it frozen. A target that serves the app already is refused with `move_target_in_use`, because the restore would replace its data.
+2. Copies the code. A backup holds data only, so the move reads the app's deployed wasm and its `spared.toml` from the source (`GET /v1/apps/<app>/code`) and deploys them on the target, which compiles the wasm itself. The compiled file never travels. The app is created frozen on the target, so it never serves there before its data arrives.
+3. Freezes the app on the source. From here no request runs there.
+4. Backs it up on the source and waits for the upload.
+5. Fetches that backup on the target, which checks it as any remote restore does, and compares the content digest the target unpacked with the one the source uploaded (`move_digest_mismatch` when they differ).
+6. Restores it on the target. The target's epoch for the app becomes one above the highest in the bucket.
+7. Checks that the target holds that backup, thaws the app there, and with `--smoke-url` sends `GET /` with `Host: <app>.localhost` to that address. A 5xx or no answer within 30 seconds fails the move.
+
+It prints what to do next. Point DNS (or your proxy) at the target. Keep the source frozen until the old records have expired, then remove the app there with `spared rm <app> --yes`. Its backups stay. Then take a backup on the target, so the bucket holds the new epoch (below).
+
+To undo before any client has written to the target: `spared freeze <app>` on the target, then `spared thaw <app>` on the source. Once the target has uploaded a backup, the source's uploads are refused as stale, so move the app back with `spared move` instead.
+
+### When a step fails
+
+- A check fails: nothing changed, and the error has the check's own kind.
+- A step before the restore on the target completed fails: `move_aborted`. Until then the source holds the truth, so the move thaws it again, if a move froze it. A freeze made with `spared freeze` or by a stale upload stays. The target keeps a frozen copy that does not serve and whose data was not replaced. The error's `state` says what each side holds, and `cause` has the step's own error.
+- A step after the restore failed (the check of the target's copy, the thaw, the smoke request): `move_incomplete`. The source stays frozen, because the target now holds the newer copy. A failed smoke request freezes the target again. The error names each side's state and the command to run next.
+- A run that was cut off (Ctrl-C, a lost connection) leaves the state it reached.
+
+Run the same command again in every case. It works out from both servers where an earlier run stopped: it starts over when the target's data was not replaced, checks and thaws the target when the source's last backup was restored there, and reports a move that already completed without changing anything. Run it with `--dry-run` first to see which.
+
+### Frozen apps
+
+`spared freeze <app>` stops an app on one server and keeps it stopped: it takes the app's instance lock, so a request in flight finishes first, drops the instance and writes `<data-dir>/apps/<app>/frozen`, which a restart reads. Public requests get 503 `app_frozen` with `Retry-After: 30`, and the response names no reason and no other server. Admin commands keep working: `backup` (with the upload), `backups`, `restore`, `evict`, `logs`, `ps` (which shows the state `frozen` and, with `--json`, why), `rm` and `thaw`. A deploy is refused with 409 `app_frozen` until `spared thaw <app>`, so a frozen copy cannot be brought back to life by a stray deploy. `spared move` deploys with `?frozen=move`, which keeps or makes the app frozen. Freezing an app that is frozen keeps the first freeze, so a move never takes over a freeze someone else made, and so never thaws one.
+
+### Epochs and a stale server
+
+Every remote backup carries an epoch, in its id and its object keys. An app starts at epoch 1 on every server. A restore from the bucket sets this server's epoch for the app to one above the highest epoch in the bucket (kept in `<data-dir>/backups/<app>/.epoch`, which `spared rm` leaves with the backups). A restore from a local backup keeps the epoch. `spared ps --json` shows each app's `epoch`, and `restored_from_remote` once a restore raised it.
+
+Before each upload a server looks for a higher epoch of the app in the bucket. If there is one, the app was restored on another server, so the copy here is stale: the upload is refused with `remote_superseded` (in `remote.error`, under `remote_upload_failed`), the local backup stands, and the server freezes the app. Listing orders backups by epoch, then by id.
+
+This detects a second writer after the fact. It does not prevent one: the look and the upload are separate requests, a stale server is only noticed when it backs up, and only once the other server has uploaded under its higher epoch. A fencing record written with conditional PUTs would prevent it. That is not built.
+
+### What can still lose writes or leave two writers
+
+- Clients that still resolve the old address reach the frozen source and get 503 `app_frozen` until their DNS cache expires. Those writes are refused, not lost, unless a client treats a 503 as success.
+- Thawing the source after the move, or bringing back a VM snapshot of the source taken before the freeze, gives two servers that take writes. The source's next upload is refused and freezes it, as above, but writes made there before that are only on the source. There is no merge: copy them over by hand or drop them.
+- Anything that writes to the source's data directory without spared, such as another process or files copied in.
+- A server whose epoch file was lost (its backups directory deleted) is back at epoch 1, and its own older uploads make it look stale. Restore the app from the bucket to take the next epoch.
+- A target that fails after the move, before it took a backup, loses the writes it took since. The source still holds the data as of its freeze, and `spared thaw` there brings that back.
+
+### What was tested
+
+Tested through real servers and the S3 stand-in (`crates/spared/tests/move_app.rs`): a move with the data byte for byte the same and the app answering on the target, a dry run that changes nothing, a frozen app that answers 503 across a restart while every admin command works, an upload refused by the bucket, a cut download, the target going away during the upload and a digest mismatch (each thaws the source, and a rerun completes), a failed smoke request (the source stays frozen, and a rerun finishes without a new backup), a stale server refused and frozen, epochs across a move and a move back, epoch 1 backups, the refusals before a move, and no token or key in any output, log or data directory. Not tested: a move between two real hosts over ssh, or against a real store.
+
 ## The admin API
 
-The admin API deploys code. It needs a bearer token. The CLI reads it from `$SPARED_TOKEN` or `~/.spared/token`, which `spared serve` writes on first start. Keep the admin listener on loopback.
+The admin API deploys code, and with `GET /v1/apps/<app>/code` it hands it out. It needs a bearer token. The CLI reads it from `$SPARED_TOKEN` or `~/.spared/token`, which `spared serve` writes on first start. Keep the admin listener on loopback.
 
 ## Upgrades
 
