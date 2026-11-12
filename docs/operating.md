@@ -254,12 +254,12 @@ Tested through real servers and the S3 stand-in (`crates/spared/tests/move_app.r
 The admin token controls every app on the server. When you run a platform that hosts apps your users or their coding agents write, give each app's build pipeline an app token instead: a token that works for that one app only, within the scopes you pick.
 
 ```sh
-spared token create alice-notes --expires 90d --name ci-alice > alice-notes.token
+spared token create alice-notes --expires 90d --name ci-alice --out alice-notes.token
 spared token list alice-notes          # ids, scopes, status, created, expires, last used, never a token
 spared token revoke 3f2a9c0a1b2c       # stops it at once, also after a restart
 ```
 
-The token (`spt_` and 64 hex digits) is printed once, alone on stdout, so the redirect above keeps only the token. The server stores its SHA-256 in `<data-dir>/tokens/<id>.json` (mode 0600) and nothing else, so a lost token cannot be shown again: revoke it and make a new one. The pipeline then deploys with `SPARED_TOKEN=$(cat alice-notes.token) spared deploy`, from a machine that reaches the admin listener.
+The token (`spt_` and 64 hex digits) is shown once. `--out` writes it to a new file with mode 0600 and prints nothing but the path; an existing file is never written over. Without `--out` it is printed alone on stdout, and a redirect gives the file the shell's umask, so use `(umask 077; spared token create alice-notes > alice-notes.token)`. Keep the file out of version control (`spared new` ignores `*.token`). The server stores its SHA-256 in `<data-dir>/tokens/<id>.json` (mode 0600) and nothing else, so a lost token cannot be shown again: revoke it and make a new one. The pipeline then deploys with `SPARED_TOKEN=$(cat alice-notes.token) spared deploy`, from a machine that reaches the admin listener.
 
 What an app token can do, by scope (the default is `deploy,read,evict`):
 
@@ -286,7 +286,7 @@ Operational advice:
 
 What an app token does not change: building an app still runs its build scripts and proc macros with the privileges of whoever builds it, outside any sandbox. A pipeline that builds code a user wrote must build it in a container or VM of its own, as before. The token only limits what the upload can touch on the server.
 
-Security notes. The server compares the hash of what a request sends against every stored hash, without an early exit, and the admin token in constant time. After 30 wrong tokens in a minute from one address, every request from it that carries a token, the right one included, gets 429 `auth_rate_limited` until the minute ends. With 256 bits per token this only stops a noisy client. Requests without a token are not counted. No token reaches the access log (which records the `token_id` of an app token's requests), the server's other output, `/metrics`, `spared ps --json`, an error body or the data directory.
+Security notes. The server compares the hash of what a request sends against every stored hash, without an early exit, and the admin token in constant time. After 30 wrong tokens in a minute from one address, every app token and unknown token from it, a valid app token included, gets 429 `auth_rate_limited` until the minute ends. The admin token is checked before that limit and always works, so the operator is never locked out. With 256 bits per token this only stops a noisy client. Requests without a token are not counted. No token reaches the access log (which records the `token_id` of an app token's requests), the server's other output, `/metrics`, `spared ps --json`, an error body or the data directory.
 
 Tested through a real server (`crates/spared/tests/app_tokens.rs`): create, list and revoke, also across a restart. Every admin route with the admin token, an app token for the app, an app token for another app that exists and one that does not (the same answer), an app token without the route's scope, and revoked, expired, malformed and missing tokens. Deploys by an app token, with a mismatched manifest name or another app's name refused and nothing written, first-deploy creation once only, and limits still capped. `spared rm` revoking the app's tokens, the failed-auth limit, and no token in any output, log or file under the server's directories. `scripts/e2e.sh` deploys with an app token through the CLI.
 

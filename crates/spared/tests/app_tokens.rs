@@ -226,12 +226,197 @@ fn create_list_revoke_round_trip_shows_the_token_once() {
     let (st, v) = call(&n, &second, "GET", "/v1/apps", b"");
     assert_eq!((st, kind(&v)), (401, "token_revoked"));
 
+    // A token given to `revoke` in place of its id is turned into the id before any request, so
+    // the secret reaches no URL and no log, and the token is revoked all the same.
+    let (rc, rv) = n.json(&["token", "revoke", &secret]);
+    assert_eq!((rc, rv["revoked"].clone()), (0, json!(true)), "{rv}");
+    assert_eq!(rv["id"], sha_hex(secret.as_bytes())[..12], "{rv}");
+    let (st, v) = call(&n, &secret, "GET", "/v1/apps/blog", b"");
+    assert_eq!((st, kind(&v)), (401, "token_revoked"), "{v}");
+    assert_nowhere(&n, &secret, &[&rv.to_string()]);
+    // An argument that is neither a token nor an id fails here, with no request.
+    let logged = n.log_text().lines().count();
+    let (rc, v) = n.json(&["token", "revoke", "not/an id"]);
+    assert_eq!((rc, kind(&v)), (1, "no_such_token"), "{v}");
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(n.log_text().lines().count(), logged, "a request was sent");
+
     let ps = String::from_utf8(n.cli(&["--json", "ps"]).stdout).unwrap();
     let (_, metrics) = call_raw(&n, &n.token, "GET", "/metrics", &[], b"");
     let metrics = String::from_utf8(metrics).unwrap();
     for t in [&secret, &second] {
         assert_nowhere(&n, t, &[&listed, &ps, &metrics, &text_list]);
     }
+}
+
+#[test]
+fn token_create_out_writes_a_private_file_and_prints_no_token() {
+    use std::os::unix::fs::PermissionsExt;
+    let s = scratch("tok-out");
+    let n = Node::start(&s.0, "n", vec![], vec![]);
+    let path = n.root.join("blog.token");
+    let p = path.to_str().unwrap();
+
+    let o = n.cli(&["token", "create", "blog", "--out", p]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let secret = std::fs::read_to_string(&path).unwrap().trim().to_string();
+    assert!(secret.starts_with("spt_") && secret.len() == 68, "{secret}");
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let shown = format!(
+        "{}{}",
+        String::from_utf8_lossy(&o.stdout),
+        String::from_utf8_lossy(&o.stderr)
+    );
+    assert!(
+        shown.contains(p) && !shown.contains(&secret[4..]),
+        "{shown}"
+    );
+    assert_eq!(deploy_as(&n, &secret, "blog", "blog").0, 200);
+
+    // A path that exists is never written over, and no token is made for it.
+    let (rc, v) = n.json(&["token", "create", "blog", "--out", p]);
+    assert_eq!((rc, kind(&v)), (1, "write_failed"), "{v}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap().trim(), secret);
+    let (_, list) = n.json(&["token", "list"]);
+    assert_eq!(list["tokens"].as_array().unwrap().len(), 1, "{list}");
+
+    // A request that fails leaves no empty file behind.
+    let other = n.root.join("other.token");
+    let o = n
+        .cli_cmd(&["token", "create", "blog", "--expires", "soon"])
+        .args(["--out", other.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!o.status.success());
+    assert!(!other.exists());
+
+    let json_path = n.root.join("json.token");
+    let (rc, v) = n.json(&[
+        "token",
+        "create",
+        "blog",
+        "--out",
+        json_path.to_str().unwrap(),
+    ]);
+    assert_eq!(rc, 0, "{v}");
+    assert!(v.get("token").is_none(), "{v}");
+    assert_eq!(v["file"], json_path.to_str().unwrap());
+    assert!(
+        std::fs::read_to_string(&json_path)
+            .unwrap()
+            .starts_with("spt_")
+    );
+}
+
+/// A deploy whose head has been sent and authenticated, and whose body has not.
+struct HeldDeploy {
+    stream: std::net::TcpStream,
+    body: Vec<u8>,
+}
+
+impl HeldDeploy {
+    /// Send only the request head, then wait until the server has authenticated the token (its
+    /// `last_used_at` is set), so the caller acts between authentication and the body.
+    fn open(n: &Node, secret: &str, id: &str, app: &str) -> HeldDeploy {
+        use std::io::Write as _;
+        let (manifest, wasm) = deploy_body(app);
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", n.admin)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(60)))
+            .unwrap();
+        let head = format!(
+            "PUT /v1/apps/{app} HTTP/1.1\r\nhost: 127.0.0.1:{}\r\nauthorization: Bearer {secret}\r\nx-spared-manifest: {manifest}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            n.admin,
+            wasm.len()
+        );
+        stream.write_all(head.as_bytes()).unwrap();
+        stream.flush().unwrap();
+        wait_for(|| {
+            let (_, list) = call(n, &n.token, "GET", &format!("/v1/tokens?app={app}"), b"");
+            list["tokens"]
+                .as_array()
+                .and_then(|t| t.iter().find(|t| t["id"] == id))
+                .is_some_and(|t| t["last_used_at"].is_string())
+        });
+        HeldDeploy { stream, body: wasm }
+    }
+
+    /// Send the body and read the answer.
+    fn finish(mut self) -> (u16, Value) {
+        use std::io::{Read as _, Write as _};
+        self.stream.write_all(&self.body).unwrap();
+        let mut out = vec![];
+        let _ = self.stream.read_to_end(&mut out);
+        let split = out
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .expect("no response head");
+        let head = String::from_utf8_lossy(&out[..split]).to_string();
+        let status = head
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        (
+            status,
+            serde_json::from_slice(&out[split + 4..]).unwrap_or(Value::Null),
+        )
+    }
+}
+
+fn revoke_as_admin(n: &Node, id: &str) {
+    let (st, v) = call(n, &n.token, "DELETE", &format!("/v1/tokens/{id}"), b"");
+    assert_eq!(st, 200, "{v}");
+}
+
+#[test]
+fn a_deploy_in_flight_when_its_token_is_revoked_changes_nothing() {
+    let s = scratch("tok-inflight");
+    let n = Node::start(&s.0, "n", vec![], vec![]);
+    let (secret, minted) = mint(&n, json!({"app": "late"}));
+    let id = minted["id"].as_str().unwrap().to_string();
+    let held = HeldDeploy::open(&n, &secret, &id, "late");
+    revoke_as_admin(&n, &id);
+    let (st, v) = held.finish();
+    assert_eq!((st, kind(&v)), (401, "token_revoked"), "{v}");
+    assert!(!n.data.join("apps/late").exists());
+    let (st, v) = call(&n, &n.token, "GET", "/v1/apps/late", b"");
+    assert_eq!((st, kind(&v)), (404, "no_such_app"), "{v}");
+}
+
+#[test]
+fn a_redeploy_in_flight_when_its_token_is_revoked_keeps_the_old_code() {
+    let s = scratch("tok-inflight-redeploy");
+    let n = Node::start(&s.0, "n", vec![], vec![]);
+    n.deploy("kept");
+    let (secret, minted) = mint(&n, json!({"app": "kept"}));
+    let id = minted["id"].as_str().unwrap().to_string();
+    let held = HeldDeploy::open(&n, &secret, &id, "kept");
+    revoke_as_admin(&n, &id);
+    let (st, v) = held.finish();
+    assert_eq!((st, kind(&v)), (401, "token_revoked"), "{v}");
+    let (st, v) = call(&n, &n.token, "GET", "/v1/apps/kept", b"");
+    assert_eq!((st, v["version"].clone()), (200, json!(1)), "{v}");
+}
+
+#[test]
+fn a_deploy_in_flight_does_not_bring_back_an_app_removed_since_the_token_was_minted() {
+    let s = scratch("tok-inflight-rm");
+    let n = Node::start(&s.0, "n", vec![], vec![]);
+    let (secret, minted) = mint(&n, json!({"app": "gone"}));
+    let id = minted["id"].as_str().unwrap().to_string();
+    let held = HeldDeploy::open(&n, &secret, &id, "gone");
+    n.deploy("gone");
+    let (st, v) = call(&n, &n.token, "DELETE", "/v1/apps/gone", b"");
+    assert_eq!(st, 200, "{v}");
+    let (st, v) = held.finish();
+    assert_eq!((st, kind(&v)), (401, "token_revoked"), "{v}");
+    assert!(!n.data.join("apps/gone").exists());
+    let (st, _) = call(&n, &n.token, "GET", "/v1/apps/gone", b"");
+    assert_eq!(st, 404);
 }
 
 #[test]
@@ -541,18 +726,21 @@ fn wrong_tokens_are_limited_per_address() {
         assert_eq!(call(&n, "", "GET", "/v1/apps", b"").0, 401);
     }
     assert_eq!(call(&n, &n.token, "GET", "/v1/apps", b"").0, 200);
+    let (app_token, _) = mint(&n, json!({"app": "blog"}));
+    assert_eq!(call(&n, &app_token, "GET", "/v1/apps", b"").0, 200);
     for i in 0..30 {
         let guess = format!("spt_{:064x}", i);
         let (st, v) = call(&n, &guess, "GET", "/v1/apps", b"");
         assert_eq!((st, kind(&v)), (401, "unauthorized"), "guess {i}");
     }
-    // Shut out now, the right token included, so a guess learns nothing.
+    // Shut out now: an app token, even a valid one, and an unknown token are refused, so a
+    // guess learns nothing. The admin token always works, so the operator is never locked out.
     let (st, head, body) = http_full(
         n.admin,
         "GET",
         "/v1/apps",
         &format!("127.0.0.1:{}", n.admin),
-        &[("authorization", &format!("Bearer {}", n.token))],
+        &[("authorization", &format!("Bearer {}", app_token))],
         b"",
     );
     let v: Value = serde_json::from_slice(&body).unwrap();
@@ -560,6 +748,8 @@ fn wrong_tokens_are_limited_per_address() {
     assert!(head.contains("retry-after: "), "{head}");
     let (st, v) = call(&n, "spt_x", "GET", "/v1/apps", b"");
     assert_eq!((st, kind(&v)), (429, "auth_rate_limited"));
+    let (st, v) = call(&n, &n.token, "GET", "/v1/apps", b"");
+    assert_eq!(st, 200, "{v}");
     // The public listener is not affected.
     assert_eq!(http(n.public, "GET", "/healthz", "", &[], b"").0, 200);
 }

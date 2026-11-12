@@ -118,6 +118,11 @@ pub fn looks_like_token(s: &str) -> bool {
     })
 }
 
+/// The id of a token: the first 12 hex digits of its SHA-256.
+pub fn id_of(secret: &str) -> String {
+    hex(&Sha256::digest(secret.as_bytes()))[..ID_HEX].to_string()
+}
+
 /// A token id as lists print it: 12 lowercase hex digits.
 pub fn valid_id(s: &str) -> bool {
     s.len() == ID_HEX
@@ -345,6 +350,10 @@ impl Store {
         }
     }
 
+    pub fn get(&self, id: &str) -> Option<Record> {
+        self.records.iter().find(|r| r.id == id).cloned()
+    }
+
     pub fn list(&self, app: Option<&str>) -> Vec<Record> {
         self.records
             .iter()
@@ -439,8 +448,9 @@ impl Store {
 }
 
 /// Failed authentications per source address. After `MAX_FAILURES` wrong tokens within a window,
-/// every request from that address that carries a token is refused until the window ends, the
-/// right token included, so guessing learns nothing while it is shut out.
+/// every app token and unknown token from that address is refused until the window ends, a
+/// right one included, so guessing learns nothing while it is shut out. The admin token is
+/// checked before this limit and is never refused by it.
 pub struct AuthFailures {
     by_addr: Mutex<HashMap<IpAddr, (Instant, u32)>>,
 }

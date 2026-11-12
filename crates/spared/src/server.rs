@@ -740,7 +740,26 @@ enum Creator {
     /// An app token made while the name was free, which has not created its app yet.
     Token(String),
     /// An app token that may only redeploy its app.
-    No,
+    No(String),
+}
+
+impl Creator {
+    /// The app token a deploy was authenticated with.
+    fn token_id(&self) -> Option<&str> {
+        match self {
+            Creator::Admin => None,
+            Creator::Token(id) | Creator::No(id) => Some(id),
+        }
+    }
+}
+
+fn token_revoked(id: &str) -> DeployError {
+    DeployError::new(
+        StatusCode::UNAUTHORIZED,
+        "token_revoked",
+        format!("app token {id} was revoked"),
+        "ask the operator for a new token (`spared token create <app>` with the admin token)",
+    )
 }
 
 fn cannot_create(name: &str) -> DeployError {
@@ -2066,7 +2085,7 @@ impl Server {
             return e.into_resp();
         }
         // Before the body is read and compiled; `install` checks again under the name lock.
-        if matches!(creator, Creator::No) && !self.apps.read().unwrap().contains_key(name) {
+        if matches!(creator, Creator::No(_)) && !self.apps.read().unwrap().contains_key(name) {
             return cannot_create(name).into_resp();
         }
         let mtoml = req
@@ -2143,6 +2162,31 @@ impl Server {
             }
         })
         .await
+    }
+
+    /// The token that authenticated a deploy, asked again under the name lock: the body can take
+    /// minutes, and a token revoked, expired or spent since authentication changes nothing.
+    fn check_token_still_allows(
+        &self,
+        id: &str,
+        name: &str,
+        creating: bool,
+    ) -> std::result::Result<(), DeployError> {
+        let rec = self.tokens.lock().unwrap().get(id);
+        let Some(rec) = rec else {
+            return Err(token_revoked(id));
+        };
+        match rec.status(unix_now()) {
+            "revoked" => Err(token_revoked(id)),
+            "expired" => Err(DeployError::new(
+                StatusCode::UNAUTHORIZED,
+                "token_expired",
+                format!("app token {id} has expired"),
+                "ask the operator for a new token (`spared token create <app>` with the admin token)",
+            )),
+            _ if creating && !rec.may_create => Err(cannot_create(name)),
+            _ => Ok(()),
+        }
     }
 
     async fn install(
@@ -2261,7 +2305,10 @@ impl Server {
         if !frozen_for_move && prev.as_ref().is_some_and(|a| a.is_frozen()) {
             return Err(deploy_refused_frozen(name));
         }
-        if prev.is_none() && matches!(creator, Creator::No) {
+        if let Some(id) = creator.token_id() {
+            self.check_token_still_allows(id, name, prev.is_none())?;
+        }
+        if prev.is_none() && matches!(creator, Creator::No(_)) {
             return Err(cannot_create(name));
         }
         let version = prev.as_ref().map(|a| a.version + 1).unwrap_or(1);
@@ -2427,6 +2474,15 @@ impl Server {
         let Some(a) = self.apps.write().unwrap().remove(name) else {
             return no_such_app(name);
         };
+        // The app is gone, and so is every token for it: a token never outlives its app to
+        // create a new one under the same name, also when the directory cannot be moved.
+        let (revoked, failed) = self.tokens.lock().unwrap().revoke_app(name, unix_now());
+        let revoke_failed = failed.is_some();
+        if let Some(e) = failed {
+            eprintln!(
+                "delete {name}: its tokens are revoked in this process, but writing that failed ({e}); they would work again after a restart. Revoke them with `spared token revoke <id>`"
+            );
+        }
         let mut g = a.live.lock().await;
         if g.take().is_some() {
             self.metrics.eviction(Evicted::Deploy);
@@ -2450,16 +2506,10 @@ impl Server {
         let removed = tokio::task::spawn_blocking(move || backup::remove_tree(&doomed)).await;
         self.release_component(&a.shared.hash);
         let mut out = serde_json::json!({"deleted": name});
-        // The app is gone, and so is every token for it: a token never outlives its app to
-        // create a new one under the same name.
-        let (revoked, failed) = self.tokens.lock().unwrap().revoke_app(name, unix_now());
         if revoked > 0 {
             out["tokens_revoked"] = revoked.into();
         }
-        if let Some(e) = failed {
-            eprintln!(
-                "delete {name}: its tokens are revoked in this process, but writing that failed ({e}); they would work again after a restart. Revoke them with `spared token revoke <id>`"
-            );
+        if revoke_failed {
             out["tokens_revoke_failed"] = true.into();
         }
         if let Err(e) = crate::remote::clear_restore_record(&self.cfg.data_dir, name) {
@@ -3359,6 +3409,9 @@ impl Server {
         if given.is_empty() {
             return Err(unauthorized());
         }
+        if ct_eq(given.as_bytes(), self.cfg.admin_token.as_bytes()) {
+            return Ok(Caller::Admin);
+        }
         let now = Instant::now();
         if let Some(secs) = self.auth_failures.retry_after(peer, now) {
             let mut r = err_resp(
@@ -3367,14 +3420,11 @@ impl Server {
                 format!(
                     "too many wrong tokens from {peer}; every token from it is refused for {secs} s"
                 ),
-                "wait for the Retry-After seconds, then send the right token; find what keeps sending a wrong one (a script with an old token)",
+                "wait for the Retry-After seconds, or use the admin token, which is never limited; find what keeps sending a wrong token (a script with an old token)",
             );
             r.headers_mut()
                 .insert("retry-after", secs.to_string().parse().unwrap());
             return Err(r);
-        }
-        if ct_eq(given.as_bytes(), self.cfg.admin_token.as_bytes()) {
-            return Ok(Caller::Admin);
         }
         let auth = self.tokens.lock().unwrap().authenticate(given, unix_now());
         match auth {
@@ -3544,7 +3594,7 @@ impl Server {
                 let creator = match &caller {
                     Caller::Admin => Creator::Admin,
                     Caller::App(p) if p.may_create => Creator::Token(p.id.clone()),
-                    Caller::App(_) => Creator::No,
+                    Caller::App(p) => Creator::No(p.id.clone()),
                 };
                 self.deploy(name, req, creator).await
             }

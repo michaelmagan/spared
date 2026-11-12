@@ -224,6 +224,10 @@ pub enum TokenCmd {
         /// A label shown by `spared token list`, such as ci or user-42.
         #[arg(long, value_name = "LABEL")]
         name: Option<String>,
+        /// Write the token to this new file (mode 0600) instead of printing it. An existing
+        /// file is never written over.
+        #[arg(long, value_name = "PATH")]
+        out: Option<PathBuf>,
         /// Admin URL of the server to talk to. Default: $SPARED_URL, then http://127.0.0.1:8081.
         #[arg(long, value_name = "URL")]
         server: Option<String>,
@@ -235,7 +239,8 @@ pub enum TokenCmd {
         #[arg(long, value_name = "URL")]
         server: Option<String>,
     },
-    /// Revoke a token by its id; it stops working at once.
+    /// Revoke a token by its id; it stops working at once. A whole token is accepted too and is
+    /// turned into its id here, so the secret is never sent.
     Revoke {
         id: String,
         /// Admin URL of the server to talk to. Default: $SPARED_URL, then http://127.0.0.1:8081.
@@ -341,8 +346,9 @@ async fn dispatch(cmd: UserCmd, json: bool) -> R<()> {
             scope,
             expires,
             name,
+            out,
             server,
-        }) => cmd_token_create(&app, scope, expires, name, server, json).await,
+        }) => cmd_token_create(&app, scope, expires, name, out, server, json).await,
         UserCmd::Token(TokenCmd::List { app, server }) => cmd_token_list(app, server, json).await,
         UserCmd::Token(TokenCmd::Revoke { id, server }) => {
             cmd_token_revoke(&id, server, json).await
@@ -1960,22 +1966,26 @@ async fn cmd_remote_backups(name: &str, server: Option<String>, json: bool) -> R
     Ok(())
 }
 
+/// Create `path` as a new file with mode 0600; an existing file is never opened.
+fn open_new_private(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+}
+
 fn cmd_backup_key_new(out: Option<PathBuf>, json: bool) -> R<()> {
     let key = crate::remote::seal::BackupKey::generate()
         .map_err(|e| err("random_failed", e.to_string(), "report this"))?;
     let note = "keep a copy of this key off this machine (a password manager, a secret store): the encrypted backups cannot be restored without it, and a key that lives only on the server's disk is lost with that disk";
     if let Some(p) = &out {
         use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let written = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(p)
-            .and_then(|mut f| {
-                f.write_all(format!("{}\n", key.to_hex()).as_bytes())?;
-                f.sync_all()
-            });
+        let written = open_new_private(p).and_then(|mut f| {
+            f.write_all(format!("{}\n", key.to_hex()).as_bytes())?;
+            f.sync_all()
+        });
         if let Err(e) = written {
             return Err(err(
                 "write_failed",
@@ -2182,6 +2192,7 @@ async fn cmd_token_create(
     scope: Option<String>,
     expires: Option<String>,
     label: Option<String>,
+    out: Option<PathBuf>,
     server: Option<String>,
     json: bool,
 ) -> R<()> {
@@ -2203,7 +2214,18 @@ async fn cmd_token_create(
     if let Some(l) = label {
         body["label"] = l.into();
     }
-    let r = admin(
+    // The file is created before the token is, so a path that cannot be used mints nothing.
+    let mut file = match &out {
+        Some(p) => Some(open_new_private(p).map_err(|e| {
+            err(
+                "write_failed",
+                format!("cannot create {}: {e}", p.display()),
+                "pick a path that does not exist yet. A token is never written over another file",
+            )
+        })?),
+        None => None,
+    };
+    let sent = admin(
         &server_url(server),
         &token()?,
         "POST",
@@ -2211,14 +2233,49 @@ async fn cmd_token_create(
         &[("content-type", "application/json".to_string())],
         Bytes::from(body.to_string()),
     )
-    .await?;
-    let v = json_body(&r)?;
+    .await
+    .and_then(|r| json_body(&r));
+    let mut v = match sent {
+        Ok(v) => v,
+        Err(e) => {
+            if let Some(p) = &out {
+                let _ = std::fs::remove_file(p);
+            }
+            return Err(e);
+        }
+    };
+    if let (Some(f), Some(p)) = (file.as_mut(), &out) {
+        use std::io::Write;
+        let written = f
+            .write_all(format!("{}\n", v["token"].as_str().unwrap_or("")).as_bytes())
+            .and_then(|_| f.sync_all());
+        if let Err(e) = written {
+            return Err(err(
+                "write_failed",
+                format!(
+                    "token {} was made but cannot be written to {}: {e}",
+                    v["id"].as_str().unwrap_or(""),
+                    p.display()
+                ),
+                "revoke it with `spared token revoke <id>` and make another",
+            ));
+        }
+        if let Some(o) = v.as_object_mut() {
+            o.remove("token");
+        }
+        v["file"] = p.display().to_string().into();
+    }
     if json {
         out_json(v);
         return Ok(());
     }
-    // The token alone on stdout, so `spared token create my-app > my-app.token` keeps only it.
-    println!("{}", v["token"].as_str().unwrap_or(""));
+    match &out {
+        // `--out` keeps the token off stdout, so it never reaches a terminal log or a pipe.
+        Some(p) => println!("wrote the token to {} (mode 0600)", p.display()),
+        // The token alone on stdout. Redirecting it makes a file the umask decides the mode of:
+        // use `--out`, or `(umask 077; spared token create my-app > FILE)`.
+        None => println!("{}", v["token"].as_str().unwrap_or("")),
+    }
     eprintln!(
         "token {} for app {} (scopes: {}; expires: {})",
         v["id"].as_str().unwrap_or(""),
@@ -2294,6 +2351,19 @@ async fn cmd_token_list(app: Option<String>, server: Option<String>, json: bool)
 }
 
 async fn cmd_token_revoke(id: &str, server: Option<String>, json: bool) -> R<()> {
+    // A token pasted for its id would go into the URL, and from there into the access log.
+    let id = &if crate::tokens::looks_like_token(id) {
+        crate::tokens::id_of(id)
+    } else {
+        id.to_string()
+    };
+    if !crate::tokens::valid_id(id) {
+        return Err(err(
+            "no_such_token",
+            "that is not a token id: an id is 12 lowercase hex digits".to_string(),
+            "list tokens with `spared token list` and pass an id from it",
+        ));
+    }
     let r = admin(
         &server_url(server),
         &token()?,
