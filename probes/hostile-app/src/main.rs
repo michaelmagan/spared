@@ -1,4 +1,4 @@
-//! Test guest for scripts/server-test.py: routes that misbehave on purpose.
+//! Test guest for scripts/server-test.py: routes that misbehave on purpose, and one that fetches.
 use std::cell::RefCell;
 use std::fs::{File, ReadDir};
 use std::hint::black_box;
@@ -101,6 +101,31 @@ async fn main(req: Request<Body>) -> Result<Response<Body>, Error> {
             }
             let held = FILES.with(|v| v.borrow().len());
             format!("held {held} err={err}\n").into_bytes()
+        }
+        // n GETs of http://example.com/ (granted in the test manifest); stops at the first error
+        "/fetch" => {
+            let n = param(&req, "n").unwrap_or(1);
+            let (mut ok, mut bytes, mut err) = (0, 0, String::new());
+            for _ in 0..n {
+                let out = Request::get("http://example.com/").body(Body::empty()).expect("valid request");
+                match wstd::http::Client::new().send(out).await {
+                    Ok(mut resp) => match resp.body_mut().contents().await {
+                        Ok(b) => {
+                            ok += 1;
+                            bytes += b.len();
+                        }
+                        Err(e) => {
+                            err = format!("body: {e:?}");
+                            break;
+                        }
+                    },
+                    Err(e) => {
+                        err = format!("send: {e:?}");
+                        break;
+                    }
+                }
+            }
+            format!("fetched {ok} bytes={bytes} err={err}\n").into_bytes()
         }
         "/sleep" => {
             wstd::task::sleep(std::time::Duration::from_millis(param(&req, "ms").unwrap_or(100) as u64).into()).await;
