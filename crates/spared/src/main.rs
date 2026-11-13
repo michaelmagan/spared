@@ -214,7 +214,27 @@ enum Cmd {
 
 const MIN_SERVER_WORKERS: usize = 4;
 
+/// Set to `1` to let this process capture host backtraces as `RUST_BACKTRACE` and
+/// `RUST_LIB_BACKTRACE` ask. Without it both are set to `0` before anything else runs.
+const ALLOW_HOST_BACKTRACE: &str = "SPARED_ALLOW_HOST_BACKTRACE";
+
+/// Turn host backtraces off unless the operator asked for them with [`ALLOW_HOST_BACKTRACE`]. A
+/// backtrace captured in a host error can reach a guest through an error's text, and it names host
+/// functions, and file paths in a build with debug info. Child processes (cargo builds, the compile
+/// process) inherit the setting.
+fn host_backtraces_off_unless_allowed() {
+    if std::env::var_os(ALLOW_HOST_BACKTRACE).is_some_and(|v| v == "1") {
+        return;
+    }
+    // SAFETY: called first thing in `main`, before any other thread exists.
+    unsafe {
+        std::env::set_var("RUST_BACKTRACE", "0");
+        std::env::set_var("RUST_LIB_BACKTRACE", "0");
+    }
+}
+
 fn main() -> Result<()> {
+    host_backtraces_off_unless_allowed();
     if sqlite_cache::is_wrapper_invocation() {
         sqlite_cache::wrapper_main();
     }

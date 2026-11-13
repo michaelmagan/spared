@@ -5,7 +5,7 @@ use std::fs::File;
 use std::io::Write;
 use wasip2::filesystem::preopens::get_directories;
 use wasip2::filesystem::types::{Descriptor, DescriptorFlags, OpenFlags, PathFlags};
-use wasip2::io::streams::{InputStream, OutputStream};
+use wasip2::io::streams::{InputStream, OutputStream, StreamError};
 
 fn arg(i: usize) -> usize {
     std::env::args().nth(i).and_then(|v| v.parse().ok()).unwrap_or(1)
@@ -150,6 +150,39 @@ fn main() {
                 }
             }
             println!("HELD {count} {err}");
+            return;
+        }
+        // write mb MB through one stream until the data cap refuses it, then print the debug
+        // text the host gives for that error, on one line
+        "debug-text" => {
+            let root = root();
+            let fd = match open(&root, "dbg") {
+                Ok(fd) => fd,
+                Err(e) => {
+                    println!("NOERR {e}");
+                    return;
+                }
+            };
+            let Ok(st) = fd.write_via_stream(0) else {
+                println!("NOERR stream");
+                return;
+            };
+            let chunk = vec![0x5au8; 4096];
+            for _ in 0..(arg(2) << 20) / 4096 {
+                match st.blocking_write_and_flush(&chunk) {
+                    Ok(()) => count += 1,
+                    Err(StreamError::LastOperationFailed(e)) => {
+                        let text = e.to_debug_string();
+                        println!("DEBUG {}", text.replace('\n', "\\n"));
+                        return;
+                    }
+                    Err(StreamError::Closed) => {
+                        println!("NOERR closed");
+                        return;
+                    }
+                }
+            }
+            println!("NOFAIL {count}");
             return;
         }
         _ => {
