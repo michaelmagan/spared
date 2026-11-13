@@ -717,6 +717,86 @@ fn an_app_token_deploys_only_its_own_app() {
     assert_eq!(rc, 0, "{v}");
 }
 
+#[test]
+fn an_app_token_thaws_only_a_freeze_it_made() {
+    let s = scratch("tok-freeze-kinds");
+    let mut n = Node::start(&s.0, "n", vec![], vec![]);
+    n.deploy("mine");
+    let (t, _) = mint(&n, json!({"app": "mine", "scopes": ["freeze", "read"]}));
+    let freeze_of = |n: &Node| {
+        let (st, v) = call(n, &n.token, "GET", "/v1/apps/mine", b"");
+        assert_eq!(st, 200, "{v}");
+        v["freeze"]["kind"].as_str().map(str::to_string)
+    };
+
+    // Its own freeze: kind app, and it thaws it.
+    let (st, v) = call(&n, &t, "POST", "/v1/apps/mine/freeze", b"");
+    assert_eq!(
+        (st, v["freeze"]["kind"].clone()),
+        (200, json!("app")),
+        "{v}"
+    );
+    let (st, v) = call(&n, &t, "POST", "/v1/apps/mine/thaw", b"");
+    assert_eq!((st, v["thawed"].clone()), (200, json!(true)), "{v}");
+    assert_eq!(freeze_of(&n), None);
+
+    // It cannot name an operator's kind.
+    for kind_sent in ["move", "manual", "remote_superseded", "app2"] {
+        let body = json!({"kind": kind_sent}).to_string();
+        let (st, v) = call(&n, &t, "POST", "/v1/apps/mine/freeze", body.as_bytes());
+        assert!([400, 403].contains(&st), "kind {kind_sent}: {st} {v}");
+        assert_eq!(freeze_of(&n), None, "kind {kind_sent}");
+    }
+
+    // An operator's freeze, of each kind, stays until the admin token lifts it.
+    for (how, kind_want) in [
+        ("manual", "manual"),
+        ("move", "move"),
+        ("superseded", "remote_superseded"),
+        ("damaged", "unknown"),
+    ] {
+        match how {
+            "manual" => assert_eq!(
+                call(&n, &n.token, "POST", "/v1/apps/mine/freeze", b"").0,
+                200
+            ),
+            "move" => {
+                let body = br#"{"kind":"move","reason":"moving"}"#;
+                assert_eq!(
+                    call(&n, &n.token, "POST", "/v1/apps/mine/freeze", body).0,
+                    200
+                );
+            }
+            _ => {
+                let marker = if how == "damaged" {
+                    "not json".to_string()
+                } else {
+                    json!({"kind": "remote_superseded", "reason": "newer epoch", "at": "x"})
+                        .to_string()
+                };
+                n.kill9();
+                std::fs::write(n.data.join("apps/mine/frozen"), marker).unwrap();
+                n.spawn();
+            }
+        }
+        assert_eq!(freeze_of(&n).as_deref(), Some(kind_want), "{how}");
+        for body in [&b""[..], br#"{"if_kind":"move"}"#, br#"{"if_kind":"app"}"#] {
+            let (st, v) = call(&n, &t, "POST", "/v1/apps/mine/thaw", body);
+            assert!(
+                st == 403 && kind(&v) == "wrong_scope" || v["thawed"] == false,
+                "{how}: a token thawed it: {st} {v}"
+            );
+            assert_eq!(freeze_of(&n).as_deref(), Some(kind_want), "{how}");
+        }
+        // Its own freeze on top does not take the operator's over.
+        let (st, v) = call(&n, &t, "POST", "/v1/apps/mine/freeze", b"");
+        assert_eq!(st, 200, "{v}");
+        assert_eq!(freeze_of(&n).as_deref(), Some(kind_want), "{how}");
+        let (st, v) = call(&n, &n.token, "POST", "/v1/apps/mine/thaw", b"");
+        assert_eq!((st, v["thawed"].clone()), (200, json!(true)), "{how}: {v}");
+    }
+}
+
 /// Whether `text` holds any 16 hex digits in a row of `hexpart`: an echo cut short still counts.
 fn leaks(text: &str, hexpart: &str) -> bool {
     (0..=hexpart.len() - 16).any(|i| text.contains(&hexpart[i..i + 16]))

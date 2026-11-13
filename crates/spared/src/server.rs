@@ -951,9 +951,12 @@ fn sync_dir(p: &Path) {
 
 /// The marker in an app directory that keeps the app frozen across restarts and redeploys.
 const FROZEN_MARKER: &str = "frozen";
-/// What can freeze an app, as the marker records it: `spared freeze`, `spared move`, or an upload
-/// that found a newer epoch in the bucket.
-const FREEZE_KINDS: [&str; 3] = ["manual", "move", "remote_superseded"];
+/// The kinds of freeze the admin token may ask for: `spared freeze` and `spared move`. A marker can
+/// also say `remote_superseded` (an upload found a newer epoch in the bucket), `app` (an app token
+/// froze its own app) or `unknown` (the marker could not be read).
+const ADMIN_FREEZE_KINDS: [&str; 2] = ["manual", "move"];
+/// The only kind of freeze an app token makes, and the only one it may lift.
+const APP_FREEZE_KIND: &str = "app";
 /// What a client of a frozen app is told to wait before it tries again, in seconds.
 const FROZEN_RETRY_AFTER: &str = "30";
 
@@ -2709,9 +2712,13 @@ impl Server {
 
     /// Freeze `name`: under its name lock and its instance lock, drop the instance, write the
     /// marker and set the flag, so no request runs after this returns and none runs after a
-    /// restart. An app that is already frozen keeps its freeze when `kind` is `move` (a move never
-    /// takes over a freeze something else made, so it never thaws one) or when that freeze came
-    /// from a newer epoch in the bucket; otherwise the new freeze replaces it.
+    /// restart. An app that is already frozen keeps its freeze when `kind` is `app` (an app token
+    /// never replaces a freeze, so it never gets one it may lift), when `kind` is `move` (a move
+    /// never takes over a freeze something else made, so it never thaws one) or when that freeze
+    /// came from a newer epoch in the bucket; otherwise the new freeze replaces it. One exception:
+    /// a move over an `app` freeze turns it into a `move` freeze, so the app token cannot lift it
+    /// while the app may be live elsewhere, and reports it as already frozen, so a failed move
+    /// leaves it frozen.
     async fn freeze_app(
         &self,
         name: &str,
@@ -2722,12 +2729,20 @@ impl Server {
         let lock = self.name_lock(name);
         let _serial = lock.lock().await;
         let (app, _instance) = self.lock_idle(name).await?;
+        let mut already = false;
         if let Some(info) = app.freeze_info() {
-            if kind == "move" || info["kind"] == kind || info["kind"] == "remote_superseded" {
+            let move_over_app = kind == "move" && info["kind"] == APP_FREEZE_KIND;
+            if !move_over_app
+                && (kind == APP_FREEZE_KIND
+                    || kind == "move"
+                    || info["kind"] == kind
+                    || info["kind"] == "remote_superseded")
+            {
                 return Ok(serde_json::json!({
                     "name": name, "frozen": true, "already_frozen": true, "freeze": info,
                 }));
             }
+            already = move_over_app;
         }
         let info = serde_json::json!({"kind": kind, "reason": reason, "at": now_text()});
         write_freeze_marker(&app.dir, &info).map_err(|e| {
@@ -2736,16 +2751,19 @@ impl Server {
         app.set_freeze(Some(info.clone()));
         eprintln!("app {name}: frozen ({kind}): {reason}");
         Ok(serde_json::json!({
-            "name": name, "frozen": true, "already_frozen": false, "freeze": info,
+            "name": name, "frozen": true, "already_frozen": already, "freeze": info,
         }))
     }
 
     /// Thaw `name`: remove the marker and clear the flag. With `only_kind`, only a freeze of
-    /// that kind is lifted (the move's own clean-up), and any other is reported and kept.
+    /// that kind is lifted (the move's own clean-up), and any other is reported and kept. For an
+    /// app token (`by_token`) only an `app` freeze is lifted: any other is the operator's, and the
+    /// answer is 403 `wrong_scope`.
     async fn thaw_app(
         &self,
         name: &str,
         only_kind: Option<&str>,
+        by_token: bool,
     ) -> std::result::Result<serde_json::Value, Resp> {
         check_name(name).map_err(DeployError::into_resp)?;
         let lock = self.name_lock(name);
@@ -2754,6 +2772,17 @@ impl Server {
         let Some(info) = app.freeze_info() else {
             return Ok(serde_json::json!({"name": name, "frozen": false, "was_frozen": false}));
         };
+        if by_token && info["kind"] != APP_FREEZE_KIND {
+            return Err(err_resp(
+                StatusCode::FORBIDDEN,
+                "wrong_scope",
+                format!(
+                    "app '{name}' is frozen by the operator or the server (kind {}), and an app token lifts only a freeze an app token made (kind {APP_FREEZE_KIND})",
+                    info["kind"].as_str().unwrap_or("unknown")
+                ),
+                &format!("ask the operator to run `spared thaw {name}` with the admin token"),
+            ));
+        }
         if only_kind.is_some_and(|k| info["kind"] != k) {
             return Ok(serde_json::json!({
                 "name": name, "frozen": true, "thawed": false, "freeze": info,
@@ -2773,14 +2802,28 @@ impl Server {
         Ok(v)
     }
 
-    async fn freeze_route(&self, name: &str, req: Request<Incoming>) -> Resp {
+    /// `POST /v1/apps/{name}/freeze`. The admin token freezes with kind `manual` (the default)
+    /// or `move`. An app token always freezes with kind `app`, and naming any other kind is 403.
+    async fn freeze_route(&self, name: &str, req: Request<Incoming>, by_token: bool) -> Resp {
         let usage = r#"send nothing, or {"reason":"<text>"}"#;
         let body = match self.small_json_body(req, usage).await {
             Ok(b) => b,
             Err(r) => return r,
         };
         let reason = body["reason"].as_str().unwrap_or("frozen by spared freeze");
-        let kind = body["kind"].as_str().unwrap_or("manual");
+        let kind = if by_token {
+            if !(body["kind"].is_null() || body["kind"] == APP_FREEZE_KIND) {
+                return err_resp(
+                    StatusCode::FORBIDDEN,
+                    "wrong_scope",
+                    format!("an app token freezes with kind {APP_FREEZE_KIND} only"),
+                    "leave kind out. Only the admin token freezes for a move (spared move)",
+                );
+            }
+            APP_FREEZE_KIND
+        } else {
+            body["kind"].as_str().unwrap_or("manual")
+        };
         if reason.chars().count() > 200 || reason.chars().any(char::is_control) {
             return err_resp(
                 StatusCode::BAD_REQUEST,
@@ -2789,7 +2832,7 @@ impl Server {
                 usage,
             );
         }
-        if !FREEZE_KINDS.contains(&kind) || kind == "remote_superseded" {
+        if !by_token && !ADMIN_FREEZE_KINDS.contains(&kind) {
             return err_resp(
                 StatusCode::BAD_REQUEST,
                 "bad_request",
@@ -2806,13 +2849,16 @@ impl Server {
         }
     }
 
-    async fn thaw_route(&self, name: &str, req: Request<Incoming>) -> Resp {
+    async fn thaw_route(&self, name: &str, req: Request<Incoming>, by_token: bool) -> Resp {
         let usage = r#"send nothing, or {"if_kind":"move"}"#;
         let body = match self.small_json_body(req, usage).await {
             Ok(b) => b,
             Err(r) => return r,
         };
-        match self.thaw_app(name, body["if_kind"].as_str()).await {
+        match self
+            .thaw_app(name, body["if_kind"].as_str(), by_token)
+            .await
+        {
             Ok(v) => json_resp(StatusCode::OK, v),
             Err(r) => r,
         }
@@ -3965,11 +4011,13 @@ impl Server {
             (Method::GET, ["v1", "apps", name, "remote-backups"]) => self.list_remote(name).await,
             (Method::POST, ["v1", "apps", name, "freeze"]) => {
                 let name = name.to_string();
-                detached(async move { self.freeze_route(&name, req).await }).await
+                let by_token = matches!(caller, Caller::App(_));
+                detached(async move { self.freeze_route(&name, req, by_token).await }).await
             }
             (Method::POST, ["v1", "apps", name, "thaw"]) => {
                 let name = name.to_string();
-                detached(async move { self.thaw_route(&name, req).await }).await
+                let by_token = matches!(caller, Caller::App(_));
+                detached(async move { self.thaw_route(&name, req, by_token).await }).await
             }
             (Method::GET, ["v1", "apps", name, "code"]) => self.export_code(name).await,
             (Method::GET, ["v1", "apps", name, "limits"]) => self.show_limits(name).await,
