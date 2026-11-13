@@ -34,7 +34,7 @@ Only what [benchmarks](benchmarks.md) and [design.md](design.md#how-it-differs-f
 
 Tested:
 
-- A 50-case escape suite: 43 attacks, all denied, and 7 controls that had to succeed and did. It covers reading and writing other apps' files, symlinks, memory and CPU caps, raw sockets, and outbound requests to loopback, private, link-local and metadata addresses in many spellings.
+- A 51-case escape suite: 44 attacks, all denied, and 7 controls that had to succeed and did. It covers reading and writing other apps' files, symlinks, memory and CPU caps, raw sockets, and outbound requests to loopback, private, link-local and metadata addresses in many spellings.
 - A server integration test with a deliberately misbehaving app: admin API checks, limit refusals, a panic, oversized responses, a spinning app while other apps keep answering, redeploys under load, and stalled uploads.
 
 Not tested or not covered:

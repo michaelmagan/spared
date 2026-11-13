@@ -74,7 +74,7 @@ A refused deploy returns `ungranted_import`, naming the imports and the manifest
 
 At run time the app's filesystem is one preopened directory. Outbound HTTP passes a hook (`crates/spared/src/sandbox.rs`) that checks the host list and the per-request call budget, resolves the name, refuses any private, loopback, link-local, CGNAT, multicast, documentation, benchmarking or reserved address (including mapped IPv6 forms), then connects to the address it checked (`pinned_send.rs`). Without that last step the stock sender in wasmtime-wasi-http resolves the name a second time, which a short-TTL DNS name can exploit.
 
-Result: 50 escape cases, 0 failures: 43 attacks denied and 7 controls that succeeded (`bench/results/escape.json`; `escape-tuned.json` is an earlier run of 43 cases). The first run had 31 cases. The hardening pass added the rest: it refuses URLs with userinfo or a mismatched `Host`, compares hosts without case or trailing dot, and denies more embedded-IPv4 IPv6 forms.
+Result: 51 escape cases, 0 failures: 44 attacks denied and 7 controls that succeeded (`bench/results/escape.json`; `escape-tuned.json` is an earlier run of 43 cases). The first run had 31 cases. The hardening pass added the rest: it refuses URLs with userinfo or a mismatched `Host`, compares hosts without case or trailing dot, and denies more embedded-IPv4 IPv6 forms. The per-app limits added one: a granted fetch after the app's egress budget is spent.
 
 ## Wake and sleep
 
@@ -103,7 +103,7 @@ Density harness (`spared bench-density`, in a `--features lab` build): an in-pro
 - Request body 8 MB and response body 16 MB by default (`--max-request-mb`, `--max-response-mb`). The response body is read while the handler runs. Component 16 MB (`--max-component-mb`).
 - A trap, a CPU limit hit, a memory failure or a deadline drops the instance. The next request wakes a fresh one.
 
-The escape suite checked the memory cap (512 MB request under a 32 MB cap fails the allocation without killing the app) and the CPU cap (200 ms cap interrupted a loop at 253 ms in the stored run). The deadline and the outbound count have code but no test in the suite.
+The escape suite checked the memory cap (512 MB request under a 32 MB cap fails the allocation without killing the app) and the CPU cap (200 ms cap interrupted a loop at 255 ms in the stored run). The deadline and the outbound count have code but no test in the suite.
 
 ## WebAssembly features
 

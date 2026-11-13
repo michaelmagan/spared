@@ -6,7 +6,7 @@ This page tells you what spared keeps apart today, what it does not yet, and whe
 
 Each app runs in its own sandbox. Its SQLite database and its files live in its own data directory, and the app sees only that directory. It cannot read another app's data, the server's files or the machine's environment. SQLite runs inside the same sandbox as your code, so a bug in it stays in that app.
 
-An app has no network of its own. It cannot open sockets or look up names, and it can make HTTP requests only to the hosts its manifest lists. Each request is held to limits on memory, compute time, wall-clock time and outbound calls. An escape suite of 50 cases, 43 of them attacks, was denied in full.
+An app has no network of its own. It cannot open sockets or look up names, and it can make HTTP requests only to the hosts its manifest lists. Each request is held to limits on memory, compute time, wall-clock time and outbound calls. An escape suite of 51 cases, 44 of them attacks, was denied in full.
 
 The host also bounds each app over time, with numbers the operator sets per app (`spared limits`, [operating](operating.md#limit-each-app)): how much data and how many files it keeps, a share of one core's compute time, and the bytes of its outbound HTTP calls per hour. The app cannot see or change them, and neither can its token. Without them, every app gets the server-wide caps on data and files and no budget over time.
 
