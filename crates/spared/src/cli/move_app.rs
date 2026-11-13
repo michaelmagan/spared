@@ -663,6 +663,34 @@ pub async fn cmd_move(a: Args, json: bool) -> R<()> {
         ));
     };
     let tapp = dst.app(&name).await?;
+    // Per-app limits are server state and do not travel in a backup. The move copies the source's
+    // override to a target that has none for this name, before the target's copy can serve. A
+    // target that cannot hold limits is refused while nothing has changed, so a moved app never
+    // runs without the limits its operator set.
+    let src_limits = match src.get(&format!("/v1/apps/{name}/limits")).await {
+        Ok(v) => v["override"].clone(),
+        Err(e) if e.kind == "no_route" => Value::Null,
+        Err(e) => return Err(e),
+    };
+    let dst_limits = if src_limits.is_null() {
+        Value::Null
+    } else {
+        match dst.get(&format!("/v1/apps/{name}/limits")).await {
+            Ok(v) => v["override"].clone(),
+            Err(e) if e.kind == "no_route" => {
+                return Err(err(
+                    "move_unsupported",
+                    format!(
+                        "the target server {} is a spared version without per-app limits, and the source has limits set for {name} ({src_limits}) that the target would not enforce. Nothing was changed",
+                        dst.base
+                    ),
+                    "upgrade spared on the target to this CLI's version, then run the move again",
+                ));
+            }
+            Err(e) => return Err(e),
+        }
+    };
+    let copy_limits = !src_limits.is_null() && dst_limits.is_null();
     // Both can read the bucket: a bad credential shows here, before anything changes.
     src.get(&format!("/v1/apps/{name}/remote-backups")).await?;
     dst.get(&format!("/v1/apps/{name}/remote-backups")).await?;
@@ -744,6 +772,17 @@ pub async fn cmd_move(a: Args, json: bool) -> R<()> {
         )],
     };
     if !matches!(plan, Plan::Done { .. }) {
+        if copy_limits {
+            steps_planned.insert(
+                0,
+                format!("copy the per-app limits set on the source ({src_limits}) to the target, before its copy can serve"),
+            );
+        } else if !src_limits.is_null() && dst_limits != src_limits {
+            steps_planned.insert(
+                0,
+                format!("keep the target's own per-app limits for {name} ({dst_limits}). The source's ({src_limits}) are not copied"),
+            );
+        }
         steps_planned.extend(smoke_line);
     }
     if a.dry_run {
@@ -785,6 +824,19 @@ pub async fn cmd_move(a: Args, json: bool) -> R<()> {
         smoke_url: a.smoke_url,
         froze_source: false,
     };
+    if copy_limits && !matches!(plan, Plan::Done { .. }) {
+        m.dst
+            .call(
+                "PUT",
+                &format!("/v1/apps/{name}/limits"),
+                &[("content-type", "application/json".to_string())],
+                Bytes::from(src_limits.to_string()),
+            )
+            .await?;
+        m.step(format!(
+            "copied the per-app limits of {name} ({src_limits}) to the target"
+        ));
+    }
     let (rid, digest, already) = match plan {
         Plan::Full => match m.copy_and_restore().await {
             Ok((r, d)) => (r, d, false),

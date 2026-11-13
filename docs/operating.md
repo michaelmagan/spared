@@ -11,7 +11,7 @@ This page covers what the server prints, logs and limits, and how to try the bun
 
 ## Limits
 
-The server caps every app's limits. The defaults are `--max-memory-mb` 256, `--max-cpu-ms` 5000, `--max-deadline-ms` 30000 and `--max-outbound` 1000, with 8 MB requests and 16 MB responses. An app's `spared.toml` can only ask for less. [AGENTS.md](../AGENTS.md) lists every flag.
+The server caps every app's limits. The defaults are `--max-memory-mb` 256, `--max-cpu-ms` 5000, `--max-deadline-ms` 30000 and `--max-outbound` 1000, with 8 MB requests and 16 MB responses. An app's `spared.toml` can only ask for less. [AGENTS.md](../AGENTS.md) lists every flag. To give one app less disk than the others, or a share of CPU and outbound HTTP over time, see [Limit each app](#limit-each-app).
 
 Request bodies are read in full before a request takes its place in the app's queue, so the server holds them in memory while clients are still sending. `--max-body-buffer-mb` (env `SPARED_MAX_BODY_BUFFER_MB`, default 64) caps what all of them may hold together, over every app and connection. A request that declares a content length reserves that many bytes, up to `--max-request-mb`, before its body is read; a body without a length reserves as it grows. When the budget is used up the request gets `503 server_busy` with `Retry-After: 1`, and the reservation comes back when the request ends or the client goes away. The server raises the figure to `--max-request-mb` when it is lower, so one request of that size can always proceed on its own. Requests without a body (GET) take nothing. The budget is shared: an app whose requests wait on a slow instance holds its bodies, and uploads to other apps can get the 503 until they finish. It bounds memory, not fairness.
 
@@ -273,7 +273,7 @@ What an app token can do, by scope (the default is `deploy,read,evict`):
 | `freeze` | `spared freeze` and `spared thaw` |
 | `rm` | `spared rm`, which deletes the app and its data |
 
-What it cannot do, whatever its scopes: touch or list another app, mint, list or revoke tokens, read `/metrics` or `/v1/server`, export an app's code, or take part in `spared move`. Each of those answers 403 `wrong_scope`, and for another app's route the answer is the same whether that app exists or not, so a token cannot find out which apps the server holds. Deploys by an app token go through the same limit, grant and compile checks as every deploy, so it cannot raise an app's limits above your `--max-*` caps. Within those checks the token holder writes the manifest: it picks the app's limits up to your caps and the hosts its app may `fetch` (private, loopback and metadata addresses are refused for every app).
+What it cannot do, whatever its scopes: touch or list another app, mint, list or revoke tokens, read `/metrics` or `/v1/server`, export an app's code, or take part in `spared move`. Each of those answers 403 `wrong_scope`, and for another app's route the answer is the same whether that app exists or not, so a token cannot find out which apps the server holds. Deploys by an app token go through the same limit, grant and compile checks as every deploy, so it cannot raise an app's limits above your `--max-*` caps. Within those checks the token holder writes the manifest: it picks the app's per-request limits up to your caps and the hosts its app may `fetch` (private, loopback and metadata addresses are refused for every app). The per-app limits you set with `spared limits` are out of its reach: no app token can read or change them.
 
 A token made while no app has its name may create that app with its first deploy, once. A token made for an app that exists only redeploys it. `spared rm <app>` revokes every token of that app, so a removed app cannot come back through an old token: to start an app over from an empty database, remove it and make a new token. An app's tokens are not part of its backups and do not move with `spared move`: make new ones on the target.
 
@@ -289,6 +289,48 @@ What an app token does not change: building an app still runs its build scripts 
 Security notes. The server compares the hash of what a request sends against every stored hash, without an early exit, and the admin token in constant time. After 30 wrong tokens in a minute from one address, every app token and unknown token from it, a valid app token included, gets 429 `auth_rate_limited` until the minute ends. The admin token is checked before that limit and always works, so the operator is never locked out. With 256 bits per token this only stops a noisy client. Requests without a token are not counted. No token reaches the access log (which records the `token_id` of an app token's requests), the server's other output, `/metrics`, `spared ps --json`, an error body or the data directory.
 
 Tested through a real server (`crates/spared/tests/app_tokens.rs`): create, list and revoke, also across a restart. Every admin route with the admin token, an app token for the app, an app token for another app that exists and one that does not (the same answer), an app token without the route's scope, and revoked, expired, malformed and missing tokens. Deploys by an app token, with a mismatched manifest name or another app's name refused and nothing written, first-deploy creation once only, and limits still capped. `spared rm` revoking the app's tokens, the failed-auth limit, and no token in any output, log or file under the server's directories. `scripts/e2e.sh` deploys with an app token through the CLI.
+
+## Limit each app
+
+The `--max-*` caps apply to every app alike. When you run a platform that hosts apps your users or their coding agents write, you may want app A to keep 100 MB and app B 5 GB, and no app to hold a core or the network for long. `spared limits` sets that per app. Only the admin token reaches it: the app's own token, whatever its scopes, gets 403 `wrong_scope`, so a tenant can neither read nor raise its limits.
+
+```sh
+# A new tenant app: its token and its limits, before its first deploy.
+spared token create alice-notes --expires 90d --name ci-alice --out alice-notes.token
+spared limits set alice-notes --data-mb 100 --entries 5000 --cpu-percent 10 --egress-mb-per-hour 50
+
+spared limits show alice-notes            # the limits in force and what it used (--json too)
+spared limits set alice-notes --data-mb 500   # a larger plan: more disk, the rest unchanged
+spared limits clear alice-notes          # back to the server's caps
+```
+
+What each one bounds:
+
+| Flag | Bounds | When it is reached |
+|---|---|---|
+| `--data-mb N` | apparent bytes under the app's `/data`, as `--max-app-data-mb` does for every app | writes fail as on a full disk, and SQLite says `SQLITE_FULL` |
+| `--entries N` | files, directories and links under `/data`, as `--max-app-entries` | creating one more fails with a quota error |
+| `--cpu-percent P` or `--cpu-ms-per-min N` | the compute time `cpu_ms` measures, summed over requests: P% of one core, or N ms a minute | new public requests get 503 `cpu_budget_exhausted` with `Retry-After` until the budget refills |
+| `--egress-mb-per-hour N` | bytes of the app's outbound HTTP calls: request line and headers, response status line and headers, body and trailers (not TLS handshake bytes or unread socket buffers) | the next call fails in the app with `egress_budget_exhausted`, and a body in flight is cut |
+
+How they work:
+
+- The limit in force is the smaller of yours and the server's cap. A number above the cap is kept and shown as `clamped`, and it takes effect up to the new cap if you raise the cap later. A manifest has no key for any of these.
+- The data and entry limits feed the same books as the server's caps. The server counts the disk again before it refuses a write and never trusts the app's own word that it freed something. A change to them drops the app's instance, so the next request wakes with them. A restore can bring back more data than the limit: the app can then read it and must delete some before it writes again.
+- The CPU budget is a bucket that refills at the rate you set and holds 10 seconds of it, so a quiet app can take a short burst. A request is let in while the bucket holds anything and charged what it used when it ends. It still stops at its own `cpu_ms`, so one request can overdraw the bucket by that much. This is a host-side time budget, not a real-time guarantee: the time charged is the time the server spent running the app's code and its file calls, as for `cpu_ms`. The time to wake an instance is charged too (its start function runs then), and each outbound call that passed the host policy costs a flat 1 ms for its DNS, TCP and TLS setup. The server's other work on outbound HTTP is not charged.
+- The egress budget holds one hour of the rate and refills continuously, so the first hour can see up to twice the figure and later hours average to it. Calls the host policy refuses (a host not in `fetch`, a private address) cost nothing. Responses the app sends to its clients and request bodies it receives are not counted.
+- The counters belong to the app's name, not to an instance: idle eviction, a trap, `spared evict` and a redeploy keep them, and an app has one instance at a time. They are in memory only and start over when the server restarts or the app is removed. A restart is therefore a way to refill every budget at once.
+- The accounting costs a few atomic operations per request when the app has no budget, and two short, uncontended mutex locks when it has one. No measurable warm-path cost was seen ([benchmarks](benchmarks.md#per-app-limits)).
+
+Where they live: `<data-dir>/limits/<app>.json` (directory 0700, file 0600, written to a temporary name, synced and renamed), outside the app's directory, so the app never sees the file. You can set limits for a name before its app exists, which is how a platform makes sure an app never serves without them. They survive restarts and redeploys. `spared rm <app>` keeps them, says `limits_kept`, and they apply again if the name is deployed again. Clear them when a name goes to someone else. `spared move` copies an app's limits to a target that has none of its own for that name, before the app serves there, and refuses a target too old to enforce them. A limits file that cannot be read at start keeps its app from being served (it is not loaded) until `spared limits set` or `spared limits clear` replaces it. If the `limits` directory exists but cannot be read, the server refuses to start with `error[limits_unreadable]` and changes nothing in the data dir, rather than serving apps without their limits.
+
+`spared ps --json` shows each app's `quota` to the admin token: the limits in force, which ones you set, which the caps lowered, and its use (`cpu_ms_total`, `cpu_ms_in_window`, `cpu_ms_left`, `cpu_refused`, `egress_bytes_total`, `egress_bytes_in_window`, `egress_bytes_left`, `egress_refused`). `/metrics` carries no app name, so per-app use is only here.
+
+The format stamp: while any app has limits, the data directory is stamped format 2, so a release from before per-app limits refuses to start on it instead of serving those apps without them ([upgrading](upgrading.md#the-format-stamp)). Clearing the last one stamps it back to format 1.
+
+Not bounded per app, even with limits set: memory beyond the manifest's `memory_mb` under `--max-memory-mb` (you cannot set a smaller memory cap for one app), disk read and write rates, the bandwidth of requests and responses on the public listener, and builds, which run wherever the app is built with the builder's privileges. A request-rate limit per app is not built.
+
+Tested through a real server (`crates/spared/tests/app_limits.rs`, `scripts/server-test.py`): an override below a cap is enforced and one above it is clamped, an app at its data limit gets the full-disk error while another app keeps writing to the server's cap, the existing attacks on the books (a file renamed onto itself, a hard link unlinked, a stale stream) hold under per-app numbers, a spinning app at 10% ran 16 requests of 100 ms in 6 seconds (unthrottled it would run about 55) while a neighbor's median latency stayed the same, the budget refills after `Retry-After`, an in-flight request still stops at its `cpu_ms`, limits persist across a restart, a redeploy and `rm`, every limits route answers 403 to an app token for any app, the format stamp goes to 2 and back. The egress meter is tested against a local server in `src/sandbox.rs` (calls run up to the budget, then fail, a body is cut, a neighbor is untouched) and against example.com in `scripts/server-test.py` when it is reachable.
 
 ## The admin API
 

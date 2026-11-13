@@ -1001,3 +1001,65 @@ fn review_rm_on_target_then_killed_rerun_must_not_thaw_an_empty_target() {
         "the move reported success and thawed a target whose data is not the source's"
     );
 }
+
+#[test]
+fn a_move_copies_the_apps_limits_to_a_target_without_its_own() {
+    let s = scratch("move-limits");
+    let fake = Fake::start();
+    let (a, b) = pair(&s, &fake, None);
+    a.deploy_wat("lim", RESPONDER);
+    a.deploy_wat("own", RESPONDER);
+    let (st, v) = a.admin(
+        "PUT",
+        "/v1/apps/lim/limits",
+        br#"{"data_mb": 3, "cpu_ms_per_min": 600}"#,
+    );
+    assert_eq!(st, 200, "{v}");
+    let tf = token_file(&s, &b, "b");
+
+    // The dry run names the step and changes nothing on the target.
+    let (rc, v) = mv(&a, &b, &tf, "lim", &["--dry-run"]);
+    assert_eq!(rc, 0, "{v}");
+    assert!(
+        v["plan"][0]
+            .as_str()
+            .unwrap()
+            .starts_with("copy the per-app limits"),
+        "{v}"
+    );
+    assert_eq!(
+        b.admin("GET", "/v1/apps/lim/limits", b"").1["override"],
+        Value::Null
+    );
+
+    let (rc, v) = mv(&a, &b, &tf, "lim", &[]);
+    assert_eq!(rc, 0, "{v}\n{}", a.log_text());
+    assert!(
+        v["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s.as_str().unwrap().starts_with("copied the per-app limits")),
+        "{v}"
+    );
+    let (_, t) = b.admin("GET", "/v1/apps/lim/limits", b"");
+    assert_eq!(
+        t["override"],
+        json!({"data_mb": 3, "cpu_ms_per_min": 600}),
+        "{t}"
+    );
+    assert_eq!(t["app_exists"], true);
+    assert_eq!(public(&b, "lim").0, 200);
+
+    // A target that has limits of its own for the name keeps them.
+    let (st, _) = a.admin("PUT", "/v1/apps/own/limits", br#"{"data_mb": 9}"#);
+    assert_eq!(st, 200);
+    let (st, _) = b.admin("PUT", "/v1/apps/own/limits", br#"{"data_mb": 2}"#);
+    assert_eq!(st, 200);
+    let (rc, v) = mv(&a, &b, &tf, "own", &[]);
+    assert_eq!(rc, 0, "{v}");
+    assert_eq!(
+        b.admin("GET", "/v1/apps/own/limits", b"").1["override"],
+        json!({"data_mb": 2})
+    );
+}

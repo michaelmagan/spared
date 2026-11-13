@@ -330,6 +330,12 @@ fn copy_file_verified(
 /// million entries, or at a nesting of [`crate::dirfd::MAX_WALK_DEPTH`] levels, and sets
 /// `truncated`.
 pub fn tree_stats(p: &Path) -> Stats {
+    tree_counts(p).0
+}
+
+/// [`tree_stats`], and the entries it saw: files, directories, links and special files, which is
+/// what `--max-app-entries` counts.
+pub fn tree_counts(p: &Path) -> (Stats, u64) {
     let mut s = Stats::default();
     let mut seen = 0u64;
     let w = crate::dirfd::walk(p, |e| {
@@ -348,7 +354,7 @@ pub fn tree_stats(p: &Path) -> Stats {
         true
     });
     s.truncated = w.stopped || w.too_deep;
-    s
+    (s, seen.min(STATS_MAX_ENTRIES))
 }
 
 /// Delete a tree of any depth without recursion and with at most two directories open at a time:

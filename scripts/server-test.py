@@ -216,9 +216,11 @@ def build_inputs():
     subprocess.run(["cargo", "build", "--release", "--target", "wasm32-wasip2"], cwd=HOSTILE_DIR, check=True, env=env)
 
 
-def hostile_manifest(name="hostile", **limits):
+def hostile_manifest(name="hostile", fetch=("example.invalid",), **limits):
+    # The hostile component imports wasi:http/outgoing-handler, so deploying it needs some fetch
+    # grant. The default is a reserved name that never resolves, so no test reaches the network.
     lines = "".join(f"{k} = {v}\n" for k, v in limits.items())
-    return f'name = "{name}"\n[grants]\ndata = true\n[limits]\n{lines}'
+    return f'name = "{name}"\n[grants]\ndata = true\nfetch = {json.dumps(list(fetch))}\n[limits]\n{lines}'
 
 
 def sha256_file(path):
@@ -281,6 +283,12 @@ def main():
         descriptors(tmp)
         resource_caps(tmp)
         fs_books(tmp)
+        fs_books(tmp, per_app=True)
+        per_app_limits(tmp)
+        if os.environ.get("SPARED_TEST_INTERNET") == "1":
+            egress_budget(tmp)
+        else:
+            print("skip - egress_budget needs the public internet (set SPARED_TEST_INTERNET=1). The egress budget is tested hermetically in src/sandbox.rs", flush=True)
         body_budget(tmp)
         store_without_links(tmp)
         startup_refusals(tmp)
@@ -1700,17 +1708,30 @@ def tree_usage(s, app):
     return nbytes, entries
 
 
-def fs_books(tmp):
+def set_limits(s, app, **limits):
+    st, _, d, _ = s.admin("PUT", f"/v1/apps/{app}/limits", body=json.dumps(limits).encode())
+    check(st == 200, f"set limits {limits} for {app}", d)
+    return json.loads(d)
+
+
+def fs_books(tmp, per_app=False):
     """The per-app data, entry and descriptor caps hold against a guest that tells the host
     things that are not true: a file renamed onto itself, a hard link that is then unlinked, a
-    stream opened before its file was truncated, and streams kept after the descriptor is gone."""
-    d = os.path.join(tmp, "books")
+    stream opened before its file was truncated, and streams kept after the descriptor is gone.
+    With per_app, the 8 MB and 100 entries come from each app's own limits under larger server
+    caps, so the same books run with the per-app numbers."""
+    d = os.path.join(tmp, "books-per-app" if per_app else "books")
     os.makedirs(d)
-    s = Server(d, "--max-app-data-mb", "8", "--max-app-entries", "100", "--max-app-fds", "8")
+    if per_app:
+        s = Server(d, "--max-app-data-mb", "512", "--max-app-entries", "5000", "--max-app-fds", "8")
+    else:
+        s = Server(d, "--max-app-data-mb", "8", "--max-app-entries", "100", "--max-app-fds", "8")
     pid = s.server_pid()
     for app in ["rename", "entries", "links", "stale", "streams", "readers", "cycle"]:
         st, v = s.deploy(app, HOSTILE, hostile_manifest(app, cpu_ms=5000, deadline_ms=30000))
         check(st == 200, f"deploy the {app} attacker for the books", v)
+        if per_app:
+            set_limits(s, app, data_mb=8, entries=100)
 
     st, body, _ = hostile_reply(s, "rename", "/selfrename?n=40&mb=1&trick=1", timeout=60)
     nbytes, _ = tree_usage(s, "rename")
@@ -1743,6 +1764,81 @@ def fs_books(tmp):
     check(st == 200 and m and int(m.group(1)) <= 8 and "uota" in m.group(2), "so do read streams", body)
     st, body, _ = hostile_reply(s, "cycle", "/streamcycle?n=60")
     check(st == 200 and body.startswith("stream cycles 60 err="), "a stream that is dropped gives its descriptor slot back", body)
+    s.stop()
+
+
+def per_app_limits(tmp):
+    """An app at the data limit its operator set gets the usual full-disk error while another app
+    under the same server keeps writing up to the server's cap; raising the limit gives room
+    back, and clearing it restores the server's cap."""
+    d = os.path.join(tmp, "per-app")
+    os.makedirs(d)
+    s = Server(d, "--max-app-data-mb", "24")
+    for app in ["small", "big"]:
+        st, v = s.deploy(app, HOSTILE, hostile_manifest(app, cpu_ms=5000, deadline_ms=30000))
+        check(st == 200, f"deploy {app} for per-app limits", v)
+    v = set_limits(s, "small", data_mb=4)
+    check(v["effective"]["data_mb"] == 4 and v["server_caps"]["data_mb"] == 24, "small's limit is 4 MB under a 24 MB cap", v)
+    st, body, _ = hostile_reply(s, "small", "/fill?n=10", timeout=60)
+    nbytes, _ = tree_usage(s, "small")
+    check(st == 200 and body.startswith("wrote ") and "err=" in body and not body.endswith("err=") and nbytes <= 4 << 20,
+          f"small stops at its own 4 MB with an error from the write ({nbytes >> 20} MB)", body)
+    st, body, _ = hostile_reply(s, "big", "/fill?n=10", timeout=60)
+    check(st == 200 and body == "wrote 10 MiB err=", "big, with no limits of its own, keeps writing past small's 4 MB", body)
+    st, body, _ = hostile_reply(s, "big", "/fill?n=20", timeout=60)
+    nbytes, _ = tree_usage(s, "big")
+    check(st == 200 and nbytes <= 24 << 20 and not body.endswith("err="), f"and stops at the server's 24 MB cap ({nbytes >> 20} MB)", body)
+    st, _, d_, _ = s.admin("GET", "/v1/apps")
+    apps = {a["name"]: a for a in json.loads(d_)["apps"]}
+    check(apps["small"]["quota"]["effective"]["data_mb"] == 4 and apps["big"]["quota"]["effective"]["data_mb"] == 24
+          and apps["small"]["data_bytes"] <= 4 << 20, "spared ps shows each app's limit and use", apps["small"].get("quota"))
+    v = set_limits(s, "small", data_mb=8)
+    check(v["effective"]["data_mb"] == 8, "raising small's limit takes effect", v)
+    st, body, _ = hostile_reply(s, "small", "/fill?n=2", timeout=60)
+    check(st == 200 and body == "wrote 2 MiB err=", "a higher limit gives small room at its next wake", body)
+    st, _, d_, _ = s.admin("DELETE", "/v1/apps/small/limits")
+    check(st == 200 and json.loads(d_)["effective"]["data_mb"] == 24, "clearing small's limits restores the server's cap", d_)
+    st, body, _ = hostile_reply(s, "small", "/fill?n=4", timeout=60)
+    check(st == 200 and body == "wrote 4 MiB err=", "and small writes past 8 MB again", body)
+    s.stop()
+
+
+def egress_budget(tmp):
+    """An app's outbound HTTP calls run until its egress budget is spent and then fail with
+    egress_budget_exhausted, while a neighbor fetching the same host is untouched. Needs
+    http://example.com/ to be reachable from this machine without a proxy, as the escape suite's
+    controls do; it runs only with SPARED_TEST_INTERNET=1 and skips if the host is unreachable."""
+    try:
+        with socket.create_connection(("example.com", 80), timeout=5) as c:
+            c.sendall(b"GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n")
+            c.settimeout(5)
+            if not c.recv(16).startswith(b"HTTP/1."):
+                raise OSError("no HTTP answer")
+    except OSError as e:
+        print(f"skip - example.com is not reachable from here ({e}). The egress budget is tested in src/sandbox.rs", flush=True)
+        return
+    d = os.path.join(tmp, "egress")
+    os.makedirs(d)
+    s = Server(d)
+    for app in ["net", "peer"]:
+        st, v = s.deploy(app, HOSTILE, hostile_manifest(app, fetch=["example.com"], cpu_ms=5000, deadline_ms=30000))
+        check(st == 200, f"deploy {app} for the egress budget", v)
+    st, body, _ = hostile_reply(s, "net", "/fetch?n=1", timeout=60)
+    m = re.match(r"fetched 1 bytes=(\d+) err=$", body)
+    check(st == 200 and m, "an app with no budget fetches example.com", body)
+    one = int(m.group(1)) if m else 1
+    set_limits(s, "net", egress_bytes_per_hour=one * 3 + one // 2)
+    st, body, _ = hostile_reply(s, "net", "/fetch?n=10", timeout=60)
+    m = re.match(r"fetched (\d+) bytes=\d+ err=(.*)", body, re.DOTALL)
+    check(st == 200 and m and 1 <= int(m.group(1)) <= 4 and "egress_budget_exhausted" in m.group(2),
+          "calls succeed up to the budget, then fail with egress_budget_exhausted", body)
+    st, body, _ = hostile_reply(s, "net", "/fetch?n=1", timeout=60)
+    check(st == 200 and "fetched 0 " in body and "egress_budget_exhausted" in body, "and keep failing once it is spent", body)
+    st, body, _ = hostile_reply(s, "peer", "/fetch?n=5", timeout=60)
+    check(st == 200 and body.startswith("fetched 5 ") and body.endswith("err="), "a neighbor keeps fetching", body)
+    st, _, d_, _ = s.admin("GET", "/v1/apps/net/limits")
+    u = json.loads(d_)["usage"]
+    check(u["egress_refused"] >= 2 and u["egress_bytes_left"] == 0, "spared limits show counts the refusals", u)
     s.stop()
 
 
@@ -2098,7 +2194,7 @@ def format_refusals(s, stamp_file):
         return out
 
     for stamp, want, hint in [
-        ('{"format":2,"created_by":"0.0.1-preview","last_opened_by":"0.9.0"}', "data_dir_too_new", "spared 0.9.0 or newer"),
+        ('{"format":3,"created_by":"0.0.1-preview","last_opened_by":"0.9.0"}', "data_dir_too_new", "spared 0.9.0 or newer"),
         ('{"format":0,"created_by":"0.0.0","last_opened_by":"0.0.0"}', "data_dir_too_old", "docs/upgrading.md"),
         ("not a stamp", "data_dir_stamp_unreadable", "delete the file"),
     ]:

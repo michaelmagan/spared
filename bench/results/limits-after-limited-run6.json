@@ -1,0 +1,1 @@
+{"app":"notes","cold":{"max_ms":0.93,"p50_ms":0.761,"p99_ms":0.93,"samples":20},"measure":"time from sending a GET to receiving the response head (first byte)","path":"/api/notes","status":200,"unit":"ms","warm":{"max_ms":3.415,"p50_ms":0.138,"p99_ms":0.347,"samples":20000}}

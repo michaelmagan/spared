@@ -29,6 +29,7 @@ pub async fn run_cmd(
         data,
         args,
         &crate::fsguard::AppCaps::default(),
+        None,
     )
     .await
 }
@@ -40,6 +41,7 @@ async fn run_cmd_with(
     data: &Path,
     args: &[&str],
     caps: &crate::fsguard::AppCaps,
+    quota: Option<Arc<crate::quota::AppQuota>>,
 ) -> Outcome {
     let t = Instant::now();
     let fail = |e: String| Outcome {
@@ -69,7 +71,7 @@ async fn run_cmd_with(
             .chain(args.iter().copied())
             .collect::<Vec<_>>(),
     );
-    let mut store = crate::sandbox::store_for(engine, m, data, b.build(), caps).await;
+    let mut store = crate::sandbox::store_for(engine, m, data, b.build(), caps, quota).await;
     let run = async {
         let cmd = Command::instantiate_async(&mut store, &comp, &linker).await?;
         cmd.wasi_cli_run().call_run(&mut store).await
@@ -258,7 +260,7 @@ pub async fn run(probes: PathBuf, root: PathBuf) -> Result<()> {
         async |name: &'static str, args: &[&str], within: fn(&str, u64, u64) -> bool| {
             let dir = root.join(format!("quota{}", cases.len()));
             std::fs::create_dir_all(&dir).unwrap();
-            let o = run_cmd_with(&engine, &quotap, &mq, &dir, args, &caps).await;
+            let o = run_cmd_with(&engine, &quotap, &mq, &dir, args, &caps, None).await;
             let u = crate::fsguard::measure(&dir, u64::MAX, u64::MAX);
             cases.push(Case {
                 name,
@@ -332,6 +334,7 @@ pub async fn run(probes: PathBuf, root: PathBuf) -> Result<()> {
         &dir,
         &["selfrename-bytes", "2", "1", "1"],
         &caps,
+        None,
     )
     .await;
     cases.push(Case {
@@ -406,6 +409,32 @@ pub async fn run(probes: PathBuf, root: PathBuf) -> Result<()> {
         name: "control: HTTPS fetch to a granted public host verifies TLS and succeeds",
         denied: o.stdout.contains("STATUS 200"),
         control: true,
+        detail: o.stdout.trim().to_string(),
+    });
+
+    // The operator gave this app an egress budget and it is spent: the same granted fetch is
+    // refused before it connects, whatever the guest does.
+    let spent = Arc::new(crate::quota::AppQuota::new(Some(crate::quota::Override {
+        egress_bytes_per_hour: Some(1),
+        ..Default::default()
+    })));
+    spent.egress_charge(2);
+    let o = run_cmd_with(
+        &engine,
+        &httpp,
+        &manifest("appB", &["example.com"], 64, 3000),
+        &b,
+        &["http://example.com/"],
+        &crate::fsguard::AppCaps::default(),
+        Some(spent),
+    )
+    .await;
+    cases.push(Case {
+        name: "fetch to a granted host after the app's egress budget is spent",
+        denied: o.stdout.contains(" ERR ")
+            && o.stdout.contains("egress_budget_exhausted")
+            && !o.stdout.contains("STATUS"),
+        control: false,
         detail: o.stdout.trim().to_string(),
     });
 

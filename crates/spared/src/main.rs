@@ -11,6 +11,7 @@ mod logcap;
 mod obs;
 mod pinned_send;
 mod prefetch;
+mod quota;
 mod remote;
 mod sandbox;
 mod server;
@@ -359,6 +360,11 @@ async fn run(cli: Cli) -> Result<std::convert::Infallible> {
             // build does not read.
             if let Err(e) = datadir::check(&data_dir) {
                 refuse(cli.json, &e);
+            }
+            // And a limits directory that cannot be read: serving without the operator's limits,
+            // and stamping the data dir as if it had none, is worse than not starting.
+            if let Err(e) = quota::stored_names(&data_dir) {
+                refuse(cli.json, &quota::unreadable(&data_dir, &e));
             }
             // Then the ports and the data dir, so a server that cannot have them leaves no token
             // file behind, and two servers never run on one data dir.

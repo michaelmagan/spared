@@ -71,7 +71,7 @@ The numbers and how to rerun them are in [docs/benchmarks.md](docs/benchmarks.md
 
 Next up:
 
-- Stronger resource limits.
+- Stronger resource limits: disk and network bandwidth per app, and a memory cap per app set by the operator. Per-app data, CPU and outbound HTTP budgets are built ([operating](docs/operating.md#limit-each-app)).
 - Point-in-time restore.
 - Disk quotas in the manifest.
 

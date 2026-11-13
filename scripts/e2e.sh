@@ -246,6 +246,24 @@ for f in "$tmp/apptoken" "$tmp/othertoken"; do
   if grep -rqF "$(cat "$f")" "$tmp/data" "$tmp/serve.log" "$tmp/access.log" "$tmp/home"; then fail "an app token reached the data dir, the server's output or its home"; fi
 done
 
+step "per-app limits: set, shown in ps, refused to an app token, cleared"
+"$SPARED_BIN" limits set smoke-app --data-mb 10 --cpu-percent 50 --egress-mb-per-hour 1 >"$tmp/limits.out" 2>&1 || { cat "$tmp/limits.out" >&2; fail "spared limits set exited nonzero"; }
+grep -q 'data      10 MB (override' "$tmp/limits.out" && grep -q '50.0% of a core' "$tmp/limits.out" || { cat "$tmp/limits.out" >&2; fail "spared limits set did not print the limits in force"; }
+python3 -c 'import json,sys; s=json.load(open(sys.argv[1])); assert s["format"] == 2, s' "$tmp/data/format.json" || fail "a data dir with per-app limits is not stamped format 2"
+"$SPARED_BIN" --json ps | python3 -c '
+import json, sys
+a = [x for x in json.load(sys.stdin)["apps"] if x["name"] == "smoke-app"][0]
+q = a["quota"]
+assert q["effective"]["data_mb"] == 10 and q["effective"]["cpu_ms_per_min"] == 30000, q
+assert q["usage"]["cpu_ms_total"] >= 0 and "egress_bytes_total" in q["usage"], q
+' || fail "spared ps --json does not show the app's limits and use"
+code=$(http "$url/api/notes") || fail "GET under limits failed"
+[ "$code" = 200 ] || fail "GET /api/notes under limits answered $code"
+if SPARED_TOKEN="$apptoken" "$SPARED_BIN" limits show smoke-app >"$tmp/limtok.out" 2>&1; then fail "an app token read its app's limits"; fi
+grep -q '^error\[wrong_scope\]: ' "$tmp/limtok.out" || { cat "$tmp/limtok.out" >&2; fail "an app token reading limits did not get wrong_scope"; }
+"$SPARED_BIN" limits clear smoke-app >"$tmp/limits.out" 2>&1 || { cat "$tmp/limits.out" >&2; fail "spared limits clear exited nonzero"; }
+python3 -c 'import json,sys; s=json.load(open(sys.argv[1])); assert s["format"] == 1, s' "$tmp/data/format.json" || fail "clearing the last limits did not put the format stamp back to 1"
+
 step "access log"
 sleep 0.3
 python3 -I -c '

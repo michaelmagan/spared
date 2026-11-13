@@ -7,9 +7,16 @@ use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
-/// The layout this build writes. Raise it when a release changes what is under the data dir in a
-/// way an older server would misread (app directory files, the component store, backups).
-pub const DATA_FORMAT: u32 = 1;
+/// The newest layout this build reads and writes. Raise it when a release changes what is under the
+/// data dir in a way an older server would misread or ignore to the operator's cost (app directory
+/// files, the component store, backups, per-app limits).
+pub const DATA_FORMAT: u32 = 2;
+/// What a directory is stamped with while no app has a limit an operator set: format 1 is what
+/// every release since 0.0.1-preview reads, so going back to one keeps working.
+pub const BASE_FORMAT: u32 = 1;
+/// What a directory is stamped with while any app has a limit an operator set (`<data-dir>/limits/`).
+/// A release that predates per-app limits would serve those apps without them, so it must refuse.
+pub const LIMITS_FORMAT: u32 = 2;
 /// The oldest layout this build can open (and bring up to `DATA_FORMAT`).
 pub const OLDEST_READABLE_FORMAT: u32 = 1;
 pub const STAMP_FILE: &str = "format.json";
@@ -109,13 +116,15 @@ pub fn check(dir: &Path) -> Result<Option<Stamp>, DataDirError> {
     Ok(Some(stamp))
 }
 
-/// Check the stamp, then write or refresh it: a directory without one is stamped as the current
-/// format, and `last_opened_by` records this version. The directory must exist.
-pub fn stamp(dir: &Path) -> Result<Stamp, DataDirError> {
+/// Check the stamp, then write or refresh it with `format` (one this build reads): a directory
+/// without one is stamped, and `last_opened_by` records this version. The directory must exist.
+/// The server stamps [`LIMITS_FORMAT`] while any per-app limit is stored and [`BASE_FORMAT`]
+/// otherwise, so only a directory that has limits is closed to releases that would ignore them.
+pub fn stamp(dir: &Path, format: u32) -> Result<Stamp, DataDirError> {
     let found = check(dir)?;
     let me = crate::VERSION.to_string();
     let new = Stamp {
-        format: DATA_FORMAT,
+        format,
         created_by: found.as_ref().map_or(me.clone(), |s| s.created_by.clone()),
         last_opened_by: me,
     };
@@ -163,8 +172,8 @@ mod tests {
         let d = scratch("unstamped");
         std::fs::create_dir_all(d.join("apps/notes")).unwrap();
         assert_eq!(check(&d).unwrap(), None);
-        let s = stamp(&d).unwrap();
-        assert_eq!(s.format, DATA_FORMAT);
+        let s = stamp(&d, BASE_FORMAT).unwrap();
+        assert_eq!(s.format, BASE_FORMAT);
         assert_eq!(s.created_by, crate::VERSION);
         assert_eq!(check(&d).unwrap(), Some(s));
         let text = std::fs::read_to_string(d.join(STAMP_FILE)).unwrap();
@@ -176,11 +185,11 @@ mod tests {
     #[test]
     fn a_newer_format_is_refused_and_left_alone() {
         let d = scratch("new");
-        let text = r#"{"format":2,"created_by":"0.0.1","last_opened_by":"0.3.0"}"#;
+        let text = r#"{"format":3,"created_by":"0.0.1","last_opened_by":"0.3.0"}"#;
         std::fs::write(d.join(STAMP_FILE), text).unwrap();
-        for e in [check(&d).unwrap_err(), stamp(&d).unwrap_err()] {
+        for e in [check(&d).unwrap_err(), stamp(&d, BASE_FORMAT).unwrap_err()] {
             assert_eq!(e.kind, "data_dir_too_new");
-            assert!(e.message.contains("format 2") && e.message.contains("0.3.0"));
+            assert!(e.message.contains("format 3") && e.message.contains("0.3.0"));
             assert!(e.fix.contains("spared 0.3.0 or newer"), "{}", e.fix);
         }
         assert_eq!(std::fs::read_to_string(d.join(STAMP_FILE)).unwrap(), text);
@@ -218,9 +227,28 @@ mod tests {
         let d = scratch("keep");
         let text = r#"{"format":1,"created_by":"0.0.0-older","last_opened_by":"0.0.0-older"}"#;
         std::fs::write(d.join(STAMP_FILE), text).unwrap();
-        let s = stamp(&d).unwrap();
+        let s = stamp(&d, BASE_FORMAT).unwrap();
         assert_eq!(s.created_by, "0.0.0-older");
         assert_eq!(s.last_opened_by, crate::VERSION);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn the_format_goes_up_with_limits_and_back_down_without_them() {
+        let d = scratch("limits");
+        stamp(&d, BASE_FORMAT).unwrap();
+        let s = stamp(&d, LIMITS_FORMAT).unwrap();
+        assert_eq!(s.format, 2);
+        assert_eq!(check(&d).unwrap().unwrap().format, 2);
+        let text = std::fs::read_to_string(d.join(STAMP_FILE)).unwrap();
+        assert!(text.contains("\"format\":2"), "{text}");
+        let older = judge(&d, &check(&d).unwrap().unwrap(), 1, 1).unwrap_err();
+        assert_eq!(
+            older.kind, "data_dir_too_new",
+            "a release that reads format 1 only refuses it"
+        );
+        assert_eq!(stamp(&d, BASE_FORMAT).unwrap().format, 1);
+        assert!(judge(&d, &check(&d).unwrap().unwrap(), 1, 1).is_ok());
         std::fs::remove_dir_all(&d).unwrap();
     }
 }

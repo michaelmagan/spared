@@ -529,6 +529,8 @@ pub fn need(method: &str, segs: &[&str], frozen_param: bool) -> Need {
         ("GET", ["v1", "apps", n, "fetch", _]) => app(n, Restore),
         ("POST", ["v1", "apps", n, "freeze"]) => app(n, Freeze),
         ("POST", ["v1", "apps", n, "thaw"]) => app(n, Freeze),
+        // Per-app limits are the operator's: no scope reaches them, for any app.
+        (_, ["v1", "apps", _, "limits"]) => Need::Admin,
         _ => Need::Admin,
     }
 }
@@ -752,6 +754,10 @@ mod tests {
             ("GET", "/metrics"),
             ("GET", "/v1/server"),
             ("GET", "/v1/apps/x/code"),
+            ("GET", "/v1/apps/x/limits"),
+            ("PUT", "/v1/apps/x/limits"),
+            ("DELETE", "/v1/apps/x/limits"),
+            ("POST", "/v1/apps/x/limits"),
             ("GET", "/v1/tokens"),
             ("POST", "/v1/tokens"),
             ("DELETE", "/v1/tokens/abc"),
