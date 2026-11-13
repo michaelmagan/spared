@@ -1754,9 +1754,12 @@ async fn cmd_ps(server: Option<String>, json: bool) -> R<()> {
         "{:<20} {:<6} {:>4} {:>8} {:>6} {:>6} {:>10}  URL",
         "NAME", "STATE", "VER", "REQUESTS", "WAKES", "ERRORS", "DATA"
     );
+    let mut experimental = false;
     for a in apps {
+        let p3 = a["runtime"] == "wasip3-experimental";
+        experimental |= p3;
         println!(
-            "{:<20} {:<6} {:>4} {:>8} {:>6} {:>6} {:>10}  {}",
+            "{:<20} {:<6} {:>4} {:>8} {:>6} {:>6} {:>10}  {}{}",
             a["name"].as_str().unwrap_or(""),
             a["state"].as_str().unwrap_or(""),
             a["version"].to_string(),
@@ -1764,7 +1767,13 @@ async fn cmd_ps(server: Option<String>, json: bool) -> R<()> {
             a["wakes"].to_string(),
             a["errors"].to_string(),
             format!("{} B", a["data_bytes"]),
-            a["url"].as_str().unwrap_or("")
+            a["url"].as_str().unwrap_or(""),
+            if p3 { "  EXPERIMENTAL wasip3" } else { "" }
+        );
+    }
+    if experimental {
+        println!(
+            "EXPERIMENTAL wasip3: one crash or timeout fails every request in flight in that instance, compute in one request holds up the others, and wasmtime marks its wasip3 support not ready for production (docs/wasip3.md)"
         );
     }
     Ok(())
