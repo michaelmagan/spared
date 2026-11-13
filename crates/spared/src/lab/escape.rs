@@ -69,7 +69,7 @@ async fn run_cmd_with(
             .chain(args.iter().copied())
             .collect::<Vec<_>>(),
     );
-    let mut store = crate::sandbox::store_for(engine, m, data, b.build(), caps).await;
+    let mut store = crate::sandbox::store_for(engine, m, data, b.build(), caps, None).await;
     let run = async {
         let cmd = Command::instantiate_async(&mut store, &comp, &linker).await?;
         cmd.wasi_cli_run().call_run(&mut store).await

@@ -3172,21 +3172,27 @@ async fn request_once(
     let fail = |res: &mut PathResult, kind: &str, msg: String, fix: &str| {
         res.failure = Some((kind.into(), msg, fix.into()))
     };
-    let mut store =
-        match crate::sandbox::app_store(engine, m, data, log, &crate::fsguard::AppCaps::default())
-            .await
-        {
-            Ok(s) => s,
-            Err(e) => {
-                fail(
-                    &mut res,
-                    "wake_failed",
-                    format!("{e:#}"),
-                    "check the temp dir is writable",
-                );
-                return res;
-            }
-        };
+    let mut store = match crate::sandbox::app_store(
+        engine,
+        m,
+        data,
+        log,
+        &crate::fsguard::AppCaps::default(),
+        None,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            fail(
+                &mut res,
+                "wake_failed",
+                format!("{e:#}"),
+                "check the temp dir is writable",
+            );
+            return res;
+        }
+    };
     let proxy = match pre.instantiate_async(&mut store).await {
         Ok(p) => p,
         Err(e) => {

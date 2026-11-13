@@ -6,6 +6,7 @@ use crate::grants::{Manifest, Maxima, ungranted_imports, valid_name};
 use crate::logcap::AppLog;
 use crate::obs::{AccessLine, ErrorKind, Evicted, Gauges, Listener, Metrics, RequestIds};
 use crate::prefetch;
+use crate::quota::{self, AppQuota};
 use crate::sandbox::{CallError, Guarded, TrapKind, call_handler};
 use crate::tokens::{self, Need, Principal, Scope, ct_eq};
 use base64::Engine as _;
@@ -109,6 +110,9 @@ pub struct App {
     requests: AtomicU64,
     wakes: AtomicU64,
     errors: AtomicU64,
+    /// The operator's limits for this app and what it has used. One per name, shared with the
+    /// app's later deploys (see `Server::quotas`).
+    quota: Arc<AppQuota>,
 }
 
 pub struct Server {
@@ -131,6 +135,13 @@ pub struct Server {
     tokens: Mutex<tokens::Store>,
     /// Wrong tokens by source address, to slow down guessing.
     auth_failures: tokens::AuthFailures,
+    /// Per-app limits set by the operator and the CPU and egress counters, by app name: one for
+    /// each deployed app and each name with a stored override. Kept across redeploys, evictions
+    /// and freezes; an app's counters start over when it is removed or the server restarts.
+    quotas: Mutex<HashMap<String, Arc<AppQuota>>>,
+    /// Held while the files under `<data-dir>/limits/` and the format stamp change, so the stamp
+    /// says format 2 whenever an override is on disk.
+    limits_io: Mutex<()>,
 }
 
 /// Who an admin request speaks for.
@@ -996,6 +1007,31 @@ fn app_frozen(name: &str) -> Resp {
     r
 }
 
+/// 503 for a public request to an app that has used up the CPU budget its operator set. It names
+/// no figure: the client may be anyone.
+fn cpu_budget_exhausted(name: &str, secs: u64) -> Resp {
+    let mut r = err_resp(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "cpu_budget_exhausted",
+        format!("app '{name}' has used its CPU budget for now"),
+        "retry after Retry-After seconds. The operator sets this app's budget with `spared limits set`",
+    );
+    r.headers_mut()
+        .insert("retry-after", secs.to_string().parse().unwrap());
+    r
+}
+
+const LIMITS_USAGE: &str = r#"send a JSON object with at least one of data_mb, entries, cpu_ms_per_min, egress_bytes_per_hour, each a whole number of at least 1 (spared limits set <app> --data-mb N --entries N --cpu-percent P --egress-mb-per-hour N)"#;
+
+fn limits_write_failed(what: &str, e: impl std::fmt::Display) -> Resp {
+    err_resp(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "limits_write_failed",
+        format!("{what}: {e}. The limits in force are the ones `spared limits show` reports"),
+        "check disk space and the permissions of <data-dir>/limits/ and <data-dir>/format.json, then run the command again",
+    )
+}
+
 fn write_failed(e: std::io::Error) -> DeployError {
     DeployError::new(
         StatusCode::INTERNAL_SERVER_ERROR,
@@ -1227,10 +1263,30 @@ impl Server {
             )));
         }
         // Before anything under the data dir is read or changed: a layout this build does not
-        // understand is refused, and a directory without a stamp gets one.
-        datadir::stamp(&cfg.data_dir).map_err(|e| {
+        // understand is refused, and a directory without a stamp gets one. Format 2 while any
+        // app has an operator-set limit, so a release that would ignore it refuses to start.
+        let stored_limits = quota::stored_names(&cfg.data_dir);
+        let format = if stored_limits.is_empty() {
+            datadir::BASE_FORMAT
+        } else {
+            datadir::LIMITS_FORMAT
+        };
+        datadir::stamp(&cfg.data_dir, format).map_err(|e| {
             wasmtime::Error::msg(format!("{} ({}). Fix: {}", e.message, e.kind, e.fix))
         })?;
+        let mut quotas = HashMap::new();
+        for name in stored_limits {
+            let q = match quota::read(&cfg.data_dir, &name) {
+                Ok(o) => AppQuota::new(o),
+                Err(why) => {
+                    eprintln!(
+                        "app {name}: its limits file cannot be read ({why}); the app is not served until `spared limits set` or `spared limits clear` replaces it"
+                    );
+                    AppQuota::damaged(why)
+                }
+            };
+            quotas.insert(name, Arc::new(q));
+        }
         create_private_dir(&cfg.data_dir.join("components"))?;
         create_private_dir(&cfg.data_dir.join("backups"))?;
         create_private_dir(&cfg.data_dir.join(TRASH))?;
@@ -1262,6 +1318,8 @@ impl Server {
             remote,
             tokens: Mutex::new(app_tokens),
             auth_failures: tokens::AuthFailures::default(),
+            quotas: Mutex::new(quotas),
+            limits_io: Mutex::new(()),
         });
         for e in std::fs::read_dir(s.cfg.data_dir.join("apps"))?.flatten() {
             let name = e.file_name().to_string_lossy().to_string();
@@ -1529,6 +1587,12 @@ impl Server {
                 bad.join(", ")
             )));
         }
+        let quota = self.quota(name);
+        if let Some(why) = quota.damage() {
+            return Err(wasmtime::Error::msg(format!(
+                "its limits file cannot be read ({why}). Fix: `spared limits set {name} ...` or `spared limits clear {name}`"
+            )));
+        }
         let freeze = read_freeze_marker(&dir);
         Ok(App {
             name: name.to_string(),
@@ -1546,7 +1610,18 @@ impl Server {
             requests: AtomicU64::new(0),
             wakes: AtomicU64::new(0),
             errors: AtomicU64::new(0),
+            quota,
         })
+    }
+
+    /// The limits and counters of `name`, made (with no override) the first time it is asked for.
+    fn quota(&self, name: &str) -> Arc<AppQuota> {
+        self.quotas
+            .lock()
+            .unwrap()
+            .entry(name.to_string())
+            .or_insert_with(|| Arc::new(AppQuota::new(None)))
+            .clone()
     }
 
     fn load_app(&self, name: &str) -> Result<App> {
@@ -1630,8 +1705,10 @@ impl Server {
             let _ = std::fs::rename(&log_path, app.dir.join("app.log.1"));
         }
         let log = AppLog::open(log_path, self.cfg.caps.log)?;
+        let caps = app.quota.caps(&self.cfg.caps);
         let mut store =
-            crate::sandbox::app_store(&self.engine, m, &data, &log, &self.cfg.caps).await?;
+            crate::sandbox::app_store(&self.engine, m, &data, &log, &caps, Some(app.quota.clone()))
+                .await?;
         store.data_mut().log = Some(log);
         let proxy = app.shared.pre.instantiate_async(&mut store).await?;
         Ok(Live { store, proxy })
@@ -1645,6 +1722,10 @@ impl Server {
     ) -> Resp {
         if app.is_frozen() {
             return app_frozen(&app.name);
+        }
+        // Before the body is read, so an app over its CPU budget holds no request bytes.
+        if let Err(secs) = app.quota.cpu_admit() {
+            return cpu_budget_exhausted(&app.name, secs);
         }
         let (parts, body) = req.into_parts();
         let max = (self.cfg.max.request_mb as u64) << 20;
@@ -1725,6 +1806,11 @@ impl Server {
                 // A freeze sets the flag while it holds the instance lock, so a request that was
                 // waiting for the lock sees it here and never runs after the freeze.
                 Ok((app, _)) if app.is_frozen() => app_frozen(&app.name),
+                // Again once it is this request's turn: requests run one at a time, so a request
+                // overdraws the budget by at most its own cpu_ms.
+                Ok((app, _)) if let Err(secs) = app.quota.cpu_admit() => {
+                    cpu_budget_exhausted(&app.name, secs)
+                }
                 Ok((app, guard)) => {
                     s.run_request(
                         app,
@@ -1824,6 +1910,7 @@ impl Server {
             self.cfg.max.response_mb << 20,
         )
         .await;
+        app.quota.cpu_charge(live.store.data().clock.used_ns());
         app.requests.fetch_add(1, Ordering::Relaxed);
         app.last_ms.store(self.now_ms(), Ordering::Relaxed);
         let e = match outcome {
@@ -1998,13 +2085,15 @@ impl Server {
         )
     }
 
-    /// `app_json` for each app, with `data_bytes` measured off the async runtime and outside the
-    /// app-table lock (an app controls how big and deep its data tree is).
-    async fn apps_json(&self, apps: Vec<Arc<App>>) -> Vec<serde_json::Value> {
+    /// `app_json` for each app, with `data_bytes` and `data_entries` measured off the async
+    /// runtime and outside the app-table lock (an app controls how big and deep its data tree is).
+    /// With `admin`, each also carries `quota`: its effective limits and what it used. An app
+    /// token never sees its limits.
+    async fn apps_json(&self, apps: Vec<Arc<App>>, admin: bool) -> Vec<serde_json::Value> {
         let dirs: Vec<PathBuf> = apps.iter().map(|a| a.dir.join("data")).collect();
         let sizes = tokio::task::spawn_blocking(move || {
             dirs.iter()
-                .map(|d| backup::tree_stats(d))
+                .map(|d| backup::tree_counts(d))
                 .collect::<Vec<_>>()
         })
         .await
@@ -2013,11 +2102,15 @@ impl Server {
             .enumerate()
             .map(|(i, a)| {
                 let mut v = self.app_json(a);
-                if let Some(st) = sizes.get(i) {
+                if let Some((st, entries)) = sizes.get(i) {
                     v["data_bytes"] = st.bytes.into();
+                    v["data_entries"] = (*entries).into();
                     if st.truncated {
                         v["data_bytes_partial"] = true.into();
                     }
+                }
+                if admin {
+                    v["quota"] = self.quota_json(a.quota.override_now().as_ref(), Some(&a.quota));
                 }
                 v
             })
@@ -2025,7 +2118,10 @@ impl Server {
     }
 
     async fn one_app_json(&self, a: Arc<App>) -> serde_json::Value {
-        self.apps_json(vec![a]).await.pop().unwrap_or_default()
+        self.apps_json(vec![a], false)
+            .await
+            .pop()
+            .unwrap_or_default()
     }
 
     fn app_json(&self, a: &App) -> serde_json::Value {
@@ -2049,6 +2145,7 @@ impl Server {
             "errors": a.errors.load(Ordering::Relaxed),
             "last_request_secs_ago": if last == 0 { serde_json::Value::Null } else { serde_json::json!((self.now_ms().saturating_sub(last)) / 1000) },
             "data_bytes": serde_json::Value::Null,
+            "data_entries": serde_json::Value::Null,
             "grants": {"data": a.manifest.grants.data, "fetch": a.manifest.grants.fetch},
             "limits": {"memory_mb": a.manifest.limits.memory_mb, "cpu_ms": a.manifest.limits.cpu_ms, "deadline_ms": a.manifest.limits.deadline_ms, "max_outbound": a.manifest.limits.max_outbound},
             "url": format!("http://{}.localhost:{}/", a.name, self.cfg.listen.port()),
@@ -2505,7 +2602,20 @@ impl Server {
         }
         let removed = tokio::task::spawn_blocking(move || backup::remove_tree(&doomed)).await;
         self.release_component(&a.shared.hash);
+        // The counters go with the app. An operator's override stays: it is server policy for the
+        // name, and an app token with the rm scope must not be a way to shed it.
+        let kept_limits = {
+            let mut qs = self.quotas.lock().unwrap();
+            let over = qs.remove(name).and_then(|q| q.override_now());
+            if let Some(o) = &over {
+                qs.insert(name.to_string(), Arc::new(AppQuota::new(Some(o.clone()))));
+            }
+            over.is_some()
+        };
         let mut out = serde_json::json!({"deleted": name});
+        if kept_limits {
+            out["limits_kept"] = true.into();
+        }
         if revoked > 0 {
             out["tokens_revoked"] = revoked.into();
         }
@@ -2720,6 +2830,208 @@ impl Server {
             .ok()
             .filter(serde_json::Value::is_object)
             .ok_or_else(|| bad("the body must be a JSON object"))
+    }
+
+    /// What `spared limits show` prints for `name`: the stored override, what is in force, the
+    /// server's caps, the fields the caps lowered, and what the app has used. Works for a name with
+    /// an override and no app, and for neither.
+    fn limits_json(&self, name: &str) -> serde_json::Value {
+        let q = self.quotas.lock().unwrap().get(name).cloned();
+        let over = q.as_ref().and_then(|q| q.override_now());
+        let mut v = self.quota_json(over.as_ref(), q.as_deref());
+        v["name"] = name.into();
+        v["app_exists"] = self.apps.read().unwrap().contains_key(name).into();
+        v["override"] = match &over {
+            Some(o) => serde_json::to_value(o).unwrap_or_default(),
+            None => serde_json::Value::Null,
+        };
+        v["set_at"] = quota::set_at(&self.cfg.data_dir, name).into();
+        if let Some(why) = q.as_ref().and_then(|q| q.damage()) {
+            v["damaged"] = why.into();
+        }
+        v
+    }
+
+    /// The effective limits, the fields set by an override, the fields the server's caps lowered,
+    /// and the CPU and egress use. Admin callers only: an app token never sees its limits.
+    fn quota_json(
+        &self,
+        over: Option<&quota::Override>,
+        q: Option<&AppQuota>,
+    ) -> serde_json::Value {
+        let caps = &self.cfg.caps;
+        let (eff, clamped) = quota::Override::effective(over, caps);
+        let set: Vec<&str> = over
+            .map(|o| {
+                [
+                    ("data_mb", o.data_mb.is_some()),
+                    ("entries", o.entries.is_some()),
+                    ("cpu_ms_per_min", o.cpu_ms_per_min.is_some()),
+                    ("egress_bytes_per_hour", o.egress_bytes_per_hour.is_some()),
+                ]
+                .into_iter()
+                .filter_map(|(k, on)| on.then_some(k))
+                .collect()
+            })
+            .unwrap_or_default();
+        serde_json::json!({
+            "effective": {
+                "data_mb": eff.data_bytes >> 20,
+                "entries": eff.entries,
+                "cpu_ms_per_min": eff.cpu_ms_per_min,
+                "egress_bytes_per_hour": eff.egress_bytes_per_hour,
+            },
+            "server_caps": {
+                "data_mb": caps.max_data_bytes >> 20,
+                "entries": caps.max_entries,
+                "cpu_ms_per_min": quota::CPU_MS_PER_MIN_MAX,
+            },
+            "overridden": set,
+            "clamped": clamped,
+            "usage": q.map_or_else(|| AppQuota::new(None).usage_json(), AppQuota::usage_json),
+        })
+    }
+
+    async fn show_limits(&self, name: &str) -> Resp {
+        if let Err(e) = check_name(name) {
+            return e.into_resp();
+        }
+        let mut v = self.limits_json(name);
+        let app = self.apps.read().unwrap().get(name).cloned();
+        if let Some(a) = app {
+            let data = a.dir.join("data");
+            let st = tokio::task::spawn_blocking(move || backup::tree_counts(&data))
+                .await
+                .unwrap_or_default();
+            v["usage"]["data_bytes"] = st.0.bytes.into();
+            v["usage"]["data_entries"] = st.1.into();
+        }
+        json_resp(StatusCode::OK, v)
+    }
+
+    /// `PUT /v1/apps/{name}/limits`: store the override (replacing any earlier one), put it in
+    /// force, and drop the app's instance so the next one wakes with the new disk caps. The CPU and
+    /// egress budgets apply at once. The name need not have an app yet.
+    async fn set_limits(&self, name: &str, req: Request<Incoming>) -> Resp {
+        if let Err(e) = check_name(name) {
+            return e.into_resp();
+        }
+        let collect = Limited::new(req.into_body(), 4096).collect();
+        let body = match tokio::time::timeout(self.cfg.client_timeout, collect).await {
+            Ok(Ok(b)) => b.to_bytes(),
+            _ => {
+                return err_resp(
+                    StatusCode::BAD_REQUEST,
+                    "bad_limits",
+                    "could not read a request body of at most 4 KiB".into(),
+                    LIMITS_USAGE,
+                );
+            }
+        };
+        let over = match quota::Override::from_request(&body) {
+            Ok(o) => o,
+            Err(m) => return err_resp(StatusCode::BAD_REQUEST, "bad_limits", m, LIMITS_USAGE),
+        };
+        let lock = self.name_lock(name);
+        let _serial = lock.lock().await;
+        {
+            let _io = self.limits_io.lock().unwrap();
+            // The stamp first: an override on disk under a format-1 stamp is what an older
+            // release would open and ignore.
+            if let Err(e) = datadir::stamp(&self.cfg.data_dir, datadir::LIMITS_FORMAT) {
+                return limits_write_failed("cannot raise the data dir's format stamp", e.message);
+            }
+            if let Err(e) = quota::write(&self.cfg.data_dir, name, &over, &now_text()) {
+                return limits_write_failed("cannot write the limits file", e);
+            }
+        }
+        self.quota(name).set(Some(over));
+        eprintln!("app {name}: limits set");
+        let evicted = self.after_limits_change(name).await;
+        let mut v = self.limits_json(name);
+        v["evicted"] = evicted.into();
+        json_resp(StatusCode::OK, v)
+    }
+
+    /// `DELETE /v1/apps/{name}/limits`: remove the override, so the server's caps apply again.
+    /// The last one removed puts the format stamp back to 1.
+    async fn clear_limits(&self, name: &str) -> Resp {
+        if let Err(e) = check_name(name) {
+            return e.into_resp();
+        }
+        let lock = self.name_lock(name);
+        let _serial = lock.lock().await;
+        let removed = {
+            let _io = self.limits_io.lock().unwrap();
+            let removed = match quota::remove(&self.cfg.data_dir, name) {
+                Ok(r) => r,
+                Err(e) => return limits_write_failed("cannot remove the limits file", e),
+            };
+            if quota::stored_names(&self.cfg.data_dir).is_empty()
+                && let Err(e) = datadir::stamp(&self.cfg.data_dir, datadir::BASE_FORMAT)
+            {
+                eprintln!(
+                    "warning: no app has limits any more, but the format stamp stays at 2 ({}); releases before per-app limits refuse this data dir until the next start",
+                    e.message
+                );
+            }
+            removed
+        };
+        let app_exists = self.apps.read().unwrap().contains_key(name);
+        {
+            let mut qs = self.quotas.lock().unwrap();
+            if app_exists || self.cfg.data_dir.join("apps").join(name).is_dir() {
+                if let Some(q) = qs.get(name) {
+                    q.set(None);
+                }
+            } else {
+                qs.remove(name);
+            }
+        }
+        if removed {
+            eprintln!("app {name}: limits cleared");
+        }
+        let evicted = self.after_limits_change(name).await;
+        let mut v = self.limits_json(name);
+        v["cleared"] = removed.into();
+        v["evicted"] = evicted.into();
+        json_resp(StatusCode::OK, v)
+    }
+
+    /// After an override changed: drop the app's instance so its next wake reads the new disk
+    /// caps, or load the app when a damaged limits file kept it out of the table at start. True
+    /// when an instance was dropped. The caller holds the name lock.
+    async fn after_limits_change(&self, name: &str) -> bool {
+        let app = self.apps.read().unwrap().get(name).cloned();
+        if let Some(app) = app {
+            let mut g = app.live.lock().await;
+            let had = g.take().is_some();
+            if had {
+                app.hot.store(false, Ordering::Relaxed);
+                self.metrics.eviction(Evicted::Admin);
+            }
+            return had;
+        }
+        if self
+            .cfg
+            .data_dir
+            .join("apps")
+            .join(name)
+            .join("manifest.toml")
+            .is_file()
+        {
+            match self.load_app(name) {
+                Ok(a) => {
+                    eprintln!("app {name}: loaded now that its limits file is readable");
+                    self.apps
+                        .write()
+                        .unwrap()
+                        .insert(name.to_string(), Arc::new(a));
+                }
+                Err(e) => eprintln!("app {name}: still not loaded: {e:#}"),
+            }
+        }
+        false
     }
 
     /// The app's deployed code: the original wasm as the body and its `spared.toml` in the
@@ -3587,7 +3899,7 @@ impl Server {
                 v.sort_by(|a, b| a.name.cmp(&b.name));
                 json_resp(
                     StatusCode::OK,
-                    serde_json::json!({"apps": self.apps_json(v).await}),
+                    serde_json::json!({"apps": self.apps_json(v, matches!(caller, Caller::Admin)).await}),
                 )
             }
             (Method::PUT, ["v1", "apps", name]) => {
@@ -3604,7 +3916,11 @@ impl Server {
             (Method::GET, ["v1", "apps", name]) => {
                 let app = self.apps.read().unwrap().get(*name).cloned();
                 match app {
-                    Some(a) => json_resp(StatusCode::OK, self.one_app_json(a).await),
+                    Some(a) => {
+                        let admin = matches!(caller, Caller::Admin);
+                        let v = self.apps_json(vec![a], admin).await.pop();
+                        json_resp(StatusCode::OK, v.unwrap_or_default())
+                    }
                     None => no_such_app(name),
                 }
             }
@@ -3639,6 +3955,15 @@ impl Server {
                 detached(async move { self.thaw_route(&name, req).await }).await
             }
             (Method::GET, ["v1", "apps", name, "code"]) => self.export_code(name).await,
+            (Method::GET, ["v1", "apps", name, "limits"]) => self.show_limits(name).await,
+            (Method::PUT, ["v1", "apps", name, "limits"]) => {
+                let name = name.to_string();
+                detached(async move { self.set_limits(&name, req).await }).await
+            }
+            (Method::DELETE, ["v1", "apps", name, "limits"]) => {
+                let name = name.to_string();
+                detached(async move { self.clear_limits(&name).await }).await
+            }
             (Method::GET, ["v1", "server"]) => self.server_info(),
             (Method::POST, ["v1", "apps", name, "fetch"]) => self.fetch(name, req).await,
             (Method::GET, ["v1", "apps", name, "fetch", rid]) => self.fetch_status(name, rid).await,
@@ -4082,10 +4407,13 @@ pub async fn serve(
     let path = if path_routing { ", or /_/<app>/" } else { "" };
     let shown_dir = std::fs::canonicalize(&data_dir).unwrap_or(data_dir);
     // The admin token is never printed, here or anywhere else.
+    let format = datadir::check(&shown_dir)
+        .ok()
+        .flatten()
+        .map_or(datadir::BASE_FORMAT, |s| s.format);
     eprintln!(
-        "data dir: {} (format {}), {loaded} apps loaded{examples_note}",
+        "data dir: {} (format {format}), {loaded} apps loaded{examples_note}",
         shown_dir.display(),
-        datadir::DATA_FORMAT
     );
     eprintln!(
         "apps:  http://{listen} (hosts <app>.localhost{also}{path}; health check: GET /healthz)"

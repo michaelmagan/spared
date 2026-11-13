@@ -1,11 +1,14 @@
 use crate::fsguard::{AppCaps, FsGuard};
 use crate::grants::{Grants, Manifest, host_allowed, ip_denied, norm_host, ungranted_imports};
+use crate::quota::{AppQuota, EGRESS_REFUSED};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, LengthLimitError, Limited};
 use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::task::{Context, Poll};
 use std::time::Duration;
 use wasmtime::component::{Component, Linker, ResourceTable};
 use wasmtime::{
@@ -111,16 +114,18 @@ where
     Ok(b)
 }
 
-/// A store for one app instance from a finished WASI context: the manifest's limits, and the
-/// books for the data directory when the app has one.
+/// A store for one app instance from a finished WASI context: the manifest's limits, the books for
+/// the data directory when the app has one, and the app's budgets (`quota`, which the server keeps
+/// per app across instances; `None` where nothing keeps them, as in `spared test`).
 pub async fn store_for(
     engine: &Engine,
     m: &Manifest,
     data: &Path,
     wasi: WasiCtx,
     caps: &AppCaps,
+    quota: Option<Arc<AppQuota>>,
 ) -> Store<Guarded> {
-    let mut store = Guarded::store(engine, wasi, m);
+    let mut store = Guarded::store(engine, wasi, m, quota);
     if m.grants.data {
         store.data_mut().fsguard = Some(FsGuard::open(data.to_path_buf(), caps.clone()).await);
     }
@@ -134,12 +139,13 @@ pub async fn app_store<O>(
     data: &Path,
     out: &O,
     caps: &AppCaps,
+    quota: Option<Arc<AppQuota>>,
 ) -> wasmtime::Result<Store<Guarded>>
 where
     O: StdoutStream + Clone + 'static,
 {
     let wasi = wasi_builder(m, data, out)?.build();
-    Ok(store_for(engine, m, data, wasi, caps).await)
+    Ok(store_for(engine, m, data, wasi, caps, quota).await)
 }
 
 /// Why a component cannot be an app, in the shape the CLI and the server both report.
@@ -209,6 +215,76 @@ pub struct PolicyHooks {
     /// Outbound calls left in the current request; reset to `per_request` at each request.
     pub remaining: u32,
     pub per_request: u32,
+    /// The app's egress budget and byte count, kept by the server outside the instance.
+    pub quota: Option<Arc<AppQuota>>,
+    /// Unit tests only: reach a loopback test server, which [`ip_denied`] always refuses.
+    #[cfg(test)]
+    pub test_loopback: bool,
+}
+
+impl PolicyHooks {
+    #[cfg(test)]
+    fn loopback_allowed(&self) -> bool {
+        self.test_loopback
+    }
+
+    #[cfg(not(test))]
+    fn loopback_allowed(&self) -> bool {
+        false
+    }
+}
+
+fn egress_refused() -> HttpError {
+    HttpError::InternalError(Some(EGRESS_REFUSED.into()))
+}
+
+/// An outbound request or response body whose data bytes are charged to the app's egress budget
+/// as they pass. The frame that spends the budget is replaced by an error, and so is every later
+/// poll, so the guest sees the call fail and the body stops there.
+struct Metered {
+    inner: WasiBody,
+    quota: Arc<AppQuota>,
+    cut: bool,
+}
+
+fn metered(inner: WasiBody, quota: &Arc<AppQuota>) -> WasiBody {
+    Metered {
+        inner,
+        quota: quota.clone(),
+        cut: false,
+    }
+    .boxed_unsync()
+}
+
+impl http_body::Body for Metered {
+    type Data = Bytes;
+    type Error = HttpError;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<http_body::Frame<Bytes>, HttpError>>> {
+        if self.cut {
+            return Poll::Ready(Some(Err(egress_refused())));
+        }
+        let r = Pin::new(&mut self.inner).poll_frame(cx);
+        if let Poll::Ready(Some(Ok(f))) = &r
+            && let Some(d) = f.data_ref()
+            && !self.quota.egress_charge(d.len() as u64)
+        {
+            self.cut = true;
+            return Poll::Ready(Some(Err(egress_refused())));
+        }
+        r
+    }
+
+    fn is_end_stream(&self) -> bool {
+        !self.cut && self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.inner.size_hint()
+    }
 }
 
 /// Why an outbound request is refused before any lookup, or None if its URL may proceed.
@@ -261,13 +337,26 @@ impl WasiHttpHooks for PolicyHooks {
         let listed = host_allowed(&self.allow, &host);
         let budget = self.remaining > 0;
         self.remaining = self.remaining.saturating_sub(1);
+        let loopback_ok = self.loopback_allowed();
+        let quota = self.quota.clone();
+        // After the policy checks, so a call they refuse is not counted against the egress budget.
+        let egress_open = refused.is_none()
+            && budget
+            && listed
+            && quota.as_ref().is_none_or(|q| q.egress_admit());
+        let request = match &quota {
+            Some(q) => request.map(|b| metered(b, q)),
+            None => request,
+        };
         Box::new(async move {
-            use http_body_util::BodyExt;
             if let Some(e) = refused {
                 return Err(e);
             }
             if !budget || !listed {
                 return Err(HttpError::HttpRequestDenied);
+            }
+            if !egress_open {
+                return Err(egress_refused());
             }
             let bare = host
                 .trim_start_matches('[')
@@ -277,13 +366,18 @@ impl WasiHttpHooks for PolicyHooks {
                 Ok(a) => a.collect(),
                 Err(_) => return Err(HttpError::DestinationNotFound),
             };
-            if addrs.is_empty() || addrs.iter().any(|a| ip_denied(a.ip())) {
+            let denied = |ip: std::net::IpAddr| ip_denied(ip) && !(loopback_ok && ip.is_loopback());
+            if addrs.is_empty() || addrs.iter().any(|a| denied(a.ip())) {
                 return Err(HttpError::DestinationIpProhibited);
             }
             let (res, io) =
                 crate::pinned_send::pinned_send_request(addrs[0], request, options).await?;
+            let res = res.map(BodyExt::boxed_unsync);
             Ok((
-                res.map(BodyExt::boxed_unsync),
+                match &quota {
+                    Some(q) => res.map(|b| metered(b, q)),
+                    None => res,
+                },
                 Box::new(io) as Box<dyn Future<Output = _> + Send>,
             ))
         })
@@ -387,6 +481,17 @@ impl PollClock {
         self.spent_ns.store(0, Ordering::Relaxed);
     }
 
+    /// Nanoseconds polled since the last reset, the poll in progress included.
+    pub fn used_ns(&self) -> u64 {
+        let since = self.polling_since_ns.load(Ordering::Relaxed);
+        let live = if since == NOT_POLLING {
+            0
+        } else {
+            self.now_ns().saturating_sub(since)
+        };
+        self.spent_ns.load(Ordering::Relaxed) + live
+    }
+
     pub fn enter(&self) {
         self.polling_since_ns
             .store(self.now_ns(), Ordering::Relaxed);
@@ -401,13 +506,7 @@ impl PollClock {
     }
 
     pub fn used_ms(&self) -> u64 {
-        let since = self.polling_since_ns.load(Ordering::Relaxed);
-        let live = if since == NOT_POLLING {
-            0
-        } else {
-            self.now_ns().saturating_sub(since)
-        };
-        (self.spent_ns.load(Ordering::Relaxed) + live) / 1_000_000
+        self.used_ns() / 1_000_000
     }
 }
 
@@ -445,7 +544,12 @@ impl Guarded {
     /// Compute: the store yields to the async executor at every epoch tick, so a guest that
     /// computes never holds a runtime thread for more than about a millisecond, and it is
     /// interrupted once it has run for `cpu_ms` ticks in one request (see [`start_request`]).
-    pub fn store(engine: &Engine, wasi: WasiCtx, m: &Manifest) -> Store<Guarded> {
+    pub fn store(
+        engine: &Engine,
+        wasi: WasiCtx,
+        m: &Manifest,
+        quota: Option<Arc<AppQuota>>,
+    ) -> Store<Guarded> {
         let memory_cap = m.limits.memory_mb.saturating_mul(1 << 20);
         let limits = StoreLimitsBuilder::new()
             .memory_size(memory_cap)
@@ -470,6 +574,9 @@ impl Guarded {
                     allow: m.grants.fetch.clone(),
                     remaining: m.limits.max_outbound,
                     per_request: m.limits.max_outbound,
+                    quota,
+                    #[cfg(test)]
+                    test_loopback: false,
                 },
                 limits,
                 fsguard: None,

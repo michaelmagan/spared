@@ -11,6 +11,7 @@ mod logcap;
 mod obs;
 mod pinned_send;
 mod prefetch;
+mod quota;
 mod remote;
 mod sandbox;
 mod server;
