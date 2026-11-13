@@ -3247,15 +3247,19 @@ impl Server {
             None
         };
         let Some((rec, already, written)) = done else {
-            return err_resp(
-                StatusCode::NOT_FOUND,
-                "no_such_token",
-                format!(
-                    "no token with id '{}'",
-                    id.chars().take(40).collect::<String>()
-                ),
-                "list tokens with `spared token list` and pass an id from it",
-            );
+            // Only a well-formed id is repeated back: anything else may be a token pasted by mistake.
+            let (message, fix) = if tokens::valid_id(id) {
+                (
+                    format!("no token with id '{id}'"),
+                    "list tokens with `spared token list` and pass an id from it",
+                )
+            } else {
+                (
+                    "no token has that id: an id is 12 hex digits, and the value sent is not one (it is not repeated here, in case it is a token)".to_string(),
+                    "list tokens with `spared token list` and pass an id from it. If you sent a token itself, `spared token revoke <token>` turns it into its id locally",
+                )
+            };
+            return err_resp(StatusCode::NOT_FOUND, "no_such_token", message, fix);
         };
         if let Err(e) = written {
             return err_resp(
@@ -3793,10 +3797,10 @@ impl Server {
         match tokens::need(method.as_str(), segs, frozen) {
             Need::Admin => wrong(
                 format!(
-                    "app token {} (for app '{}') cannot use {method} /{}",
+                    "app token {} (for app '{}') cannot use {method} {}",
                     p.id,
                     p.app,
-                    segs.join("/")
+                    tokens::redact_path(&format!("/{}", segs.join("/")))
                 ),
                 fix_admin,
             ),
@@ -4003,7 +4007,7 @@ impl Server {
             _ => err_resp(
                 StatusCode::NOT_FOUND,
                 "no_route",
-                format!("no admin route {path}"),
+                format!("no admin route {}", tokens::redact_path(path)),
                 "the admin API lives under /v1/ (for example GET /v1/apps); see AGENTS.md",
             ),
         }
@@ -4019,7 +4023,11 @@ impl Server {
     ) -> Resp {
         let (started, time) = (Instant::now(), SystemTime::now());
         let method: String = req.method().as_str().chars().take(16).collect();
-        let path = req.uri().path().to_string();
+        // An admin path can hold a token pasted where an id belongs: the log never repeats one.
+        let path = match listener {
+            Listener::Admin => tokens::redact_path(req.uri().path()),
+            Listener::Public => req.uri().path().to_string(),
+        };
         let id = self.ids.next();
         let (app, token_id, mut resp) = match listener {
             Listener::Public => {

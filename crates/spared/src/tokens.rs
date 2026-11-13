@@ -118,6 +118,50 @@ pub fn looks_like_token(s: &str) -> bool {
     })
 }
 
+/// What stands in for a path segment that may hold a token, in logs and error bodies.
+pub const REDACTED: &str = "<redacted>";
+
+/// `path` as the access log and error bodies may show it: under `/v1/tokens/` every segment that
+/// is not a token id, and anywhere a segment that holds `spt_` once percent-decoded, become
+/// [`REDACTED`]. A token pasted where an id belongs, or into any admin path, is never repeated.
+pub fn redact_path(path: &str) -> String {
+    let segs: Vec<&str> = path.split('/').collect();
+    let under_tokens = |i: usize| i >= 3 && segs[1] == "v1" && segs[2] == "tokens";
+    segs.iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let decoded = percent_decoded(s).to_ascii_lowercase();
+            if decoded.contains(PREFIX) || (under_tokens(i) && !valid_id(s)) {
+                REDACTED
+            } else {
+                s
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// `s` with each `%XX` turned into its byte, lossily as UTF-8.
+fn percent_decoded(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = |c: u8| (c as char).to_digit(16);
+        if b[i] == b'%'
+            && i + 2 < b.len()
+            && let (Some(h), Some(l)) = (hex(b[i + 1]), hex(b[i + 2]))
+        {
+            out.push((h * 16 + l) as u8);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// The id of a token: the first 12 hex digits of its SHA-256.
 pub fn id_of(secret: &str) -> String {
     hex(&Sha256::digest(secret.as_bytes()))[..ID_HEX].to_string()
@@ -708,6 +752,46 @@ mod tests {
             scope_list(),
             "deploy, read, evict, backup, restore, freeze, rm"
         );
+    }
+
+    #[test]
+    fn a_token_in_an_admin_path_is_redacted() {
+        let t = format!("{PREFIX}{}", "ab".repeat(32));
+        let hexpart = &t[PREFIX.len()..];
+        for (path, want) in [
+            (
+                format!("/v1/tokens/{t}"),
+                "/v1/tokens/<redacted>".to_string(),
+            ),
+            (
+                format!("/v1/tokens/{hexpart}"),
+                "/v1/tokens/<redacted>".into(),
+            ),
+            (
+                format!("/v1/tokens/spt%5F{hexpart}"),
+                "/v1/tokens/<redacted>".into(),
+            ),
+            (
+                format!("/v1/tokens/{t}/x"),
+                "/v1/tokens/<redacted>/<redacted>".into(),
+            ),
+            (format!("/v1/apps/{t}"), "/v1/apps/<redacted>".into()),
+            (
+                format!("/v1/%74okens/SPT_{hexpart}"),
+                "/v1/%74okens/<redacted>".into(),
+            ),
+            (
+                "/v1/tokens/0123456789ab".into(),
+                "/v1/tokens/0123456789ab".into(),
+            ),
+            ("/v1/tokens".into(), "/v1/tokens".into()),
+            ("/v1/apps/blog/logs".into(), "/v1/apps/blog/logs".into()),
+            ("/metrics".into(), "/metrics".into()),
+            ("/".into(), "/".into()),
+            ("/v1/apps/x%".into(), "/v1/apps/x%".into()),
+        ] {
+            assert_eq!(redact_path(&path), want, "{path}");
+        }
     }
 
     #[test]

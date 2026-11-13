@@ -717,6 +717,52 @@ fn an_app_token_deploys_only_its_own_app() {
     assert_eq!(rc, 0, "{v}");
 }
 
+/// Whether `text` holds any 16 hex digits in a row of `hexpart`: an echo cut short still counts.
+fn leaks(text: &str, hexpart: &str) -> bool {
+    (0..=hexpart.len() - 16).any(|i| text.contains(&hexpart[i..i + 16]))
+}
+
+#[test]
+fn a_token_sent_where_an_id_belongs_is_echoed_nowhere() {
+    let s = scratch("tok-echo");
+    let n = Node::start(&s.0, "n", vec![], vec![]);
+    let (secret, _) = mint(&n, json!({"app": "blog"}));
+    let (other, _) = mint(&n, json!({"app": "blog", "scopes": ["read"]}));
+    let hexpart = secret.strip_prefix("spt_").unwrap();
+    let mut bodies = vec![];
+    for (token, method, path) in [
+        (n.token.as_str(), "DELETE", format!("/v1/tokens/{secret}")),
+        (
+            n.token.as_str(),
+            "DELETE",
+            format!("/v1/tokens/spt%5F{hexpart}"),
+        ),
+        (n.token.as_str(), "DELETE", format!("/v1/tokens/{hexpart}")),
+        (n.token.as_str(), "GET", format!("/v1/tokens/{secret}")),
+        (n.token.as_str(), "DELETE", format!("/v1/tokens/{secret}/x")),
+        (other.as_str(), "DELETE", format!("/v1/tokens/{secret}")),
+    ] {
+        let (st, raw) = call_raw(&n, token, method, &path, &[], b"");
+        let body = String::from_utf8_lossy(&raw).to_string();
+        assert!([403, 404].contains(&st), "{method} {path}: {st} {body}");
+        assert!(
+            !leaks(&body, hexpart),
+            "{method} {path} echoed the token: {body}"
+        );
+        bodies.push(body);
+    }
+    // The token still works: nothing revoked it.
+    assert_eq!(call(&n, &secret, "GET", "/v1/apps", b"").0, 200);
+    let log = n.log_text();
+    assert!(log.contains("/v1/tokens/<redacted>"), "{log}");
+    assert!(
+        !leaks(&log, hexpart),
+        "the server's output holds part of the token: {log}"
+    );
+    let extra: Vec<&str> = bodies.iter().map(String::as_str).collect();
+    assert_nowhere(&n, &secret, &extra);
+}
+
 #[test]
 fn wrong_tokens_are_limited_per_address() {
     let s = scratch("tok-limit");
