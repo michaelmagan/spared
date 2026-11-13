@@ -718,6 +718,37 @@ fn an_app_token_deploys_only_its_own_app() {
 }
 
 #[test]
+fn an_app_tokens_deploy_does_not_say_whether_another_app_runs_the_same_code() {
+    let s = scratch("tok-reused");
+    let n = Node::start(&s.0, "n", vec![], vec![]);
+    let (t, _) = mint(&n, json!({"app": "mine"}));
+    // Someone else's app runs the component this token is about to deploy.
+    let (st, v) = deploy_as(&n, &n.token, "theirs", "theirs");
+    assert_eq!(
+        (st, v["component_reused"].clone()),
+        (200, json!(false)),
+        "{v}"
+    );
+    for round in ["create", "redeploy"] {
+        let (st, v) = deploy_as(&n, &t, "mine", "mine");
+        assert_eq!(st, 200, "{round}: {v}");
+        assert!(
+            v.get("component_reused").is_none(),
+            "{round}: an app token learns the code is shared: {v}"
+        );
+        // The hash is of the bytes the caller sent itself, so it says nothing about other apps.
+        assert!(v["component_sha256"].is_string(), "{round}: {v}");
+    }
+    // The admin token still sees it.
+    let (st, v) = deploy_as(&n, &n.token, "third", "third");
+    assert_eq!(
+        (st, v["component_reused"].clone()),
+        (200, json!(true)),
+        "{v}"
+    );
+}
+
+#[test]
 fn an_app_token_thaws_only_a_freeze_it_made() {
     let s = scratch("tok-freeze-kinds");
     let mut n = Node::start(&s.0, "n", vec![], vec![]);

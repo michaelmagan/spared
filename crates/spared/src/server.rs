@@ -2491,7 +2491,12 @@ impl Server {
         }
         let mut info = self.one_app_json(app).await;
         info["data_kept"] = data_kept.into();
-        info["component_reused"] = reused.into();
+        // Whether the store already held this component says whether some app, maybe another
+        // tenant's, runs the same code: only the admin token is told. The hash stays, since it is
+        // of the bytes the caller sent.
+        if matches!(creator, Creator::Admin) {
+            info["component_reused"] = reused.into();
+        }
         if data_kept {
             info["note"] = format!(
                 "redeploy keeps the existing data/ of '{name}'; run `spared rm {name} --yes` first for a fresh start"
