@@ -266,6 +266,22 @@ The container slope splits into 355 KiB for the app process, 3,844 KiB for its c
 - Result (`bench/results/agent-deploys/runs.jsonl`, `run*-check.json`): 9 of 10 fixed prompts ended in a deployed app that passed a behaviour check; median 25.7 s over the nine (25.8 s over all ten), slowest 55.7 s. Run 10 stopped at a TLS error caused by the test network intercepting HTTPS; a diagnostic rerun passed in 22.5 s and is not counted.
 - Caveats: the prompts were written by the authors and state the API precisely; spared was already installed, a server was running and the build cache was warm (a cold first build adds about 40 s); agents checked with curl and `spared test`, never a browser.
 
+## Per-app limits
+
+- Measures: whether the accounting behind per-app limits (`spared limits`) costs anything on a warm request. Before deciding to run it, a regression was defined as a warm p50 higher than the build before by more than the spread between rounds.
+- Rerun: `BEFORE_BIN=<release build of b568aeb> bench/limits-scripts/warm-latency.sh` after `scripts/build-examples.sh`. Raw files `bench/results/limits-<variant>-run<N>.json`.
+- Method: the notes example, `GET /api/notes` with one row, measured by `spared bench` (20,000 warm GETs on one connection after 20 cold cycles). Server pinned with `taskset -c 0`, client with `taskset -c 2`, access log off. Three variants: `before` (the commit before per-app limits), `after` (this build, no limits set) and `after-limited` (this build with a CPU budget, an egress budget and a data limit set high enough never to throttle, so the bucket is checked and charged on every request). 12 rounds in two batches of 6, the order of the variants rotated each round. The one-minute load average was between 0.7 and 2.1 at the start, from earlier work on the VM, not the 0.3 the comparison runs wait for.
+- Result, median over 12 rounds of each round's warm p50 and p99, in microseconds:
+
+| variant | p50 (min to max) | p99 (min to max) |
+|---|---|---|
+| before | 134 (131 to 146) | 412 (310 to 490) |
+| after, no limits | 132 (126 to 157) | 341 (192 to 473) |
+| after, limits set | 134 (131 to 140) | 416 (319 to 496) |
+
+- No measurable cost: the three medians are within 2 us of each other, inside the spread between rounds of the same variant. The slowest rounds at p50 (146 us before, 157 us after with no limits) came from both builds, which points at the VM, not the code. p99 moves by about 100 us between rounds of one variant and says nothing either way.
+- Caveats: one app, one connection, GET only, loopback, one VM. A budget's check and charge are two short mutex sections per request, which the measurement could not separate from noise. The CPU throttling itself and the egress meter were tested for behavior, not for cost.
+
 ## Not measured
 
 - A power-loss test, a 1 vCPU / 1 GB cgroup run, large databases, TLS and a real network.
