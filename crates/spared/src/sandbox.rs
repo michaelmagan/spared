@@ -903,6 +903,143 @@ mod tests {
         assert!(!l.memory_denied());
     }
 
+    /// A local HTTP server that answers every request with `len` bytes and adds up the request
+    /// body bytes it received.
+    async fn origin(len: usize) -> (u16, Arc<AtomicU64>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(AtomicU64::new(0));
+        let total = seen.clone();
+        tokio::spawn(async move {
+            while let Ok((sock, _)) = listener.accept().await {
+                let total = total.clone();
+                tokio::spawn(async move {
+                    let svc = hyper::service::service_fn(
+                        move |req: http::Request<hyper::body::Incoming>| {
+                            let total = total.clone();
+                            async move {
+                                let n = req
+                                    .into_body()
+                                    .collect()
+                                    .await
+                                    .map_or(0, |c| c.to_bytes().len());
+                                total.fetch_add(n as u64, Ordering::Relaxed);
+                                Ok::<_, std::convert::Infallible>(http::Response::new(Full::new(
+                                    Bytes::from(vec![b'x'; len]),
+                                )))
+                            }
+                        },
+                    );
+                    let io = wasmtime_wasi_http::io::TokioIo::new(sock);
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(io, svc)
+                        .await;
+                });
+            }
+        });
+        (port, seen)
+    }
+
+    fn hooks_for(quota: &Arc<AppQuota>, allow: &str) -> PolicyHooks {
+        PolicyHooks {
+            allow: vec![allow.into()],
+            remaining: 100,
+            per_request: 100,
+            quota: Some(quota.clone()),
+            test_loopback: true,
+        }
+    }
+
+    /// One outbound POST of `body` through the hooks, as a guest's call goes: the response body's
+    /// length, or the error the guest would see.
+    async fn post(h: &mut PolicyHooks, port: u16, body: usize) -> Result<usize, HttpError> {
+        let req = http::Request::builder()
+            .method("POST")
+            .uri(format!("http://127.0.0.1:{port}/"))
+            .body(
+                Full::new(Bytes::from(vec![b'r'; body]))
+                    .map_err(|e: std::convert::Infallible| match e {})
+                    .boxed_unsync(),
+            )
+            .unwrap();
+        let (resp, io) =
+            Box::into_pin(h.send_request(req, None, Box::new(async { Ok(()) }))).await?;
+        let io = tokio::spawn(Box::into_pin(io));
+        let got = resp.into_body().collect().await.map(|c| c.to_bytes().len());
+        let _ = io.await;
+        got
+    }
+
+    fn is_egress_refusal(e: &HttpError) -> bool {
+        matches!(e, HttpError::InternalError(Some(m)) if m.starts_with("egress_budget_exhausted"))
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn outbound_calls_run_until_the_egress_budget_is_spent_and_neighbors_keep_theirs() {
+        let (port, seen) = origin(3000).await;
+        let q = Arc::new(AppQuota::new(Some(crate::quota::Override {
+            egress_bytes_per_hour: Some(10_000),
+            ..Default::default()
+        })));
+        let mut h = hooks_for(&q, "127.0.0.1");
+        // 500 bytes up and 3000 down per call: two fit in 10,000 bytes.
+        assert_eq!(post(&mut h, port, 500).await.unwrap(), 3000);
+        assert_eq!(post(&mut h, port, 500).await.unwrap(), 3000);
+        // The third starts with 3000 left and is cut once its response spends them.
+        let third = post(&mut h, port, 500).await.unwrap_err();
+        assert!(is_egress_refusal(&third), "{third}");
+        // From here every call is refused before it connects.
+        let before = seen.load(Ordering::Relaxed);
+        for _ in 0..3 {
+            let e = post(&mut h, port, 500).await.unwrap_err();
+            assert!(is_egress_refusal(&e), "{e}");
+        }
+        assert_eq!(
+            seen.load(Ordering::Relaxed),
+            before,
+            "a refused call sends nothing"
+        );
+        let u = q.usage_json();
+        assert_eq!(u["egress_refused"], 4, "{u}");
+        assert!(u["egress_bytes_total"].as_u64().unwrap() >= 10_000, "{u}");
+        assert_eq!(u["egress_bytes_left"], 0, "{u}");
+
+        // A neighbor without a budget, and one with its own, are not touched by the first.
+        let free = Arc::new(AppQuota::new(None));
+        let mut h2 = hooks_for(&free, "127.0.0.1");
+        for _ in 0..5 {
+            assert_eq!(post(&mut h2, port, 500).await.unwrap(), 3000);
+        }
+        assert_eq!(free.usage_json()["egress_bytes_total"], 5 * 3500);
+        let own = Arc::new(AppQuota::new(Some(crate::quota::Override {
+            egress_bytes_per_hour: Some(1 << 20),
+            ..Default::default()
+        })));
+        let mut h3 = hooks_for(&own, "127.0.0.1");
+        assert_eq!(post(&mut h3, port, 500).await.unwrap(), 3000);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_large_request_body_is_cut_and_a_call_the_policy_refuses_costs_nothing() {
+        let (port, seen) = origin(10).await;
+        let q = Arc::new(AppQuota::new(Some(crate::quota::Override {
+            egress_bytes_per_hour: Some(4096),
+            ..Default::default()
+        })));
+        let mut h = hooks_for(&q, "example.invalid");
+        let e = post(&mut h, port, 100_000).await.unwrap_err();
+        assert!(matches!(e, HttpError::HttpRequestDenied), "{e}");
+        assert_eq!(q.usage_json()["egress_bytes_total"], 0);
+        let mut h = hooks_for(&q, "127.0.0.1");
+        assert!(post(&mut h, port, 100_000).await.is_err());
+        assert!(
+            seen.load(Ordering::Relaxed) < 100_000,
+            "the body stopped at the budget ({} bytes arrived)",
+            seen.load(Ordering::Relaxed)
+        );
+        assert!(!q.egress_admit());
+    }
+
     #[test]
     fn the_poll_clock_counts_time_inside_polls_and_nothing_else() {
         let c = PollClock::new();
