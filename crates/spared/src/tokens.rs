@@ -118,6 +118,63 @@ pub fn looks_like_token(s: &str) -> bool {
     })
 }
 
+/// What stands in for a path segment that may hold a token, in logs and error bodies.
+pub const REDACTED: &str = "<redacted>";
+
+/// `path` as the access log and error bodies may show it: under `/v1/tokens/` every segment that
+/// is not a token id, and anywhere a segment that holds `spt_` once percent-decoded, become
+/// [`REDACTED`]. A token pasted where an id belongs, or into any admin path, is never repeated.
+pub fn redact_path(path: &str) -> String {
+    let segs: Vec<&str> = path.split('/').collect();
+    let base = segs.iter().take_while(|s| s.is_empty()).count();
+    let under_tokens = |i: usize| {
+        i >= base + 2 && segs.get(base) == Some(&"v1") && segs.get(base + 1) == Some(&"tokens")
+    };
+    segs.iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let decoded = percent_decoded(s).to_ascii_lowercase();
+            if decoded.contains(PREFIX) || (under_tokens(i) && !valid_id(s)) {
+                REDACTED
+            } else {
+                s
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// An app name as an error message may show it: [`REDACTED`] when it holds `spt_` once
+/// percent-decoded or has the shape of a token, else `name` unchanged.
+pub fn redact_name(name: &str) -> &str {
+    if looks_like_token(name) || percent_decoded(name).to_ascii_lowercase().contains(PREFIX) {
+        REDACTED
+    } else {
+        name
+    }
+}
+
+/// `s` with each `%XX` turned into its byte, lossily as UTF-8.
+fn percent_decoded(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = |c: u8| (c as char).to_digit(16);
+        if b[i] == b'%'
+            && i + 2 < b.len()
+            && let (Some(h), Some(l)) = (hex(b[i + 1]), hex(b[i + 2]))
+        {
+            out.push((h * 16 + l) as u8);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// The id of a token: the first 12 hex digits of its SHA-256.
 pub fn id_of(secret: &str) -> String {
     hex(&Sha256::digest(secret.as_bytes()))[..ID_HEX].to_string()
@@ -431,17 +488,37 @@ impl Store {
         })
     }
 
-    /// The token `id` has created its app: it may not create it again.
-    pub fn created_app(&mut self, id: &str) {
-        if let Some(rec) = self.records.iter_mut().find(|r| r.id == id)
-            && rec.may_create
-        {
-            rec.may_create = false;
-            if let Err(e) = write_record(&self.dir, rec) {
-                eprintln!(
-                    "token {}: cannot record that it created its app: {e}",
-                    rec.id
-                );
+    /// `app` is about to be created, by any token or the admin token: no token of it may create
+    /// it again. Returns the ids changed and the first write error. The caller commits the app
+    /// only when every write succeeded, so no crash leaves an app whose token may still create
+    /// it; on an error it calls [`Store::creation_undone`] and gives up.
+    pub fn app_created(&mut self, app: &str) -> (Vec<String>, Option<std::io::Error>) {
+        let (mut ids, mut first_err) = (vec![], None);
+        for rec in self.records.iter_mut() {
+            if rec.app == app && rec.may_create {
+                rec.may_create = false;
+                ids.push(rec.id.clone());
+                if let Err(e) = write_record(&self.dir, rec) {
+                    first_err.get_or_insert(e);
+                }
+            }
+        }
+        (ids, first_err)
+    }
+
+    /// The creation [`Store::app_created`] prepared did not happen: the tokens `ids` may create
+    /// their app again. A write that fails here leaves a token unable to create its app after a
+    /// restart, which is the safe side.
+    pub fn creation_undone(&mut self, ids: &[String]) {
+        for rec in self.records.iter_mut() {
+            if ids.contains(&rec.id) && rec.revoked.is_none() {
+                rec.may_create = true;
+                if let Err(e) = write_record(&self.dir, rec) {
+                    eprintln!(
+                        "token {}: cannot record that it may create its app again: {e}",
+                        rec.id
+                    );
+                }
             }
         }
     }
@@ -688,10 +765,27 @@ mod tests {
         let (t, rec) = s
             .mint("a", DEFAULT_SCOPES.to_vec(), None, None, true, 1)
             .unwrap();
-        s.created_app(&rec.id);
+        let (t2, _) = s
+            .mint("a", DEFAULT_SCOPES.to_vec(), None, None, true, 1)
+            .unwrap();
+        let (other, _) = s
+            .mint("b", DEFAULT_SCOPES.to_vec(), None, None, true, 1)
+            .unwrap();
+        let (ids, err) = s.app_created("a");
+        assert!(err.is_none());
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&rec.id));
         let mut again = Store::open(&d).unwrap();
-        match again.authenticate(&t, 2) {
-            Auth::Valid(p) => assert!(!p.may_create),
+        for (tok, may) in [(&t, false), (&t2, false), (&other, true)] {
+            match again.authenticate(tok, 2) {
+                Auth::Valid(p) => assert_eq!(p.may_create, may),
+                other => panic!("{other:?}"),
+            }
+        }
+        again.creation_undone(&ids);
+        let mut third = Store::open(&d).unwrap();
+        match third.authenticate(&t, 3) {
+            Auth::Valid(p) => assert!(p.may_create),
             other => panic!("{other:?}"),
         }
         std::fs::remove_dir_all(&d).unwrap();
@@ -708,6 +802,46 @@ mod tests {
             scope_list(),
             "deploy, read, evict, backup, restore, freeze, rm"
         );
+    }
+
+    #[test]
+    fn a_token_in_an_admin_path_is_redacted() {
+        let t = format!("{PREFIX}{}", "ab".repeat(32));
+        let hexpart = &t[PREFIX.len()..];
+        for (path, want) in [
+            (
+                format!("/v1/tokens/{t}"),
+                "/v1/tokens/<redacted>".to_string(),
+            ),
+            (
+                format!("/v1/tokens/{hexpart}"),
+                "/v1/tokens/<redacted>".into(),
+            ),
+            (
+                format!("/v1/tokens/spt%5F{hexpart}"),
+                "/v1/tokens/<redacted>".into(),
+            ),
+            (
+                format!("/v1/tokens/{t}/x"),
+                "/v1/tokens/<redacted>/<redacted>".into(),
+            ),
+            (format!("/v1/apps/{t}"), "/v1/apps/<redacted>".into()),
+            (
+                format!("/v1/%74okens/SPT_{hexpart}"),
+                "/v1/%74okens/<redacted>".into(),
+            ),
+            (
+                "/v1/tokens/0123456789ab".into(),
+                "/v1/tokens/0123456789ab".into(),
+            ),
+            ("/v1/tokens".into(), "/v1/tokens".into()),
+            ("/v1/apps/blog/logs".into(), "/v1/apps/blog/logs".into()),
+            ("/metrics".into(), "/metrics".into()),
+            ("/".into(), "/".into()),
+            ("/v1/apps/x%".into(), "/v1/apps/x%".into()),
+        ] {
+            assert_eq!(redact_path(&path), want, "{path}");
+        }
     }
 
     #[test]

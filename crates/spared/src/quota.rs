@@ -20,8 +20,9 @@
 //!
 //! The counters live here, one [`AppQuota`] per app name, outside the app's instance: idle
 //! eviction, a trap and a redeploy keep them, and an app has one instance, so its requests share
-//! one bucket. They are in memory only and start over when the server restarts or the app is
-//! removed.
+//! one bucket. They are in memory only and start over when the server restarts. Removing the app
+//! keeps them while an override is stored, so removing and deploying again does not refill a
+//! budget. Without one they go with the app.
 
 use crate::fsguard::AppCaps;
 use serde::{Deserialize, Serialize};
@@ -255,14 +256,16 @@ impl Bucket {
         }
     }
 
-    /// The same rate with a new size, keeping what was used: a lower limit takes effect at once,
-    /// and changing a limit does not hand out a full bucket.
+    /// The same rate with a new size, keeping what was used up to the new size: a lower limit
+    /// takes effect at once, and changing a limit does not hand out a full bucket. A limit lowered
+    /// below what was used leaves the bucket empty, not in debt, so it refills at the new rate
+    /// within one window instead of paying off use counted at the old one.
     fn resized(&self, cap: u64, per_window: u64, window: Duration, now: Instant) -> Bucket {
         let mut old = self.clone();
         old.refill(now);
         let used = old.cap.saturating_sub(old.level);
         let mut b = Bucket::new(cap, per_window, window, now);
-        b.level = b.cap.saturating_sub(used);
+        b.level = b.cap.saturating_sub(used.min(b.cap));
         b
     }
 
@@ -354,7 +357,8 @@ impl AppQuota {
         self.state.lock().unwrap().over.clone()
     }
 
-    /// Put `over` in force. The buckets keep what was used, so changing a budget never refills it.
+    /// Put `over` in force. The buckets keep what was used, up to the new size, so changing a budget
+    /// never refills it, and lowering one never blocks for longer than one window.
     pub fn set(&self, over: Option<Override>) {
         let now = Instant::now();
         let mut s = self.state.lock().unwrap();
@@ -630,6 +634,44 @@ mod tests {
         );
         assert!(!q.egress_admit());
         assert_eq!(q.usage_json()["egress_refused"], 2);
+    }
+
+    #[test]
+    fn lowering_a_budget_below_what_was_used_waits_one_window_at_most() {
+        let t0 = Instant::now();
+        let (gb, mb) = (1u64 << 30, 1u64 << 20);
+        let mut big = Bucket::new(gb, gb, EGRESS_WINDOW, t0);
+        big.take(500 * mb, t0);
+        let mut low = big.resized(mb, mb, EGRESS_WINDOW, t0);
+        assert_eq!(low.used(t0), mb, "the new budget starts spent");
+        assert!(low.wait(t0).is_some());
+        let back = low.wait(t0).unwrap();
+        assert!(back <= 4, "open again within moments, not hours: {back} s");
+        assert_eq!(
+            low.used(t0 + EGRESS_WINDOW),
+            0,
+            "full again after one window"
+        );
+
+        // Raising it keeps what was used.
+        let mut small = Bucket::new(mb, mb, EGRESS_WINDOW, t0);
+        small.take(900 << 10, t0);
+        let mut high = small.resized(gb, gb, EGRESS_WINDOW, t0);
+        assert_eq!(high.used(t0), 900 << 10);
+
+        // Through the app's counters: 1 GB an hour, 500 MB used, lowered to 1 MB an hour.
+        let q = AppQuota::new(Some(Override {
+            egress_bytes_per_hour: Some(gb),
+            ..Default::default()
+        }));
+        assert!(q.egress_charge(500 * mb));
+        q.set(Some(Override {
+            egress_bytes_per_hour: Some(mb),
+            ..Default::default()
+        }));
+        let u = q.usage_json();
+        assert_eq!(u["egress_bytes_in_window"], mb, "{u}");
+        assert_eq!(u["egress_bytes_left"], 0, "{u}");
     }
 
     #[test]

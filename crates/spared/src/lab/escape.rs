@@ -344,6 +344,30 @@ pub async fn run(probes: PathBuf, root: PathBuf) -> Result<()> {
         detail: o.stdout.trim().into(),
     });
 
+    // The debug text of a failed stream, asked for by the guest, in a child process started with
+    // RUST_BACKTRACE=1. With SPARED_ALLOW_HOST_BACKTRACE=1 the child captures host backtraces, and
+    // the guest's text must still hold none. Without it the child captures none at all.
+    let allowed = debug_text_in_child(&root, &probes, true)?;
+    cases.push(Case {
+        name: "control: with SPARED_ALLOW_HOST_BACKTRACE=1 and RUST_BACKTRACE=1 the host captures backtraces",
+        denied: allowed.starts_with("BACKTRACES on"),
+        control: true,
+        detail: allowed.lines().next().unwrap_or("").into(),
+    });
+    cases.push(Case {
+        name: "debug text of a failed stream holds no host backtrace, paths or frames (host backtraces on)",
+        denied: debug_text_clean(&allowed),
+        control: false,
+        detail: allowed.lines().nth(1).unwrap_or("").chars().take(300).collect(),
+    });
+    let default = debug_text_in_child(&root, &probes, false)?;
+    cases.push(Case {
+        name: "RUST_BACKTRACE=1 without SPARED_ALLOW_HOST_BACKTRACE: the host captures no backtrace",
+        denied: default.starts_with("BACKTRACES off") && debug_text_clean(&default),
+        control: false,
+        detail: default.replace('\n', " | ").chars().take(300).collect(),
+    });
+
     let o = run_cmd(&engine, &netp, &base, &b, &["127.0.0.1:80"]).await;
     cases.push(Case {
         name: "raw TCP socket without a grant (import refused at load)",
@@ -639,6 +663,72 @@ pub async fn run(probes: PathBuf, root: PathBuf) -> Result<()> {
     if failed > 0 {
         std::process::exit(1);
     }
+    Ok(())
+}
+
+/// Run `debug-text-probe` in a child of this binary with `RUST_BACKTRACE=1` and
+/// `RUST_LIB_BACKTRACE=1`, and with `SPARED_ALLOW_HOST_BACKTRACE=1` when `allow`. Its stdout.
+fn debug_text_in_child(root: &Path, probes: &Path, allow: bool) -> Result<String> {
+    let data = root.join(format!("debug-text-{}", if allow { "on" } else { "off" }));
+    std::fs::create_dir_all(&data)?;
+    let mut c = std::process::Command::new(std::env::current_exe()?);
+    c.arg("debug-text-probe")
+        .arg("--probes")
+        .arg(probes)
+        .arg("--data")
+        .arg(&data)
+        .env("RUST_BACKTRACE", "1")
+        .env("RUST_LIB_BACKTRACE", "1")
+        .env_remove("SPARED_ALLOW_HOST_BACKTRACE");
+    if allow {
+        c.env("SPARED_ALLOW_HOST_BACKTRACE", "1");
+    }
+    let out = c.output()?;
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// The guest got a failed stream and its debug text names nothing of the host.
+fn debug_text_clean(out: &str) -> bool {
+    let Some(text) = out.lines().find_map(|l| l.strip_prefix("DEBUG ")) else {
+        return false;
+    };
+    let t = text.to_ascii_lowercase();
+    ![
+        "/home",
+        "/root",
+        "/rustc",
+        ".rs:",
+        "wasmtime",
+        "backtrace",
+        "cargo",
+    ]
+    .iter()
+    .any(|bad| t.contains(bad))
+}
+
+/// The child side of [`debug_text_in_child`]: whether this process captures host backtraces, then
+/// what the guest printed after its write stream hit the data cap.
+pub async fn debug_text_child(probes: PathBuf, data: PathBuf) -> Result<()> {
+    let engine = super::engine()?;
+    crate::sandbox::start_epoch_ticker(&engine);
+    let caps = crate::fsguard::AppCaps {
+        max_data_bytes: 1 << 20,
+        ..Default::default()
+    };
+    let o = run_cmd_with(
+        &engine,
+        &probes.join("quota-probe.wasm"),
+        &manifest("appD", &[], 32, 4000),
+        &data,
+        &["debug-text", "4"],
+        &caps,
+        None,
+    )
+    .await;
+    let on =
+        std::backtrace::Backtrace::capture().status() == std::backtrace::BacktraceStatus::Captured;
+    println!("BACKTRACES {}", if on { "on" } else { "off" });
+    println!("{} {:?}", o.stdout.trim(), o.error);
     Ok(())
 }
 
