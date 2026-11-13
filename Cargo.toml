@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/spared"]
-exclude = ["probes/sqlite-probe", "probes/escape-probe", "probes/hostile-app", "apps/shared-list", "apps/demo-spared", "apps/demo-spin", "apps/bench3b-host", "apps/bench3b-sandbox", "apps/workloads-spared", "apps/demo-native"]
+exclude = ["probes/sqlite-probe", "probes/escape-probe", "probes/hostile-app", "probes/p3-probe", "apps/shared-list", "apps/demo-spared", "apps/demo-spin", "apps/bench3b-host", "apps/bench3b-sandbox", "apps/workloads-spared", "apps/demo-native"]
 
 [workspace.package]
 edition = "2024"
