@@ -1788,7 +1788,7 @@ def per_app_limits(tmp):
     check(apps["small"]["quota"]["effective"]["data_mb"] == 4 and apps["big"]["quota"]["effective"]["data_mb"] == 24
           and apps["small"]["data_bytes"] <= 4 << 20, "spared ps shows each app's limit and use", apps["small"].get("quota"))
     v = set_limits(s, "small", data_mb=8)
-    check(v["evicted"] is True or v["evicted"] is False, "raising small's limit answers", v)
+    check(v["effective"]["data_mb"] == 8, "raising small's limit takes effect", v)
     st, body, _ = hostile_reply(s, "small", "/fill?n=2", timeout=60)
     check(st == 200 and body == "wrote 2 MiB err=", "a higher limit gives small room at its next wake", body)
     st, _, d_, _ = s.admin("DELETE", "/v1/apps/small/limits")
@@ -1824,7 +1824,7 @@ def egress_budget(tmp):
     one = int(m.group(1)) if m else 1
     set_limits(s, "net", egress_bytes_per_hour=one * 3 + one // 2)
     st, body, _ = hostile_reply(s, "net", "/fetch?n=10", timeout=60)
-    m = re.match(r"fetched (\d+) bytes=\d+ err=(.*)", body)
+    m = re.match(r"fetched (\d+) bytes=\d+ err=(.*)", body, re.DOTALL)
     check(st == 200 and m and 1 <= int(m.group(1)) <= 4 and "egress_budget_exhausted" in m.group(2),
           "calls succeed up to the budget, then fail with egress_budget_exhausted", body)
     st, body, _ = hostile_reply(s, "net", "/fetch?n=1", timeout=60)

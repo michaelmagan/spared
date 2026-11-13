@@ -58,6 +58,7 @@ If the server refuses to start, it has changed nothing. The error has a kind and
 | Frozen apps | `apps/<name>/frozen` | Kept: a frozen app stays frozen. An older release does not know the marker and serves the app. Do not go back to an older release on a server whose apps were moved away with `spared move`: remove them first with `spared rm <name> --yes`. |
 | Epochs | `backups/<name>/.epoch` | Kept. A missing file means epoch 1, which is what every backup from before epochs uses, so they list and restore as before. An older release ignores the file and uploads at epoch 1. |
 | Admin token | `admin-token` | Kept, so the CLI's saved token keeps working. |
+| Per-app limits | `limits/<name>.json` | Kept. While any is stored the directory is stamped format 2, so a release from before per-app limits refuses to start on it with `data_dir_too_new` instead of serving those apps without them. To go back to such a release, `spared limits clear` every app first (the stamp goes back to 1), then accept that its apps run under the server-wide caps only. |
 | App tokens | `tokens/<id>.json` | Kept, with their revocations and expiry. An older release ignores the directory: app tokens stop working there and the admin token keeps working, so going back fails closed. An older release's `spared rm` does not revoke an app's tokens, but a token that has already created its app (or was made for an existing one) still cannot create it again after you upgrade. Revoke tokens you no longer want before going back. |
 | Lock file | `.lock` | Kept. The running server holds a lock on it, and the next server rewrites its pid. A copied one is harmless. |
 | Format stamp | `format.json` | Read first, then updated with the version that opened the directory. |
@@ -89,9 +90,12 @@ Data formats so far:
 
 | Format | Written by | Read by |
 |---|---|---|
-| 1 | 0.0.1-preview and later | 0.0.1-preview and later |
+| 1 | 0.0.1-preview and later, while no app has per-app limits | 0.0.1-preview and later |
+| 2 | releases with per-app limits, while any app has them (`<data-dir>/limits/`) | releases with per-app limits |
 
 ## The compatibility promise
+
+Format 2 is written only while an app has per-app limits, and the last `spared limits clear` writes format 1 again. A directory that never had limits stays at format 1, so an upgrade alone does not close it to older releases. The reason for the number: an older release would ignore `<data-dir>/limits/` and serve every app with only the server-wide caps, which is a silent loss of the limits an operator set for apps they do not trust. Refusing to start is the safer failure. Frozen apps and epochs did not raise the number, and an older release ignores those files (see the table above).
 
 For the 0.0.x preview releases:
 
@@ -110,6 +114,7 @@ Stop the server, install the older release (`SPARED_VERSION=<version>` with the 
 
 - A data directory without a stamp opens and is stamped; the apps in it serve with their data.
 - A directory stamped with a newer format, an older one, or an unreadable stamp is refused with its error kind, and no file in it changes.
+- A directory goes to format 2 when the first per-app limit is set and back to 1 when the last is cleared, and a format 2 stamp with no limits stored goes back to 1 at the next start (`crates/spared/tests/app_limits.rs`). A release from before per-app limits refuses a format 2 directory with `data_dir_too_new`: checked by hand with a build of the commit before them.
 - A compiled component marked as coming from another wasmtime version is recompiled from the stored wasm and the app serves.
 - A server restarted on its data directory loads its apps and their data.
 
