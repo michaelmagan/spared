@@ -966,3 +966,53 @@ fn wrong_tokens_are_limited_per_address() {
     // The public listener is not affected.
     assert_eq!(http(n.public, "GET", "/healthz", "", &[], b"").0, 200);
 }
+
+#[test]
+fn review_a_frozen_move_deploy_over_an_app_freeze_is_not_the_tokens_to_lift() {
+    let s = scratch("rev-move-deploy");
+    let n = Node::start(&s.0, "n", vec![], vec![]);
+    n.deploy("mine");
+    let (t, _) = mint(&n, json!({"app": "mine", "scopes": ["freeze"]}));
+    assert_eq!(call(&n, &t, "POST", "/v1/apps/mine/freeze", b"").0, 200);
+    let (m, wasm) = deploy_body("mine");
+    let (st, _) = call_raw(
+        &n,
+        &n.token,
+        "PUT",
+        "/v1/apps/mine?frozen=move",
+        &[("x-spared-manifest", &m)],
+        &wasm,
+    );
+    assert_eq!(st, 200);
+    let (st, v) = call(&n, &t, "POST", "/v1/apps/mine/thaw", b"");
+    assert!(
+        st == 403 && v["thawed"] != true,
+        "an app token thawed the target of a move: {st} {v}"
+    );
+}
+
+#[test]
+fn review_a_token_in_an_app_path_is_echoed_nowhere() {
+    let s = scratch("rev-echo");
+    let n = Node::start(&s.0, "n", vec![], vec![]);
+    let (secret, _) = mint(&n, json!({"app": "blog"}));
+    let hexpart = secret.strip_prefix("spt_").unwrap();
+    for (token, method, path) in [
+        (secret.as_str(), "GET", format!("/v1/apps/{secret}")),
+        (secret.as_str(), "GET", format!("/v1/apps/{secret}/logs")),
+        (n.token.as_str(), "GET", format!("/v1/apps/{secret}")),
+        (n.token.as_str(), "DELETE", format!("/v1/apps/{secret}")),
+        (n.token.as_str(), "DELETE", format!("//v1/tokens/{hexpart}")),
+    ] {
+        let (st, raw) = call_raw(&n, token, method, &path, &[], b"");
+        let body = String::from_utf8_lossy(&raw).to_string();
+        assert!(
+            !leaks(&body, hexpart),
+            "{method} {path} echoed the token: {st} {body}"
+        );
+    }
+    assert!(
+        !leaks(&n.log_text(), hexpart),
+        "the access log holds the token"
+    );
+}

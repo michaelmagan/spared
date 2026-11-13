@@ -126,7 +126,10 @@ pub const REDACTED: &str = "<redacted>";
 /// [`REDACTED`]. A token pasted where an id belongs, or into any admin path, is never repeated.
 pub fn redact_path(path: &str) -> String {
     let segs: Vec<&str> = path.split('/').collect();
-    let under_tokens = |i: usize| i >= 3 && segs[1] == "v1" && segs[2] == "tokens";
+    let base = segs.iter().take_while(|s| s.is_empty()).count();
+    let under_tokens = |i: usize| {
+        i >= base + 2 && segs.get(base) == Some(&"v1") && segs.get(base + 1) == Some(&"tokens")
+    };
     segs.iter()
         .enumerate()
         .map(|(i, s)| {
@@ -139,6 +142,16 @@ pub fn redact_path(path: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("/")
+}
+
+/// An app name as an error message may show it: [`REDACTED`] when it holds `spt_` once
+/// percent-decoded or has the shape of a token, else `name` unchanged.
+pub fn redact_name(name: &str) -> &str {
+    if looks_like_token(name) || percent_decoded(name).to_ascii_lowercase().contains(PREFIX) {
+        REDACTED
+    } else {
+        name
+    }
 }
 
 /// `s` with each `%XX` turned into its byte, lossily as UTF-8.

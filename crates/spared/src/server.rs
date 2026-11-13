@@ -327,7 +327,7 @@ fn no_such_app(name: &str) -> Resp {
     err_resp(
         StatusCode::NOT_FOUND,
         "no_such_app",
-        format!("no app '{name}'"),
+        format!("no app '{}'", tokens::redact_name(name)),
         "list apps with `spared ps`",
     )
 }
@@ -553,7 +553,7 @@ fn check_name(name: &str) -> std::result::Result<(), DeployError> {
     Err(DeployError::new(
         StatusCode::BAD_REQUEST,
         "bad_name",
-        format!("invalid app name '{name}'"),
+        format!("invalid app name '{}'", tokens::redact_name(name)),
         "use 1 to 40 lowercase letters, digits and dashes",
     ))
 }
@@ -2429,7 +2429,11 @@ impl Server {
             }
         };
         // Before the commit and before the new app is in the table, so it never serves unfrozen.
-        let marked = frozen_for_move && read_freeze_marker(&dir).is_none();
+        let prior_marker = read_freeze_marker(&dir);
+        let marked = frozen_for_move
+            && prior_marker
+                .as_ref()
+                .is_none_or(|m| m["kind"] == APP_FREEZE_KIND);
         if marked {
             let info = serde_json::json!({"kind": "move", "reason": "deployed frozen by spared move", "at": now_text()});
             if let Err(e) = write_freeze_marker(&dir, &info) {
@@ -2440,7 +2444,10 @@ impl Server {
         manifest.limits.clamp(&self.cfg.max);
         let unmark = || {
             if marked {
-                let _ = remove_freeze_marker(&dir);
+                let _ = match &prior_marker {
+                    Some(m) => write_freeze_marker(&dir, m),
+                    None => remove_freeze_marker(&dir),
+                };
             }
         };
         let app = match self.make_app(name, dir.clone(), manifest, shared, version) {
@@ -3884,15 +3891,18 @@ impl Server {
                 "ask the operator for a token with the read scope (`spared token create <app> --scope deploy,read,evict`)",
             ),
             Need::OwnList => None,
-            Need::App(name, _) if name != p.app => wrong(
-                format!(
-                    "app token {} is for app '{}' and cannot act on '{name}'",
-                    p.id, p.app
-                ),
-                &format!(
-                    "use a token made for '{name}' (the operator runs `spared token create {name}`), or the admin token"
-                ),
-            ),
+            Need::App(name, _) if name != p.app => {
+                let name = tokens::redact_name(&name);
+                wrong(
+                    format!(
+                        "app token {} is for app '{}' and cannot act on '{name}'",
+                        p.id, p.app
+                    ),
+                    &format!(
+                        "use a token made for '{name}' (the operator runs `spared token create {name}`), or the admin token"
+                    ),
+                )
+            }
             Need::App(_, scope) if !p.scopes.contains(&scope) => wrong(
                 format!(
                     "app token {} has no {} scope (it has: {})",
