@@ -139,10 +139,10 @@ enum Cmd {
         max_app_queue: usize,
         /// EXPERIMENTAL: serve apps whose spared.toml says runtime = "wasip3-experimental" (apps
         /// without data only). One such instance serves several requests at once, so one crash
-        /// or timeout fails every request in flight in it. Off by default; see docs/wasip3.md.
+        /// or timeout fails every request in flight in it. Off by default, see docs/wasip3.md.
         #[arg(long, env = "SPARED_EXPERIMENTAL_WASIP3", value_parser = clap::builder::BoolishValueParser::new())]
         experimental_wasip3: bool,
-        /// Requests one wasip3-experimental instance may have in flight (1 to 64); an app's
+        /// Requests one wasip3-experimental instance may have in flight (1 to 64). An app's
         /// limits.concurrency may ask for fewer, never more.
         #[arg(long, env = "SPARED_MAX_APP_CONCURRENCY", default_value_t = grants::DEFAULT_CONCURRENCY, value_parser = clap::value_parser!(u32).range(1..=grants::MAX_CONCURRENCY as i64))]
         max_app_concurrency: u32,

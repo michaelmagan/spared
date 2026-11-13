@@ -46,7 +46,7 @@ pub trait RequestLog: Send + Sync {
 }
 
 struct State {
-    /// Set for a wasip3-experimental instance; `request_left` and `noted` are then unused.
+    /// Set for a wasip3-experimental instance, and `request_left` and `noted` are then unused.
     request: Option<Arc<dyn RequestLog>>,
     file: std::fs::File,
     size: u64,

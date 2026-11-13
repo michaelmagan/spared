@@ -59,28 +59,29 @@ The import check matches each import with its version, for every app. A wasip3 a
 
 | Limit | wasip2 | wasip3-experimental |
 |---|---|---|
-| `memory_mb` | the instance's memory, which serves one request | one budget for the instance, shared by the requests in flight. Memory a request grew is not given back while the instance lives |
+| `memory_mb` | the instance's memory, which serves one request | one budget for the instance, shared by the requests in flight. Memory a request grew is not given back while the instance lives. The host's tables for stream, future and wait handles are outside it, so the store allows 8,192 live handles at most and a guest that goes over traps (`app_trap`) |
 | `cpu_ms` | compute per request | compute per request, counted in 1 ms epoch ticks charged to the request whose code runs (wasmtime's task-group hook). Going over traps, which stops every request in flight |
-| `max_outbound` | outbound calls per request | outbound calls per request, kept the same way. A call made while no request's code runs is refused |
+| `max_outbound` | outbound calls per request | outbound calls per request, kept the same way. A call made while no request's code runs is refused. A task a request leaves running keeps counting against its own budget |
 | per-request log allowance | per request | per request, for output through `wasi:cli@0.2` (std's `println!`). Output written while no request's code runs shares one allowance for the instance |
-| `deadline_ms` | the request is stopped and the instance dropped | the client gets 504, and the request keeps running inside the instance (below) |
+| `deadline_ms` | the request is stopped and the instance dropped | the client gets 504, the instance takes no more requests, and it is dropped `deadline_ms` later, which stops the request (below) |
 | operator CPU budget (`spared limits`) | each request's poll time | the instance's poll time, all requests together |
 
 `cpu_ms` counts the guest's own code only. The host's work for a request (an outbound call's DNS, connect and TLS) is charged to the app's CPU budget over time, and each outbound call costs the flat 1 ms it costs a wasip2 request, but host work is not counted toward one request's `cpu_ms`.
 
 ## What it gives up
 
-These come from what wasmtime 50.0.1 can do, and each has a test in `crates/spared/src/server/wasip3_tests.rs`.
+These come from what wasmtime 50.0.1 can do, and each of the first four has a test in `crates/spared/src/server/wasip3_tests.rs`.
 
 - **No database apps.** `data = true` is refused.
-- **Compute blocks the other requests.** Guest code that computes holds the instance. While one request computes, the others in the same instance wait, even the ones whose awaited result is ready. The wait is bounded by `cpu_ms`, since the computing request is stopped there.
-- **One trap fails every request in flight.** A panic, an abort, a request over `cpu_ms` or over `memory_mb` stops the whole instance, so every request in flight in it gets the same error (`app_trap`, `cpu_limit` or `memory_limit`, the message says that it stopped every request in flight). The instance is dropped and the next request wakes a new one. `--max-app-concurrency` bounds how many requests one trap can take down.
-- **A deadline leaves a task running.** wasmtime cannot cancel one request inside an instance. At `deadline_ms` the client gets 504 `deadline`, the instance takes no more requests, and the next request wakes a new instance. The request that ran out keeps running in the old instance, with its memory and its outbound calls, until the old instance's other requests finish or for at most another `deadline_ms`, and then the instance is dropped. Every request the old instance still holds started before the one that ran out, so by then each has passed its own deadline too.
+- **Compute blocks the other requests.** Guest code that computes holds the instance. While one request computes, the others in the same instance wait, even the ones whose awaited result is ready. The wait lasts until the computing request ends, or until it reaches `cpu_ms`, where it is stopped and the trap below fails the others too.
+- **One trap fails every request in flight.** A panic, an abort, a request over `cpu_ms` or over `memory_mb` stops the whole instance, so every request in flight in it gets the same error (`app_trap`, `cpu_limit` or `memory_limit`, the message says that it stopped every request in flight). The instance is dropped and the next request wakes a new one. A trap fails the requests that hold a place in the instance when it happens, which is `concurrency` at most. A request still waiting for a place is not one of them and is served by the new instance.
+- **A deadline leaves a task running, for a while.** wasmtime cannot cancel one request inside an instance. At `deadline_ms` the client gets 504 `deadline`, the instance takes no more requests, and the next request wakes a new instance. The request that ran out keeps running in the old instance, with its memory and its outbound calls, until the old instance is dropped `deadline_ms` after the deadline passed. Dropping stops every task in it, so a request of the old instance that has not answered by then gets an error. A request waiting for a place on the old instance does not wait for that: it moves to the new instance.
+- **A task a request leaves running keeps its place.** A request holds its place among the instance's `concurrency` until its whole task group has finished, not only until its response. A task it started and left running, such as one started with `spawn`, still counts toward `concurrency` and toward the request's `max_outbound` until it ends. If a request's task group is still running `deadline_ms` after the request started, the instance takes no more requests and is dropped `deadline_ms` later, so such a task runs for about twice `deadline_ms` at the longest, and it stops the other requests of the instance with it. Meanwhile a request waiting for a place behind it can use up its own `deadline_ms` waiting and get 503 `app_busy` or 504 `deadline`.
 - **Not production ready upstream.** wasmtime marks its WASI 0.3 code "not ready for production use" and says "Bug and security fixes limited to wasip3 will not be given patch releases". spared stays on wasmtime 50.0.1. The label EXPERIMENTAL stays until wasmtime removes that notice and can cancel one task.
 
 ## Draining
 
-A redeploy, `spared rm`, `spared evict`, `spared freeze`, a backup or restore, a change to the app's limits, the idle drop and shutdown all wait for the requests in flight before they drop a wasip3 instance, for at most `deadline_ms` (shutdown for at most its grace period). New requests wait meanwhile, as they wait for a wasip2 request in flight. The idle drop skips an instance with requests in flight.
+A redeploy, `spared rm`, `spared evict`, `spared freeze`, a backup or restore, a change to the app's limits, the idle drop and shutdown all wait for the requests in flight before they drop a wasip3 instance, for at most `deadline_ms` (shutdown for at most its grace period). New requests wait meanwhile, as they wait for a wasip2 request in flight. The idle drop skips an instance with requests in flight, and a place held by a task left running after its response counts as one.
 
 ## Measured
 

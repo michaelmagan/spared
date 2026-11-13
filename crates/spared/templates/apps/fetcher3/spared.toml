@@ -15,5 +15,5 @@ cpu_ms = 1000
 deadline_ms = 5000
 max_outbound = 10
 # Requests one instance may have in flight. Leave it out for the server's --max-app-concurrency
-# (4 unless the operator changed it); it may ask for less, never more.
+# (4 unless the operator changed it). It may ask for less, never more.
 concurrency = 4

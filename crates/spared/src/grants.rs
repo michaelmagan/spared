@@ -8,7 +8,7 @@ use wasmtime::component::Component;
 pub struct Manifest {
     pub name: String,
     /// Which WASI the component targets. `wasip3-experimental` serves several requests at once in
-    /// one instance; it is off unless the operator turns it on (`--experimental-wasip3`).
+    /// one instance. It is off unless the operator turns it on (`--experimental-wasip3`).
     #[serde(default)]
     pub runtime: Runtime,
     #[serde(default)]
@@ -118,7 +118,7 @@ impl Manifest {
             }),
             (Runtime::Wasip2, Some(_)) => Err(ManifestError {
                 kind: "bad_manifest",
-                message: "limits.concurrency applies only to runtime = \"wasip3-experimental\"; a wasip2 instance runs one request at a time".into(),
+                message: "limits.concurrency applies only to runtime = \"wasip3-experimental\", because a wasip2 instance runs one request at a time".into(),
                 fix: "remove limits.concurrency".into(),
             }),
             _ => Ok(()),
@@ -279,7 +279,7 @@ pub struct Limits {
     #[serde(default = "d_out")]
     pub max_outbound: u32,
     /// wasip3-experimental only: requests one instance may have in flight. `None` takes the
-    /// server's `--max-app-concurrency`; a manifest may ask for less, never more.
+    /// server's `--max-app-concurrency`. A manifest may ask for less, never more.
     #[serde(default)]
     pub concurrency: Option<u32>,
 }

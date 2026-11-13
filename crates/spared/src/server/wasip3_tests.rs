@@ -10,7 +10,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[path = "../../tests/support/p3_probe.rs"]
 mod p3_probe;
 
-/// The probe imports `wasi:http/client`, so it needs a `fetch` grant; `extra` may bring its own.
+/// The probe imports `wasi:http/client`, so it needs a `fetch` grant, and `extra` may bring its own.
 fn p3_manifest(name: &str, extra: &str) -> String {
     let fetch = if extra.starts_with("fetch") {
         ""
@@ -321,4 +321,183 @@ async fn each_request_in_flight_has_its_own_log_allowance() {
             .collect::<Vec<_>>()
             .join("\n")
     );
+}
+
+/// How many of `out` were served. A request that waited for a place held by a task its sibling
+/// left running may use up its own deadline_ms waiting, and then is told so (503 or 504), the
+/// only other answers it may get.
+fn served_or_out_of_time(out: &[(u16, String, String)]) -> usize {
+    for (st, kind, body) in out {
+        assert!(
+            *st == 200 || kind == "app_busy" || kind == "deadline",
+            "a queued request got {st} {kind}: {body}"
+        );
+    }
+    out.iter().filter(|r| r.0 == 200).count()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn compute_holds_the_instance_so_a_ready_request_waits_for_it() {
+    let fx = Fixture::new();
+    deploy(&fx, "block3", "[limits]\ncpu_ms = 5000\nconcurrency = 2\n").await;
+    assert_eq!(get(&fx.server, "block3", "/").await.0, 200);
+    let s = fx.server.clone();
+    let burn = tokio::spawn(async move { get(&s, "block3", "/burn?ms=600&rounds=1").await });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let started = Instant::now();
+    let (st, _, body) = get(&fx.server, "block3", "/").await;
+    let waited = started.elapsed();
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(burn.await.unwrap().0, 200);
+    assert!(
+        waited >= Duration::from_millis(300),
+        "a request with nothing to wait for was served in {waited:?} while another computed for 600 ms"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_waiting_for_a_place_moves_to_a_fresh_instance_when_a_sibling_passes_its_deadline()
+ {
+    let fx = Fixture::new();
+    deploy(&fx, "qd", "[limits]\ndeadline_ms = 300\nconcurrency = 1\n").await;
+    assert_eq!(get(&fx.server, "qd", "/").await.0, 200);
+    let first = live_instance(&fx, "qd").unwrap();
+    let s = fx.server.clone();
+    let slow = tokio::spawn(async move { get(&s, "qd", "/sleep?ms=2000").await });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let (st, kind, body) = get(&fx.server, "qd", "/").await;
+    assert_eq!(
+        (st, kind.as_str()),
+        (200, ""),
+        "the queued request must be served: {body}"
+    );
+    assert_eq!(slow.await.unwrap().0, 504);
+    let second = live_instance(&fx, "qd").unwrap();
+    assert!(!Arc::ptr_eq(&first, &second), "a fresh instance served it");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_trap_does_not_fail_a_request_that_never_started_in_the_instance() {
+    let fx = Fixture::new();
+    deploy(&fx, "qt", "[limits]\nconcurrency = 1\n").await;
+    assert_eq!(get(&fx.server, "qt", "/").await.0, 200);
+    let s = fx.server.clone();
+    let trap = tokio::spawn(async move { get(&s, "qt", "/trap").await });
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    let (st, kind, body) = get(&fx.server, "qt", "/").await;
+    assert_eq!(
+        (st, kind.as_str()),
+        (200, ""),
+        "a request that never started in the trapped instance: {body}"
+    );
+    assert_eq!(trap.await.unwrap().1, "app_trap");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_task_left_running_after_its_response_still_has_its_place_and_stops_at_the_deadline() {
+    let fx = Fixture::new();
+    deploy(&fx, "bg", "[limits]\ndeadline_ms = 300\nconcurrency = 1\n").await;
+    let mut out = vec![];
+    for _ in 0..4 {
+        out.push(get(&fx.server, "bg", "/bg").await);
+    }
+    assert_eq!(out[0].0, 200, "{}", out[0].2);
+    assert!(served_or_out_of_time(&out) >= 1);
+    let last = live_instance(&fx, "bg").unwrap();
+    let until = Instant::now() + Duration::from_secs(3);
+    while last.is_open() || last.in_flight() > 0 {
+        assert!(
+            Instant::now() < until,
+            "a task whose request was answered ran on past deadline_ms (open {}, in flight {})",
+            last.is_open(),
+            last.in_flight()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// A loopback upstream that accepts and then says nothing. `open` counts the connections still
+/// up, `peak` the most there were at once.
+async fn silent_upstream() -> (u16, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    let (open, peak) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let (o, p) = (open.clone(), peak.clone());
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = l.accept().await {
+            let now = o.fetch_add(1, Ordering::SeqCst) + 1;
+            p.fetch_max(now, Ordering::SeqCst);
+            let o = o.clone();
+            tokio::spawn(async move {
+                let mut buf = [0u8; 4096];
+                while matches!(s.read(&mut buf).await, Ok(n) if n > 0) {}
+                o.fetch_sub(1, Ordering::SeqCst);
+            });
+        }
+    });
+    (port, open, peak)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn answered_requests_do_not_hold_outbound_calls_open_past_the_cap() {
+    let fx = Fixture::with_loopback();
+    let (port, open, peak) = silent_upstream().await;
+    deploy(
+        &fx,
+        "bf",
+        "fetch = [\"localhost\"]\n[limits]\ndeadline_ms = 300\nconcurrency = 1\nmax_outbound = 1\n",
+    )
+    .await;
+    let mut out = vec![];
+    for _ in 0..6 {
+        out.push(get(&fx.server, "bf", &format!("/bgfetch/localhost:{port}")).await);
+    }
+    assert_eq!(out[0].0, 200, "{}", out[0].2);
+    served_or_out_of_time(&out);
+    let until = Instant::now() + Duration::from_secs(3);
+    while open.load(Ordering::SeqCst) > 0 {
+        assert!(
+            Instant::now() < until,
+            "{} outbound calls are still open long after every request was answered",
+            open.load(Ordering::SeqCst)
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let peak = peak.load(Ordering::SeqCst);
+    assert!(
+        peak <= 3,
+        "concurrency 1 x max_outbound 1, yet {peak} calls were open at once"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn handles_are_capped_so_pending_waits_cannot_grow_host_memory_past_memory_mb() {
+    let fx = Fixture::new();
+    deploy(&fx, "waits", "[limits]\nmemory_mb = 16\n").await;
+    assert_eq!(get(&fx.server, "waits", "/waits?n=1000").await.0, 200);
+    let (st, kind, body) = get(&fx.server, "waits", "/waits?n=20000").await;
+    assert_eq!(
+        (st, kind.as_str()),
+        (500, "app_trap"),
+        "20000 pending waits are 20 MB of host memory outside memory_mb: {body}"
+    );
+    assert_eq!(get(&fx.server, "waits", "/").await.0, 200);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cpu_ms_is_per_request_when_requests_interleave() {
+    let fx = Fixture::new();
+    deploy(&fx, "burn", "[limits]\ncpu_ms = 300\nconcurrency = 4\n").await;
+    assert_eq!(get(&fx.server, "burn", "/").await.0, 200);
+    let each = "/burn?ms=10&rounds=15".to_string();
+    let (out, _) = many(&fx.server, "burn", vec![each; 4]).await;
+    for (st, kind, body) in &out {
+        assert_eq!(
+            *st, 200,
+            "four interleaved requests of 150 ms are each under cpu_ms = 300: {kind} {body}"
+        );
+    }
+    // One request of about a second, well over cpu_ms, whatever the epoch ticker's lag under load.
+    let (st, kind, body) = get(&fx.server, "burn", "/burn?ms=10&rounds=100").await;
+    assert_eq!((st, kind.as_str()), (508, "cpu_limit"), "{body}");
 }

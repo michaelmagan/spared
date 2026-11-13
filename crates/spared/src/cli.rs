@@ -861,7 +861,7 @@ fn cmd_new(name: &str, template: Option<&str>, json: bool) -> R<()> {
     }
     let mut steps = next_steps(name);
     if t.wasip3.is_some() {
-        steps[2] = "spared serve --data-dir ./data --experimental-wasip3   # in another terminal, once; EXPERIMENTAL (docs/wasip3.md)".to_string();
+        steps[2] = "spared serve --data-dir ./data --experimental-wasip3   # in another terminal, once (EXPERIMENTAL, docs/wasip3.md)".to_string();
         if !json {
             eprintln!("{WASIP3_NOTE}");
         }

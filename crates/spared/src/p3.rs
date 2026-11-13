@@ -2,18 +2,20 @@
 //! requests at once and interleaves them at their await points.
 //!
 //! An instance is one store driven by one `run_concurrent` loop on a task of its own. Requests
-//! reach it over a channel, at most `concurrency` at a time (the server holds a semaphore permit
-//! per request), and each answer comes back on its own oneshot channel. What this gives up
-//! against wasip2, because of what wasmtime 50 can do, is written in docs/wasip3.md:
+//! reach it over a channel, at most `concurrency` at a time. Each takes a semaphore permit that
+//! it keeps until its whole task group has finished, which can be after its response, and each
+//! answer comes back on its own oneshot channel. What this gives up against wasip2, because of
+//! what wasmtime 50 can do, is written in docs/wasip3.md:
 //!
-//! - a trap stops the store, so every request in flight on the instance fails with it;
-//! - guest code that computes holds the store, so the other requests wait while it runs;
-//! - one request cannot be cancelled: at its deadline the client gets 504, the instance takes no
-//!   more requests, and it is dropped once the others are done or `deadline_ms` later.
+//! - a trap stops the store, so every request in flight on the instance fails with it,
+//! - guest code that computes holds the store, so the other requests wait while it runs,
+//! - one request cannot be cancelled. At its deadline the client gets 504 and the instance takes
+//!   no more requests. A task group still running `deadline_ms` after its request started has the
+//!   same effect, and the store is dropped, which stops every task in it, `deadline_ms` later.
 //!
 //! Per-request budgets (`cpu_ms`, `max_outbound` and the log allowance) are kept per wasmtime task
 //! group. A task group is the root task of one host-to-guest call, which here is one request, plus
-//! every subtask it starts; the `task-group-hook` feature tells [`Attribution`] which group runs.
+//! every subtask it starts. The `task-group-hook` feature tells [`Attribution`] which group runs.
 
 use crate::grants::Manifest;
 use crate::logcap::{AppLog, RequestLog};
@@ -27,7 +29,7 @@ use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::sync::{Semaphore, mpsc, oneshot, watch};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 use wasmtime::component::{Accessor, Component, TaskGroupHook, TaskGroupId};
 use wasmtime::{Engine, Store, Trap, UpdateDeadline};
 use wasmtime_wasi::WasiCtx;
@@ -84,9 +86,14 @@ struct Ledgers {
     /// The task group whose code runs now, as the hook last reported it.
     current: Option<TaskGroupId>,
     groups: HashMap<TaskGroupId, Ledger>,
+    /// What each request keeps until its task group has finished, the response notwithstanding.
+    holds: HashMap<TaskGroupId, Hold>,
+    /// Holds of finished groups, released by the instance's loop between polls (see
+    /// [`Attribution::release_finished`]).
+    finished: Vec<Hold>,
     /// Ticks seen while no group was entered, since a group last was. Bounded by `cpu_ticks` too.
     loose_ticks: u64,
-    /// Log bytes written while no group was entered; one request's allowance over the instance.
+    /// Log bytes written while no group was entered, as one request's allowance over the instance.
     loose_log: Ledger,
 }
 
@@ -99,6 +106,8 @@ impl Attribution {
             budget,
             current: None,
             groups: HashMap::new(),
+            holds: HashMap::new(),
+            finished: Vec::new(),
             loose_ticks: 0,
             loose_log: Ledger::new(budget),
         }))
@@ -120,6 +129,23 @@ impl Attribution {
                 l.loose_ticks >= budget.cpu_ticks
             }
         }
+    }
+
+    /// Keep `hold` until task group `id` finishes. A group that already has (it ended before
+    /// this ran) releases it at once.
+    fn hold(&self, id: TaskGroupId, hold: Hold) {
+        let mut l = self.0.lock().unwrap();
+        if l.groups.contains_key(&id) {
+            let _released = l.holds.insert(id, hold);
+        }
+    }
+
+    /// Let go of the holds of the groups that finished. The loop does it between polls, and after
+    /// it has recorded how it ended, so that when a trap stops every group at once, no request
+    /// gets a place on the instance before the instance says it is closed.
+    fn release_finished(&self) {
+        let finished = std::mem::take(&mut self.0.lock().unwrap().finished);
+        drop(finished);
     }
 
     /// Take one outbound call from the running request's `max_outbound`. False when it has none
@@ -167,6 +193,13 @@ impl RequestLog for Attribution {
     }
 }
 
+/// What a request holds until its whole task group is done: its place among the instance's
+/// `concurrency`, and the signal the deadline watcher waits on.
+struct Hold {
+    _slot: OwnedSemaphorePermit,
+    _finished: oneshot::Sender<()>,
+}
+
 /// Tells [`Attribution`] which task group runs.
 struct Hook(Arc<Attribution>);
 
@@ -194,10 +227,19 @@ impl TaskGroupHook for Hook {
     }
 
     fn handle_finish(&mut self, id: TaskGroupId) -> wasmtime::Result<()> {
-        self.0.0.lock().unwrap().groups.remove(&id);
+        let mut l = self.0.0.lock().unwrap();
+        l.groups.remove(&id);
+        if let Some(hold) = l.holds.remove(&id) {
+            l.finished.push(hold);
+        }
         Ok(())
     }
 }
+
+/// The most stream, future, waitable and subtask handles one instance may hold. wasmtime keeps
+/// about 1 KB of host memory per handle, outside `memory_mb`, and its default is 100,000. A guest
+/// over the cap traps like any other, so one app cannot grow the host's memory by leaking them.
+const MAX_COMPONENT_HANDLES: usize = 8192;
 
 /// The store of a wasip3 instance: the manifest's limits as for wasip2, with the per-request
 /// budgets kept by task group. `log_per_request` is the server's per-request log allowance.
@@ -210,6 +252,7 @@ pub fn store(
     log_per_request: u64,
 ) -> Store<Guarded> {
     let mut store = Guarded::store(engine, wasi, m, quota);
+    store.set_max_component_handles(MAX_COMPONENT_HANDLES);
     let attr = Arc::new(Attribution::new(Budget {
         cpu_ticks: m.limits.cpu_ms.max(1),
         outbound: m.limits.max_outbound,
@@ -234,6 +277,7 @@ pub fn store(
 }
 
 struct Job {
+    hold: Hold,
     req: http::Request<Bytes>,
     max_response: usize,
     reply: oneshot::Sender<Result<http::Response<Bytes>, CallError>>,
@@ -248,10 +292,15 @@ enum Ended {
     Trapped { kind: TrapKind, text: String },
 }
 
+/// A request handed to an instance, waiting for its answer.
+pub struct Pending {
+    rx: oneshot::Receiver<Result<http::Response<Bytes>, CallError>>,
+}
+
 /// One wasip3 app instance.
 pub struct Instance {
     jobs: Mutex<Option<mpsc::UnboundedSender<Job>>>,
-    /// One permit per request in flight; `concurrency` in all.
+    /// One permit per request until its task group finishes, `concurrency` in all.
     slots: Arc<Semaphore>,
     concurrency: u32,
     /// Cleared once the instance may take no more requests: a deadline passed, or it was drained.
@@ -298,26 +347,45 @@ impl Instance {
         (self.concurrency as usize).saturating_sub(self.slots.available_permits())
     }
 
-    /// A place for one request, waiting while `concurrency` are in flight.
-    pub async fn slot(&self) -> tokio::sync::OwnedSemaphorePermit {
-        self.slots
-            .clone()
-            .acquire_owned()
-            .await
-            .expect("the semaphore is never closed")
+    /// A place for one request, waiting while `concurrency` are in flight. None when the
+    /// instance closes while it waits: the request belongs on another instance then.
+    pub async fn slot(&self) -> Option<OwnedSemaphorePermit> {
+        self.slots.clone().acquire_owned().await.ok()
     }
 
-    /// Run one request. At `deadline` the client gets [`CallError::Deadline`] and the instance
-    /// takes no more requests: its task for this request keeps running until the instance is
-    /// drained, at most another `deadline_ms`.
+    /// Run one request in a place of its own. See [`Instance::send`] and [`Instance::wait`].
     pub async fn call(
-        &self,
+        self: &Arc<Self>,
         req: http::Request<Bytes>,
         deadline: Duration,
         max_response: usize,
     ) -> Result<http::Response<Bytes>, CallError> {
+        let Some(slot) = self.slot().await else {
+            return Err(CallError::NoResponse);
+        };
+        let pending = self.send(req, slot, deadline, max_response);
+        self.wait(pending, deadline).await
+    }
+
+    /// Hand one request to the instance, which the caller does while it still holds whatever
+    /// keeps the instance from being replaced. The request keeps `slot` until its task group has
+    /// finished, which can be after its response: a task it left running still counts toward
+    /// `concurrency` and `max_outbound`. If that has not happened `deadline` from now, the
+    /// instance takes no more requests and is dropped `deadline_ms` later, stopping the task.
+    pub fn send(
+        self: &Arc<Self>,
+        req: http::Request<Bytes>,
+        slot: OwnedSemaphorePermit,
+        deadline: Duration,
+        max_response: usize,
+    ) -> Pending {
         let (reply, rx) = oneshot::channel();
+        let (finished, group_done) = oneshot::channel();
         let job = Job {
+            hold: Hold {
+                _slot: slot,
+                _finished: finished,
+            },
             req,
             max_response,
             reply,
@@ -326,10 +394,25 @@ impl Instance {
             Some(jobs) => jobs.send(job).is_ok(),
             None => false,
         };
-        if !sent {
-            return Err(self.failure().await);
+        if sent {
+            let instance = self.clone();
+            tokio::spawn(async move {
+                if tokio::time::timeout(deadline, group_done).await.is_err() {
+                    instance.close_after_deadline();
+                }
+            });
         }
-        match tokio::time::timeout(deadline, rx).await {
+        Pending { rx }
+    }
+
+    /// The answer to a request sent with [`Instance::send`]. At `deadline` the client gets
+    /// [`CallError::Deadline`] and the instance takes no more requests.
+    pub async fn wait(
+        &self,
+        pending: Pending,
+        deadline: Duration,
+    ) -> Result<http::Response<Bytes>, CallError> {
+        match tokio::time::timeout(deadline, pending.rx).await {
             Ok(Ok(r)) => r,
             Ok(Err(_)) => Err(self.failure().await),
             Err(_) => {
@@ -352,15 +435,16 @@ impl Instance {
         }
     }
 
-    /// Stop sending requests here; the loop ends once the requests in flight are done.
+    /// Stop sending requests here. The loop ends once the requests in flight are done.
     fn close(&self) {
         self.open.store(false, Ordering::Release);
+        self.slots.close();
         self.jobs.lock().unwrap().take();
     }
 
-    /// After a request passed its deadline: take no more requests, and drop the store at the
-    /// latest `deadline_ms` from now. Every other request in flight started before this one ran
-    /// out, so by then each of them is past its own deadline too.
+    /// After a request, or a task it left running, passed its deadline: take no more requests,
+    /// and drop the store `deadline_ms` from now, which stops every task in it. The requests
+    /// still in flight get that long to finish.
     fn close_after_deadline(&self) {
         if !self.open.swap(false, Ordering::AcqRel) {
             return;
@@ -406,6 +490,7 @@ async fn run_loop(
     end: watch::Sender<Option<Ended>>,
     quota: Option<Arc<AppQuota>>,
 ) {
+    let attr = store.data().p3.clone();
     let result = {
         let svc = &svc;
         let rx = &mut rx;
@@ -434,6 +519,11 @@ async fn run_loop(
             if let Some(q) = &quota {
                 q.cpu_charge(t.elapsed().as_nanos() as u64);
             }
+            if r.is_pending()
+                && let Some(a) = &attr
+            {
+                a.release_finished();
+            }
             r
         })
         .await
@@ -446,16 +536,20 @@ async fn run_loop(
         },
     };
     let _ = end.send(Some(ended));
+    if let Some(a) = &attr {
+        a.release_finished();
+    }
 }
 
 async fn one(acc: &Accessor<Guarded>, svc: &Service, job: Job) {
-    let r = serve_one(acc, svc, job.req, job.max_response).await;
+    let r = serve_one(acc, svc, job.hold, job.req, job.max_response).await;
     let _ = job.reply.send(r);
 }
 
 async fn serve_one(
     acc: &Accessor<Guarded>,
     svc: &Service,
+    hold: Hold,
     req: http::Request<Bytes>,
     max_response: usize,
 ) -> Result<http::Response<Bytes>, CallError> {
@@ -465,9 +559,14 @@ async fn serve_one(
     let func = svc.wasi_http_handler().func_handle();
     let call = acc
         .with(|mut s| -> wasmtime::Result<_> {
+            let attr = s.data_mut().p3.clone();
             let (r, _io) = P3Request::from_http(s.data_mut().http().hooks, req);
             let r = s.data_mut().http().table.push(r)?;
-            func.start_call_concurrent(s, (r,))
+            let call = func.start_call_concurrent(s, (r,))?;
+            if let Some(attr) = attr {
+                attr.hold(call.group(), hold);
+            }
+            Ok(call)
         })
         .map_err(bad)?;
     let out = func

@@ -90,7 +90,7 @@ enum Live {
 
 impl Live {
     /// Release the instance. A wasip3 instance takes no more requests and finishes the ones in
-    /// flight first, for at most the app's `deadline_ms`; whoever holds the instance lock while
+    /// flight first, for at most the app's `deadline_ms`. Whoever holds the instance lock while
     /// this runs keeps new requests waiting, as a wasip2 request in flight does.
     async fn retire(self) {
         if let Live::P3(i) = self {
@@ -2093,7 +2093,7 @@ impl Server {
 
     /// EXPERIMENTAL: one request to a wasip3 app. The instance lock is held only to wake the
     /// instance and to wait for a place among its `concurrency` requests in flight, so requests
-    /// start in the order they took the lock; the request then runs without it.
+    /// start in the order they took the lock. The request then runs without it.
     async fn run_request_p3(
         &self,
         app: Arc<App>,
@@ -2105,39 +2105,52 @@ impl Server {
         let deadline = Duration::from_millis(limits.deadline_ms);
         let started = Instant::now();
         // An instance that trapped, or where a request passed its deadline, takes no more
-        // requests. It is replaced now and finishes what it holds in the background.
-        if let Some(Live::P3(i)) = guard.as_ref()
-            && !i.is_open()
-            && let Some(old) = guard.take()
-        {
-            self.metrics.eviction(Evicted::Error);
-            tokio::spawn(old.retire());
-        }
-        if guard.is_none()
-            && let Some(r) = self.wake_into(&app, &mut guard, deadline).await
-        {
-            return r;
-        }
-        let Some(Live::P3(instance)) = guard.as_ref() else {
-            unreachable!("a wasip3 app has a wasip3 instance")
+        // requests. It is replaced now and finishes what it holds in the background. A request
+        // that waited for a place checks again once it has one, since the instance can close
+        // meanwhile, and goes to a fresh instance if it did.
+        let (instance, slot) = loop {
+            if let Some(Live::P3(i)) = guard.as_ref()
+                && !i.is_open()
+                && let Some(old) = guard.take()
+            {
+                self.metrics.eviction(Evicted::Error);
+                tokio::spawn(old.retire());
+            }
+            if guard.is_none()
+                && let Some(r) = self.wake_into(&app, &mut guard, deadline).await
+            {
+                return r;
+            }
+            let Some(Live::P3(instance)) = guard.as_ref() else {
+                unreachable!("a wasip3 app has a wasip3 instance")
+            };
+            let instance = instance.clone();
+            let left = deadline.saturating_sub(started.elapsed());
+            let slot = match tokio::time::timeout(left, instance.slot()).await {
+                Ok(slot) => slot,
+                Err(_) => {
+                    return app_busy(
+                        &app.name,
+                        "did not get to this request within its deadline_ms",
+                    );
+                }
+            };
+            if let Some(slot) = slot
+                && instance.is_open()
+            {
+                break (instance, slot);
+            }
         };
-        let instance = instance.clone();
-        let left = deadline.saturating_sub(started.elapsed());
-        let Ok(slot) = tokio::time::timeout(left, instance.slot()).await else {
-            return app_busy(
-                &app.name,
-                "did not get to this request within its deadline_ms",
-            );
-        };
+        let pending = instance.send(
+            req,
+            slot,
+            deadline.saturating_sub(started.elapsed()),
+            self.cfg.max.response_mb << 20,
+        );
         drop(guard);
         let outcome = instance
-            .call(
-                req,
-                deadline.saturating_sub(started.elapsed()),
-                self.cfg.max.response_mb << 20,
-            )
+            .wait(pending, deadline.saturating_sub(started.elapsed()))
             .await;
-        drop(slot);
         app.requests.fetch_add(1, Ordering::Relaxed);
         app.last_ms.store(self.now_ms(), Ordering::Relaxed);
         let e = match outcome {
@@ -2148,7 +2161,7 @@ impl Server {
         if matches!(e, CallError::Deadline) {
             note_in_app_log(
                 &app.dir,
-                "a request passed deadline_ms: the instance takes no more requests and is dropped once its other requests finish (EXPERIMENTAL wasip3: the request's task keeps running until then)",
+                "a request passed deadline_ms: the instance takes no more requests and is dropped within another deadline_ms (EXPERIMENTAL wasip3: the task of that request keeps running until then)",
             );
         }
         self.call_error(&app, e)
@@ -2194,7 +2207,7 @@ impl Server {
                 };
                 let message = if app.manifest.runtime.is_p3() {
                     format!(
-                        "{message}; with runtime wasip3-experimental this stops every request in flight in the instance"
+                        "{message}. With runtime wasip3-experimental this stops every request in flight in the instance"
                     )
                 } else {
                     message

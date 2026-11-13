@@ -12,6 +12,7 @@ struct Probe;
 thread_local! {
     static IN_FLIGHT: Cell<u32> = const { Cell::new(0) };
     static PEAK: Cell<u32> = const { Cell::new(0) };
+    static BG: Cell<u64> = const { Cell::new(0) };
 }
 
 struct Entered;
@@ -59,7 +60,10 @@ async fn fetch(authority: &str) -> Result<u16, ErrorCode> {
 
 fn query_u64(path: &str, key: &str, default: u64) -> u64 {
     path.split_once('?')
-        .and_then(|(_, q)| q.split('&').find_map(|kv| kv.strip_prefix(key)?.strip_prefix('=')))
+        .and_then(|(_, q)| {
+            q.split('&')
+                .find_map(|kv| kv.strip_prefix(key)?.strip_prefix('='))
+        })
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
 }
@@ -100,6 +104,46 @@ impl wasip3::exports::http::handler::Guest for Probe {
             let n = query_u64(&path, "bytes", 0) as usize;
             println!("{}", "x".repeat(n));
             format!("logged {n}")
+        } else if let Some(rest) = path.strip_prefix("/bgfetch/") {
+            let authority = rest.to_string();
+            wit_bindgen::spawn_local(async move {
+                let _ = fetch(&authority).await;
+                BG.with(|c| c.set(c.get() + 1));
+            });
+            "bgfetch started".to_string()
+        } else if path.starts_with("/burn") {
+            let ms = query_u64(&path, "ms", 10);
+            let rounds = query_u64(&path, "rounds", 1);
+            let mut x: u64 = 1;
+            for _ in 0..rounds {
+                let t = std::time::Instant::now();
+                while (t.elapsed().as_millis() as u64) < ms {
+                    for i in 0..1000u64 {
+                        x = x.wrapping_mul(6364136223846793005).wrapping_add(i);
+                    }
+                }
+                wasip3::clocks::monotonic_clock::wait_for(1_000_000).await;
+            }
+            format!("burned {x}")
+        } else if path.starts_with("/bgcount") {
+            format!("bg {}", BG.with(|c| c.get()))
+        } else if path.starts_with("/bg") {
+            wit_bindgen::spawn_local(async move {
+                loop {
+                    wasip3::clocks::monotonic_clock::wait_for(20_000_000).await;
+                    BG.with(|c| c.set(c.get() + 1));
+                }
+            });
+            "bg started".to_string()
+        } else if path.starts_with("/waits") {
+            let n = query_u64(&path, "n", 0);
+            let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+            for _ in 0..n {
+                let mut f = Box::pin(wasip3::clocks::monotonic_clock::wait_for(3_600_000_000_000));
+                let _ = std::future::Future::poll(f.as_mut(), &mut cx);
+                std::mem::forget(f);
+            }
+            format!("waiting {n}")
         } else if path.starts_with("/stats") {
             format!("peak {}", PEAK.with(|p| p.get()))
         } else {

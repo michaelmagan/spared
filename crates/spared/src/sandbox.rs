@@ -311,7 +311,7 @@ pub struct PolicyHooks {
     pub per_request: u32,
     /// The app's egress budget and byte count, kept by the server outside the instance.
     pub quota: Option<Arc<AppQuota>>,
-    /// wasip3-experimental: the per-request budgets by task group; `max_outbound` is taken from
+    /// wasip3-experimental: the per-request budgets by task group. `max_outbound` is taken from
     /// the running request's there instead of from `remaining`.
     pub p3: Option<Arc<crate::p3::Attribution>>,
     /// Unit tests only: reach a loopback test server, which [`ip_denied`] always refuses.

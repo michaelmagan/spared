@@ -67,7 +67,7 @@ class Server:
         for var, default in (("RUSTUP_HOME", "~/.rustup"), ("CARGO_HOME", "~/.cargo")):
             self.env.setdefault(var, os.path.expanduser(default))
         self.log = open(os.path.join(tmp, "serve.log"), "w")
-        # --experimental-wasip3 for the fetcher3 template; the other templates are wasip2 apps.
+        # --experimental-wasip3 for the fetcher3 template, the other templates are wasip2 apps.
         self.proc = subprocess.Popen(
             [BIN, "serve", "--data-dir", os.path.join(tmp, "data"),
              "--listen", f"127.0.0.1:{self.pub}", "--admin-listen", f"127.0.0.1:{self.adm}",
