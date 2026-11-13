@@ -80,6 +80,15 @@ fn spinner() -> String {
     )
 }
 
+/// A component whose core module spins in its start function, which runs while the instance is
+/// built, before any request.
+fn start_spinner() -> String {
+    HANDLER.replace(
+        "(core module $m (func (export \"handle\") (param i32 i32)))",
+        "(core module $m (func $spin (loop $l (br $l))) (start $spin) (func (export \"handle\") (param i32 i32)))",
+    )
+}
+
 fn public(n: &Node, app: &str) -> (u16, String, Vec<u8>) {
     http_full(
         n.public,
@@ -514,4 +523,72 @@ fn a_damaged_limits_file_keeps_its_app_out_until_the_operator_fixes_it() {
     assert_eq!(st, 200, "{v}");
     assert_eq!(public(&n, "a").0, 200);
     assert_eq!(limits(&n, "a")["effective"]["data_mb"], 4);
+}
+
+#[test]
+fn cpu_spent_in_a_start_function_is_charged() {
+    let s = scratch("lim-start");
+    let n = Node::start(&s.0, "n", vec!["--access-log".into(), "off".into()], vec![]);
+    let wat = start_spinner();
+    assert_ne!(wat, HANDLER, "the start function was not spliced in");
+    deploy_with(
+        &n,
+        "boot",
+        &wat,
+        "[limits]\ncpu_ms = 100\ndeadline_ms = 5000\n",
+    );
+    let (rc, v) = n.json(&["limits", "set", "boot", "--cpu-percent", "10"]);
+    assert_eq!(rc, 0, "{v}");
+
+    let cpu0 = cpu_time(&n);
+    let t0 = Instant::now();
+    let (mut total, mut refused) = (0u32, 0u32);
+    while t0.elapsed() < Duration::from_secs(6) {
+        let (st, _, body) = public(&n, "boot");
+        total += 1;
+        if st == 503 {
+            let text = String::from_utf8_lossy(&body);
+            assert!(text.contains("\"kind\":\"cpu_budget_exhausted\""), "{text}");
+            refused += 1;
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    let used = cpu_time(&n) - cpu0;
+    let u = limits(&n, "boot")["usage"].clone();
+    eprintln!("requests {total}, refused {refused}, server cpu {used:?}, usage {u}");
+    assert!(
+        refused > 0,
+        "a spinning start function never ran out of budget: {u}"
+    );
+    assert!(
+        used < Duration::from_millis(3500),
+        "the server used {used:?} of CPU in 6 s"
+    );
+    assert!(
+        u["cpu_ms_total"].as_u64().unwrap() >= 1000,
+        "the wake was not charged: {u}"
+    );
+}
+
+#[test]
+fn a_limits_directory_that_cannot_be_read_stops_the_server_and_changes_nothing() {
+    let s = scratch("lim-unreadable");
+    let data = s.0.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(data.join("limits"), "").unwrap();
+    let out = std::process::Command::new(SPARED)
+        .args(["serve", "--data-dir"])
+        .arg(&data)
+        .args(["--listen", "127.0.0.1:0", "--admin-listen", "127.0.0.1:0"])
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(err.contains("error[limits_unreadable]"), "{err}");
+    assert!(err.contains("limits"), "{err}");
+    let left: Vec<_> = std::fs::read_dir(&data)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+        .collect();
+    assert_eq!(left, vec!["limits".to_string()], "the data dir was touched");
 }

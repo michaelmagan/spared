@@ -216,9 +216,11 @@ def build_inputs():
     subprocess.run(["cargo", "build", "--release", "--target", "wasm32-wasip2"], cwd=HOSTILE_DIR, check=True, env=env)
 
 
-def hostile_manifest(name="hostile", **limits):
+def hostile_manifest(name="hostile", fetch=("example.invalid",), **limits):
+    # The hostile component imports wasi:http/outgoing-handler, so deploying it needs some fetch
+    # grant. The default is a reserved name that never resolves, so no test reaches the network.
     lines = "".join(f"{k} = {v}\n" for k, v in limits.items())
-    return f'name = "{name}"\n[grants]\ndata = true\nfetch = ["example.com"]\n[limits]\n{lines}'
+    return f'name = "{name}"\n[grants]\ndata = true\nfetch = {json.dumps(list(fetch))}\n[limits]\n{lines}'
 
 
 def sha256_file(path):
@@ -283,7 +285,10 @@ def main():
         fs_books(tmp)
         fs_books(tmp, per_app=True)
         per_app_limits(tmp)
-        egress_budget(tmp)
+        if os.environ.get("SPARED_TEST_INTERNET") == "1":
+            egress_budget(tmp)
+        else:
+            print("skip - egress_budget needs the public internet (set SPARED_TEST_INTERNET=1). The egress budget is tested hermetically in src/sandbox.rs", flush=True)
         body_budget(tmp)
         store_without_links(tmp)
         startup_refusals(tmp)
@@ -1802,7 +1807,7 @@ def egress_budget(tmp):
     """An app's outbound HTTP calls run until its egress budget is spent and then fail with
     egress_budget_exhausted, while a neighbor fetching the same host is untouched. Needs
     http://example.com/ to be reachable from this machine without a proxy, as the escape suite's
-    controls do; skipped otherwise."""
+    controls do; it runs only with SPARED_TEST_INTERNET=1 and skips if the host is unreachable."""
     try:
         with socket.create_connection(("example.com", 80), timeout=5) as c:
             c.sendall(b"GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n")
@@ -1816,7 +1821,7 @@ def egress_budget(tmp):
     os.makedirs(d)
     s = Server(d)
     for app in ["net", "peer"]:
-        st, v = s.deploy(app, HOSTILE, hostile_manifest(app, cpu_ms=5000, deadline_ms=30000))
+        st, v = s.deploy(app, HOSTILE, hostile_manifest(app, fetch=["example.com"], cpu_ms=5000, deadline_ms=30000))
         check(st == 200, f"deploy {app} for the egress budget", v)
     st, body, _ = hostile_reply(s, "net", "/fetch?n=1", timeout=60)
     m = re.match(r"fetched 1 bytes=(\d+) err=$", body)

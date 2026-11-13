@@ -193,21 +193,43 @@ pub fn remove(data_dir: &Path, name: &str) -> std::io::Result<bool> {
     }
 }
 
-/// The names that have an override file, whether or not it parses.
-pub fn stored_names(data_dir: &Path) -> Vec<String> {
-    let Ok(rd) = std::fs::read_dir(data_dir.join(DIR)) else {
-        return vec![];
+/// The names that have an override file, whether or not it parses. A missing directory is no
+/// names; a directory or an entry that cannot be read is an error, never an empty list, because
+/// an empty list would drop every limit the operator set.
+pub fn stored_names(data_dir: &Path) -> std::io::Result<Vec<String>> {
+    let rd = match std::fs::read_dir(data_dir.join(DIR)) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(e) => return Err(e),
     };
-    let mut v: Vec<String> = rd
-        .flatten()
-        .filter_map(|e| {
-            let n = e.file_name().to_string_lossy().to_string();
-            let name = n.strip_suffix(".json")?;
-            crate::grants::valid_name(name).then(|| name.to_string())
-        })
-        .collect();
+    let mut v = vec![];
+    for e in rd {
+        let n = e?.file_name().to_string_lossy().to_string();
+        if let Some(name) = n.strip_suffix(".json")
+            && crate::grants::valid_name(name)
+        {
+            v.push(name.to_string());
+        }
+    }
     v.sort();
-    v
+    Ok(v)
+}
+
+/// The start-up refusal for a `limits/` directory that cannot be read. Starting anyway would
+/// serve every app without the limits its operator set, and stamp the data dir as if it had none.
+pub fn unreadable(data_dir: &Path, e: &std::io::Error) -> crate::datadir::DataDirError {
+    let dir = data_dir.join(DIR);
+    crate::datadir::DataDirError {
+        kind: "limits_unreadable",
+        message: format!(
+            "cannot read the limits directory {}: {e}. Starting would serve apps without the limits set for them. Nothing in the data dir was changed",
+            dir.display()
+        ),
+        fix: format!(
+            "make {} a directory the server's user can read and list, or restore it from a copy of the data dir",
+            dir.display()
+        ),
+    }
 }
 
 /// A token bucket: it holds up to `cap` units and gains `per_window` units every `window`. Its
@@ -526,7 +548,7 @@ mod tests {
         };
         write(&d, "a", &o, "2026-11-13T00:00:00Z").unwrap();
         assert_eq!(read(&d, "a").unwrap(), Some(o));
-        assert_eq!(stored_names(&d), vec!["a".to_string()]);
+        assert_eq!(stored_names(&d).unwrap(), vec!["a".to_string()]);
         use std::os::unix::fs::PermissionsExt;
         let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&d.join(DIR)), 0o700);
@@ -618,5 +640,24 @@ mod tests {
         assert!(q.egress_charge(u64::MAX / 2));
         assert!(q.egress_admit());
         assert_eq!(q.usage_json()["cpu_ms_in_window"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn an_unreadable_limits_directory_is_an_error_not_an_empty_list() {
+        let d =
+            std::env::temp_dir().join(format!("spared-quota-unreadable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        assert_eq!(
+            stored_names(&d).unwrap(),
+            Vec::<String>::new(),
+            "no directory: no names"
+        );
+        std::fs::write(d.join(DIR), "").unwrap();
+        let e = stored_names(&d).unwrap_err();
+        let r = unreadable(&d, &e);
+        assert_eq!(r.kind, "limits_unreadable");
+        assert!(r.message.contains("limits"), "{}", r.message);
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

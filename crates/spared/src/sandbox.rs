@@ -94,6 +94,10 @@ pub fn link(engine: &Engine, component: &Component) -> wasmtime::Result<ProxyPre
 /// Most random bytes one `wasi:random` call may ask for.
 const MAX_RANDOM_BYTES: u64 = 1 << 20;
 
+/// What an outbound call that passed the policy checks costs the CPU budget for its DNS lookup,
+/// TCP connect and TLS setup, which run on the server outside the guest's poll time.
+const OUTBOUND_CALL_CPU_NS: u64 = 1_000_000;
+
 /// The WASI context of an app: no sockets and no name lookups (outbound HTTP goes through the
 /// policy hooks instead), `out` for stdout and stderr, and `/data` mapped to `data` when the
 /// manifest grants it.
@@ -238,8 +242,18 @@ fn egress_refused() -> HttpError {
     HttpError::InternalError(Some(EGRESS_REFUSED.into()))
 }
 
-/// An outbound request or response body whose data bytes are charged to the app's egress budget
-/// as they pass. The frame that spends the budget is replaced by an error, and so is every later
+/// Bytes a header map takes on the wire: each name, value, the colon, the space and the CRLF.
+fn header_bytes(h: &http::HeaderMap) -> u64 {
+    h.iter()
+        .map(|(k, v)| (k.as_str().len() + v.len() + 4) as u64)
+        .sum()
+}
+
+/// The bytes of a response status line, counted flat.
+const STATUS_LINE_BYTES: u64 = 15;
+
+/// An outbound request or response body whose data and trailer bytes are charged to the app's
+/// egress budget as they pass. The frame that spends the budget is replaced by an error, and so is every later
 /// poll, so the guest sees the call fail and the body stops there.
 struct Metered {
     inner: WasiBody,
@@ -269,8 +283,11 @@ impl http_body::Body for Metered {
         }
         let r = Pin::new(&mut self.inner).poll_frame(cx);
         if let Poll::Ready(Some(Ok(f))) = &r
-            && let Some(d) = f.data_ref()
-            && !self.quota.egress_charge(d.len() as u64)
+            && let Some(bytes) = f
+                .data_ref()
+                .map(|d| d.len() as u64)
+                .or_else(|| f.trailers_ref().map(header_bytes))
+            && !self.quota.egress_charge(bytes)
         {
             self.cut = true;
             return Poll::Ready(Some(Err(egress_refused())));
@@ -339,11 +356,19 @@ impl WasiHttpHooks for PolicyHooks {
         self.remaining = self.remaining.saturating_sub(1);
         let loopback_ok = self.loopback_allowed();
         let quota = self.quota.clone();
+        let req_head = request.method().as_str().len() as u64
+            + request.uri().to_string().len() as u64
+            + header_bytes(request.headers());
         // After the policy checks, so a call they refuse is not counted against the egress budget.
         let egress_open = refused.is_none()
             && budget
             && listed
-            && quota.as_ref().is_none_or(|q| q.egress_admit());
+            && quota
+                .as_ref()
+                .is_none_or(|q| q.egress_admit() && q.egress_charge(req_head));
+        if egress_open && let Some(q) = &quota {
+            q.cpu_charge(OUTBOUND_CALL_CPU_NS);
+        }
         let request = match &quota {
             Some(q) => request.map(|b| metered(b, q)),
             None => request,
@@ -372,6 +397,11 @@ impl WasiHttpHooks for PolicyHooks {
             }
             let (res, io) =
                 crate::pinned_send::pinned_send_request(addrs[0], request, options).await?;
+            if let Some(q) = &quota
+                && !q.egress_charge(STATUS_LINE_BYTES + header_bytes(res.headers()))
+            {
+                return Err(egress_refused());
+            }
             let res = res.map(BodyExt::boxed_unsync);
             Ok((
                 match &quota {
@@ -970,6 +1000,60 @@ mod tests {
         got
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn each_admitted_outbound_call_costs_the_cpu_budget_its_setup() {
+        let (port, _) = origin(0).await;
+        let q = Arc::new(AppQuota::new(Some(crate::quota::Override {
+            cpu_ms_per_min: Some(60_000),
+            ..Default::default()
+        })));
+        let mut h = hooks_for(&q, "127.0.0.1");
+        for _ in 0..100 {
+            post(&mut h, port, 0).await.unwrap();
+        }
+        let u = q.usage_json();
+        assert!(u["cpu_ms_total"].as_u64().unwrap() >= 100, "{u}");
+
+        let before = q.usage_json()["cpu_ms_total"].as_u64().unwrap();
+        let mut denied = hooks_for(&q, "example.invalid");
+        assert!(post(&mut denied, port, 0).await.is_err());
+        assert_eq!(
+            q.usage_json()["cpu_ms_total"].as_u64().unwrap(),
+            before,
+            "a call the policy refuses costs nothing"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn request_headers_and_a_long_path_count_toward_the_egress_budget() {
+        let (port, seen) = origin(0).await;
+        let q = Arc::new(AppQuota::new(Some(crate::quota::Override {
+            egress_bytes_per_hour: Some(1000),
+            ..Default::default()
+        })));
+        let mut h = hooks_for(&q, "127.0.0.1");
+        let req = http::Request::builder()
+            .method("GET")
+            .uri(format!("http://127.0.0.1:{port}/{}", "p".repeat(4000)))
+            .header("x-pad", "h".repeat(60_000))
+            .body(
+                Full::new(Bytes::new())
+                    .map_err(|e: std::convert::Infallible| match e {})
+                    .boxed_unsync(),
+            )
+            .unwrap();
+        let e = match Box::into_pin(h.send_request(req, None, Box::new(async { Ok(()) }))).await {
+            Ok(_) => panic!("a 64 KB request head went out under a 1000-byte budget"),
+            Err(e) => e,
+        };
+        assert!(is_egress_refusal(&e), "{e}");
+        let u = q.usage_json();
+        assert!(u["egress_bytes_total"].as_u64().unwrap() >= 1000, "{u}");
+        assert_eq!(seen.load(Ordering::Relaxed), 0);
+        let e = post(&mut h, port, 0).await.unwrap_err();
+        assert!(is_egress_refusal(&e), "{e}");
+    }
+
     fn is_egress_refusal(e: &HttpError) -> bool {
         matches!(e, HttpError::InternalError(Some(m)) if m.starts_with("egress_budget_exhausted"))
     }
@@ -1010,7 +1094,7 @@ mod tests {
         for _ in 0..5 {
             assert_eq!(post(&mut h2, port, 500).await.unwrap(), 3000);
         }
-        assert_eq!(free.usage_json()["egress_bytes_total"], 5 * 3500);
+        assert!(free.usage_json()["egress_bytes_total"].as_u64().unwrap() >= 5 * 3500);
         let own = Arc::new(AppQuota::new(Some(crate::quota::Override {
             egress_bytes_per_hour: Some(1 << 20),
             ..Default::default()

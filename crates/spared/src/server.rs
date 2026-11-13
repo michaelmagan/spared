@@ -1265,7 +1265,10 @@ impl Server {
         // Before anything under the data dir is read or changed: a layout this build does not
         // understand is refused, and a directory without a stamp gets one. Format 2 while any
         // app has an operator-set limit, so a release that would ignore it refuses to start.
-        let stored_limits = quota::stored_names(&cfg.data_dir);
+        let stored_limits = quota::stored_names(&cfg.data_dir).map_err(|e| {
+            let r = quota::unreadable(&cfg.data_dir, &e);
+            wasmtime::Error::msg(format!("{} ({}). Fix: {}", r.message, r.kind, r.fix))
+        })?;
         let format = if stored_limits.is_empty() {
             datadir::BASE_FORMAT
         } else {
@@ -1869,7 +1872,10 @@ impl Server {
         let started = Instant::now();
         if guard.is_none() {
             self.hint_cold_component(&app.shared);
-            match tokio::time::timeout(deadline, self.wake(&app)).await {
+            let woke_at = Instant::now();
+            let woke = tokio::time::timeout(deadline, self.wake(&app)).await;
+            app.quota.cpu_charge(woke_at.elapsed().as_nanos() as u64);
+            match woke {
                 Ok(Ok(l)) => {
                     *guard = Some(l);
                     app.hot.store(true, Ordering::Relaxed);
@@ -2967,13 +2973,19 @@ impl Server {
                 Ok(r) => r,
                 Err(e) => return limits_write_failed("cannot remove the limits file", e),
             };
-            if quota::stored_names(&self.cfg.data_dir).is_empty()
-                && let Err(e) = datadir::stamp(&self.cfg.data_dir, datadir::BASE_FORMAT)
-            {
-                eprintln!(
-                    "warning: no app has limits any more, but the format stamp stays at 2 ({}). Releases before per-app limits refuse this data dir until the next start",
-                    e.message
-                );
+            match quota::stored_names(&self.cfg.data_dir) {
+                Ok(left) if left.is_empty() => {
+                    if let Err(e) = datadir::stamp(&self.cfg.data_dir, datadir::BASE_FORMAT) {
+                        eprintln!(
+                            "warning: no app has limits any more, but the format stamp stays at 2 ({}). Releases before per-app limits refuse this data dir until the next start",
+                            e.message
+                        );
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => eprintln!(
+                    "warning: the limits directory cannot be listed ({e}), so the format stamp stays at 2"
+                ),
             }
             removed
         };
