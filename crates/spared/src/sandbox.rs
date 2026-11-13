@@ -116,7 +116,7 @@ where
 
 /// A store for one app instance from a finished WASI context: the manifest's limits, the books for
 /// the data directory when the app has one, and the app's budgets (`quota`, which the server keeps
-/// per app across instances; `None` where nothing keeps them, as in `spared test`).
+/// per app across instances, or `None` where nothing keeps them, as in `spared test`).
 pub async fn store_for(
     engine: &Engine,
     m: &Manifest,

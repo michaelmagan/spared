@@ -128,7 +128,7 @@ fn limits_are_the_operators_and_persist_until_cleared() {
     assert_eq!(v["effective"]["cpu_ms_per_min"], Value::Null);
     assert_eq!(v["app_exists"], true);
 
-    // An override lower than a cap is in force; one higher is lowered to the cap and said so.
+    // An override lower than a cap is in force. One higher is lowered to the cap and said so.
     let (st, v) = put_limits(
         &n,
         "a",
@@ -469,7 +469,7 @@ fn a_cpu_budget_throttles_a_spinning_app_and_not_its_neighbor() {
     let (st, _, body) = public(&n, "spin");
     assert_eq!(st, 508, "{}", String::from_utf8_lossy(&body));
 
-    // A restart starts the counters over; the budget stays.
+    // A restart starts the counters over, and the budget stays.
     let mut n = n;
     n.restart();
     let (st, _, _) = public(&n, "spin");

@@ -137,7 +137,7 @@ pub struct Server {
     auth_failures: tokens::AuthFailures,
     /// Per-app limits set by the operator and the CPU and egress counters, by app name: one for
     /// each deployed app and each name with a stored override. Kept across redeploys, evictions
-    /// and freezes; an app's counters start over when it is removed or the server restarts.
+    /// and freezes. An app's counters start over when it is removed or the server restarts.
     quotas: Mutex<HashMap<String, Arc<AppQuota>>>,
     /// Held while the files under `<data-dir>/limits/` and the format stamp change, so the stamp
     /// says format 2 whenever an override is on disk.
@@ -1280,7 +1280,7 @@ impl Server {
                 Ok(o) => AppQuota::new(o),
                 Err(why) => {
                     eprintln!(
-                        "app {name}: its limits file cannot be read ({why}); the app is not served until `spared limits set` or `spared limits clear` replaces it"
+                        "app {name}: its limits file cannot be read ({why}). The app is not served until `spared limits set` or `spared limits clear` replaces it"
                     );
                     AppQuota::damaged(why)
                 }
@@ -2971,7 +2971,7 @@ impl Server {
                 && let Err(e) = datadir::stamp(&self.cfg.data_dir, datadir::BASE_FORMAT)
             {
                 eprintln!(
-                    "warning: no app has limits any more, but the format stamp stays at 2 ({}); releases before per-app limits refuse this data dir until the next start",
+                    "warning: no app has limits any more, but the format stamp stays at 2 ({}). Releases before per-app limits refuse this data dir until the next start",
                     e.message
                 );
             }

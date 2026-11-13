@@ -1868,7 +1868,7 @@ async fn cmd_rm(name: &str, yes: bool, server: Option<String>, json: bool) -> R<
         }
         if limits_kept {
             println!(
-                "note: the limits set for {name} stay and apply to an app deployed under this name again; `spared limits clear {name}` removes them"
+                "note: the limits set for {name} stay and apply to an app deployed under this name again. `spared limits clear {name}` removes them"
             );
         }
     }
@@ -1904,7 +1904,7 @@ impl LimitFlags {
         }
         let cpu = match (self.cpu_percent, self.cpu_ms_per_min) {
             (Some(p), _) if !(1..=100).contains(&p) => {
-                return Err(bad(format!("--cpu-percent is {p}; it takes 1 to 100")));
+                return Err(bad(format!("--cpu-percent is {p}, and it takes 1 to 100")));
             }
             (Some(p), _) => Some(p * 600),
             (None, Some(0)) => return Err(bad("--cpu-ms-per-min must be at least 1".into())),
@@ -1917,7 +1917,7 @@ impl LimitFlags {
             let bytes = (mb * 1_048_576.0).round();
             if !mb.is_finite() || bytes < 1.0 {
                 return Err(bad(format!(
-                    "--egress-mb-per-hour is {mb}; it takes a number above 0, such as 50 or 0.5"
+                    "--egress-mb-per-hour is {mb}, and it takes a number above 0, such as 50 or 0.5"
                 )));
             }
             m.insert("egress_bytes_per_hour".into(), (bytes as u64).into());
@@ -1929,7 +1929,7 @@ impl LimitFlags {
     }
 }
 
-/// The server's answer for an app's limits; a server without the route predates them.
+/// The server's answer for an app's limits. A server without the route predates them.
 async fn limits_call(base: &str, method: &str, name: &str, body: Option<Value>) -> R<Value> {
     let (headers, bytes) = match &body {
         Some(b) => (
@@ -2032,7 +2032,7 @@ fn print_limits(v: &Value) {
         if clamped.contains(&k) {
             format!("the override is above the server's cap of {cap}, so the cap")
         } else if set.contains(&k) {
-            format!("override; server cap {cap}")
+            format!("override, server cap {cap}")
         } else {
             "the server's cap".to_string()
         }
@@ -2047,7 +2047,7 @@ fn print_limits(v: &Value) {
     );
     if let Some(d) = v["damaged"].as_str() {
         println!(
-            "  the stored override cannot be read ({d}); the app is not served until it is set or cleared"
+            "  the stored override cannot be read ({d}). The app is not served until it is set or cleared"
         );
     }
     match v["set_at"].as_str() {
@@ -2070,7 +2070,7 @@ fn print_limits(v: &Value) {
     );
     match eff["cpu_ms_per_min"].as_u64() {
         Some(c) => println!(
-            "  cpu       {c} ms per minute, {:.1}% of a core ({}); used {} ms of the {} s bucket, {} ms left, {} requests refused, {} ms since start",
+            "  cpu       {c} ms per minute, {:.1}% of a core ({}), used {} ms of the {} s bucket, {} ms left, {} requests refused, {} ms since start",
             c as f64 / 600.0,
             whence("cpu_ms_per_min", &caps["cpu_ms_per_min"]),
             u["cpu_ms_in_window"],
@@ -2080,20 +2080,20 @@ fn print_limits(v: &Value) {
             u["cpu_ms_total"]
         ),
         None => println!(
-            "  cpu       no budget over time (each request is still held to its cpu_ms); {} ms since start",
+            "  cpu       no budget over time (each request is still held to its cpu_ms), {} ms since start",
             u["cpu_ms_total"]
         ),
     }
     match eff["egress_bytes_per_hour"].as_u64() {
         Some(b) => println!(
-            "  egress    {} per hour; used {} of it, {} calls or bodies refused, {} since start",
+            "  egress    {} per hour, used {} of it, {} calls or bodies refused, {} since start",
             size_text(b),
             size_text(u["egress_bytes_in_window"].as_u64().unwrap_or(0)),
             u["egress_refused"],
             size_text(u["egress_bytes_total"].as_u64().unwrap_or(0))
         ),
         None => println!(
-            "  egress    no budget; {} since start",
+            "  egress    no budget, {} since start",
             size_text(u["egress_bytes_total"].as_u64().unwrap_or(0))
         ),
     }

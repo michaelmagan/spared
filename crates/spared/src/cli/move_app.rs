@@ -780,7 +780,7 @@ pub async fn cmd_move(a: Args, json: bool) -> R<()> {
         } else if !src_limits.is_null() && dst_limits != src_limits {
             steps_planned.insert(
                 0,
-                format!("keep the target's own per-app limits for {name} ({dst_limits}); the source's ({src_limits}) are not copied"),
+                format!("keep the target's own per-app limits for {name} ({dst_limits}). The source's ({src_limits}) are not copied"),
             );
         }
         steps_planned.extend(smoke_line);

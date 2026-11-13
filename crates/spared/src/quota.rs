@@ -9,7 +9,7 @@
 //!
 //! Three resources are enforced from here:
 //! - Disk: the app's data bytes and entries. [`AppQuota::caps`] gives the books
-//!   ([`crate::fsguard::FsGuard`]) the per-app numbers at each wake; the books work as before.
+//!   ([`crate::fsguard::FsGuard`]) the per-app numbers at each wake, and the books work as before.
 //! - CPU over time: a token bucket of guest poll time, the clock behind `cpu_ms`. It refills at
 //!   the override's rate and holds [`CPU_BURST`] worth of it. A request is let in while the bucket
 //!   holds anything and charged what it used when it ends, so a request may overdraw it by up to its
@@ -42,7 +42,7 @@ pub const CPU_MS_PER_MIN_MAX: u64 = 60_000;
 pub const EGRESS_WINDOW: Duration = Duration::from_secs(3600);
 /// What the guest sees when an outbound call is refused or cut for its egress budget.
 pub const EGRESS_REFUSED: &str =
-    "egress_budget_exhausted: this app's outbound HTTP budget is used up; it refills over the hour";
+    "egress_budget_exhausted: this app's outbound HTTP budget is used up and refills over the hour";
 
 /// The values an operator set for one app. A field left out is not overridden.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,7 +77,7 @@ impl Override {
             )
         })?;
         if o == Override::default() {
-            return Err("give at least one of data_mb, entries, cpu_ms_per_min, egress_bytes_per_hour; to remove every override use DELETE (spared limits clear)".into());
+            return Err("give at least one of data_mb, entries, cpu_ms_per_min, egress_bytes_per_hour. To remove every override use DELETE (spared limits clear)".into());
         }
         for (field, v) in o.fields() {
             if v == Some(0) {

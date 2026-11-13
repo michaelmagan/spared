@@ -1810,7 +1810,7 @@ def egress_budget(tmp):
             if not c.recv(16).startswith(b"HTTP/1."):
                 raise OSError("no HTTP answer")
     except OSError as e:
-        print(f"skip - example.com is not reachable from here ({e}); the egress budget is tested in src/sandbox.rs", flush=True)
+        print(f"skip - example.com is not reachable from here ({e}). The egress budget is tested in src/sandbox.rs", flush=True)
         return
     d = os.path.join(tmp, "egress")
     os.makedirs(d)

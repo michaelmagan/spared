@@ -102,7 +102,7 @@ async fn main(req: Request<Body>) -> Result<Response<Body>, Error> {
             let held = FILES.with(|v| v.borrow().len());
             format!("held {held} err={err}\n").into_bytes()
         }
-        // n GETs of http://example.com/ (granted in the test manifest); stops at the first error
+        // n GETs of http://example.com/ (granted in the test manifest), stopping at the first error
         "/fetch" => {
             let n = param(&req, "n").unwrap_or(1);
             let (mut ok, mut bytes, mut err) = (0, 0, String::new());
