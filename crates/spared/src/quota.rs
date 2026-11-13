@@ -20,8 +20,9 @@
 //!
 //! The counters live here, one [`AppQuota`] per app name, outside the app's instance: idle
 //! eviction, a trap and a redeploy keep them, and an app has one instance, so its requests share
-//! one bucket. They are in memory only and start over when the server restarts or the app is
-//! removed.
+//! one bucket. They are in memory only and start over when the server restarts. Removing the app
+//! keeps them while an override is stored, so removing and deploying again does not refill a
+//! budget. Without one they go with the app.
 
 use crate::fsguard::AppCaps;
 use serde::{Deserialize, Serialize};

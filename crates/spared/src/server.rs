@@ -2608,15 +2608,16 @@ impl Server {
         }
         let removed = tokio::task::spawn_blocking(move || backup::remove_tree(&doomed)).await;
         self.release_component(&a.shared.hash);
-        // The counters go with the app. An operator's override stays: it is server policy for the
-        // name, and an app token with the rm scope must not be a way to shed it.
+        // An operator's override stays, and so does what the app used under it: both are server
+        // policy for the name, and removing and deploying the app again must not hand out a fresh
+        // CPU or egress budget. Without an override the counters go with the app.
         let kept_limits = {
             let mut qs = self.quotas.lock().unwrap();
-            let over = qs.remove(name).and_then(|q| q.override_now());
-            if let Some(o) = &over {
-                qs.insert(name.to_string(), Arc::new(AppQuota::new(Some(o.clone()))));
+            let kept = qs.get(name).is_some_and(|q| q.override_now().is_some());
+            if !kept {
+                qs.remove(name);
             }
-            over.is_some()
+            kept
         };
         let mut out = serde_json::json!({"deleted": name});
         if kept_limits {
