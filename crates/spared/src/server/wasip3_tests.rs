@@ -78,24 +78,51 @@ async fn many(
     (out, started.elapsed())
 }
 
+/// Listeners on one port for both loopback families. The guests dial `localhost`, and the host
+/// connects to the first address the resolver returns: `::1` on a runner with IPv6, `127.0.0.1`
+/// without. A host without IPv6 gets the IPv4 listener alone.
+async fn loopback_listeners() -> (u16, Vec<tokio::net::TcpListener>) {
+    loop {
+        let v4 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = v4.local_addr().unwrap().port();
+        match tokio::net::TcpListener::bind(("::1", port)).await {
+            Ok(v6) => return (port, vec![v4, v6]),
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => continue,
+            Err(_) => return (port, vec![v4]),
+        }
+    }
+}
+
+/// What `localhost:port` resolves to here, for a failure message about an upstream nobody reached.
+fn resolved(port: u16) -> String {
+    use std::net::ToSocketAddrs;
+    format!(
+        "localhost:{port} resolves to {:?}",
+        ("localhost", port)
+            .to_socket_addrs()
+            .map(|a| a.collect::<Vec<_>>())
+    )
+}
+
 /// A loopback HTTP server that answers every request with 200 after `delay`.
 async fn slow_upstream(delay: Duration) -> u16 {
-    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = l.local_addr().unwrap().port();
-    tokio::spawn(async move {
-        while let Ok((mut s, _)) = l.accept().await {
-            tokio::spawn(async move {
-                let mut buf = [0u8; 4096];
-                let _ = s.read(&mut buf).await;
-                tokio::time::sleep(delay).await;
-                let _ = s
-                    .write_all(
-                        b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok",
-                    )
-                    .await;
-            });
-        }
-    });
+    let (port, listeners) = loopback_listeners().await;
+    for l in listeners {
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = l.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let _ = s.read(&mut buf).await;
+                    tokio::time::sleep(delay).await;
+                    let _ = s
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok",
+                        )
+                        .await;
+                });
+            }
+        });
+    }
     port
 }
 
@@ -124,7 +151,7 @@ async fn eight_requests_awaiting_a_200_ms_upstream_overlap_in_one_instance() {
     let (out, took) = many(&fx.server, "fetch3", paths).await;
     for (st, _, body) in &out {
         assert_eq!(*st, 200, "{body}");
-        assert_eq!(body.trim(), "upstream 200", "{body}");
+        assert_eq!(body.trim(), "upstream 200", "{body}; {}", resolved(port));
     }
     eprintln!("8 requests awaiting a 200 ms upstream: {took:?}");
     assert!(
@@ -168,8 +195,10 @@ async fn max_outbound_is_counted_per_request_not_per_instance() {
         assert_eq!(st, 200, "{body}");
         let calls: Vec<&str> = body.trim().split(", ").collect();
         assert_eq!(
-            calls[0], "upstream 200",
-            "each request has its own first call: {body}"
+            calls[0],
+            "upstream 200",
+            "each request has its own first call: {body}; {}",
+            resolved(port)
         );
         assert!(
             calls[1].contains("HttpRequestDenied"),
@@ -419,22 +448,23 @@ async fn a_task_left_running_after_its_response_still_has_its_place_and_stops_at
 /// A loopback upstream that accepts and then says nothing. `open` counts the connections still
 /// up, `peak` the most there were at once.
 async fn silent_upstream() -> (u16, Arc<AtomicUsize>, Arc<AtomicUsize>) {
-    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = l.local_addr().unwrap().port();
+    let (port, listeners) = loopback_listeners().await;
     let (open, peak) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
-    let (o, p) = (open.clone(), peak.clone());
-    tokio::spawn(async move {
-        while let Ok((mut s, _)) = l.accept().await {
-            let now = o.fetch_add(1, Ordering::SeqCst) + 1;
-            p.fetch_max(now, Ordering::SeqCst);
-            let o = o.clone();
-            tokio::spawn(async move {
-                let mut buf = [0u8; 4096];
-                while matches!(s.read(&mut buf).await, Ok(n) if n > 0) {}
-                o.fetch_sub(1, Ordering::SeqCst);
-            });
-        }
-    });
+    for l in listeners {
+        let (o, p) = (open.clone(), peak.clone());
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = l.accept().await {
+                let now = o.fetch_add(1, Ordering::SeqCst) + 1;
+                p.fetch_max(now, Ordering::SeqCst);
+                let o = o.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    while matches!(s.read(&mut buf).await, Ok(n) if n > 0) {}
+                    o.fetch_sub(1, Ordering::SeqCst);
+                });
+            }
+        });
+    }
     (port, open, peak)
 }
 
