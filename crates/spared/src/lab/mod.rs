@@ -57,6 +57,15 @@ pub enum LabCmd {
         #[arg(long, default_value_t = 20)]
         rows: usize,
     },
+    /// One escape case in a process of its own, so it runs with the environment the suite gives
+    /// it: the debug text of a failed stream, and whether this process captures host backtraces.
+    #[command(hide = true)]
+    DebugTextProbe {
+        #[arg(long)]
+        probes: PathBuf,
+        #[arg(long)]
+        data: PathBuf,
+    },
     /// Run the sandbox escape suite against the probe guests.
     #[command(hide = true)]
     EscapeTest {
@@ -121,6 +130,7 @@ pub async fn run(cmd: LabCmd) -> Result<()> {
             rows,
         } => density::run(engine()?, component, root, deployed, hot, rows).await?,
         LabCmd::EscapeTest { probes, root } => escape::run(probes, root).await?,
+        LabCmd::DebugTextProbe { probes, data } => escape::debug_text_child(probes, data).await?,
         LabCmd::BenchWake {
             component,
             data,

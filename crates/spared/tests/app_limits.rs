@@ -498,6 +498,41 @@ fn a_cpu_budget_throttles_a_spinning_app_and_not_its_neighbor() {
 }
 
 #[test]
+fn removing_and_redeploying_an_app_with_limits_keeps_what_it_used() {
+    let s = scratch("lim-rm-keep");
+    let n = Node::start(&s.0, "n", vec!["--access-log".into(), "off".into()], vec![]);
+    let limits_toml = "[limits]\ncpu_ms = 400\ndeadline_ms = 5000\n";
+    deploy_with(&n, "spin", &spinner(), limits_toml);
+    // 1 ms of CPU a second, a bucket of 10 ms: one 400 ms request puts it far in debt.
+    let (st, v) = put_limits(&n, "spin", json!({"cpu_ms_per_min": 60}));
+    assert_eq!(st, 200, "{v}");
+    let (st, _, body) = public(&n, "spin");
+    assert_eq!(st, 508, "{}", String::from_utf8_lossy(&body));
+    let (st, _, body) = public(&n, "spin");
+    assert_eq!(st, 503, "{}", String::from_utf8_lossy(&body));
+    let before = limits(&n, "spin")["usage"].clone();
+    assert!(before["cpu_ms_total"].as_u64().unwrap() >= 350, "{before}");
+
+    // Delete and recreate under the same name: the budget is not handed out again.
+    let (st, v) = call(&n, &n.token, "DELETE", "/v1/apps/spin", b"");
+    assert_eq!((st, v["limits_kept"].clone()), (200, json!(true)), "{v}");
+    deploy_with(&n, "spin", &spinner(), limits_toml);
+    let (st, _, body) = public(&n, "spin");
+    let text = String::from_utf8_lossy(&body).to_string();
+    assert_eq!(
+        st, 503,
+        "a new app under the name got a fresh CPU bucket: {text}"
+    );
+    assert!(text.contains("cpu_budget_exhausted"), "{text}");
+    let after = limits(&n, "spin")["usage"].clone();
+    assert!(
+        after["cpu_ms_total"].as_u64().unwrap() >= before["cpu_ms_total"].as_u64().unwrap(),
+        "the use was dropped: {before} -> {after}"
+    );
+    assert_eq!(after["cpu_ms_left"], 0, "{after}");
+}
+
+#[test]
 fn a_damaged_limits_file_keeps_its_app_out_until_the_operator_fixes_it() {
     let s = scratch("lim-damaged");
     let mut n = Node::start(&s.0, "n", vec![], vec![]);

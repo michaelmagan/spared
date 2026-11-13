@@ -717,6 +717,219 @@ fn an_app_token_deploys_only_its_own_app() {
     assert_eq!(rc, 0, "{v}");
 }
 
+/// `may_create` of every token of `app`, as `GET /v1/tokens?app=` lists them.
+fn may_create_of(n: &Node, app: &str) -> Vec<Value> {
+    let (st, v) = call(n, &n.token, "GET", &format!("/v1/tokens?app={app}"), b"");
+    assert_eq!(st, 200, "{v}");
+    v["tokens"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["may_create"].clone())
+        .collect()
+}
+
+#[test]
+fn may_create_ends_when_the_app_is_created_by_anyone() {
+    let s = scratch("tok-may-create");
+    let mut n = Node::start(&s.0, "n", vec![], vec![]);
+
+    // The admin token creates the app: tokens minted before it may no longer create it.
+    mint(&n, json!({"app": "byadmin"}));
+    assert_eq!(may_create_of(&n, "byadmin"), vec![json!(true)]);
+    assert_eq!(deploy_as(&n, &n.token, "byadmin", "byadmin").0, 200);
+    assert_eq!(may_create_of(&n, "byadmin"), vec![json!(false)]);
+
+    // One token creates it: so do the others.
+    let (first, _) = mint(&n, json!({"app": "bytoken"}));
+    mint(&n, json!({"app": "bytoken"}));
+    assert_eq!(deploy_as(&n, &first, "bytoken", "bytoken").0, 200);
+    assert_eq!(
+        may_create_of(&n, "bytoken"),
+        vec![json!(false), json!(false)]
+    );
+
+    // The flag is on disk before the app is: when it cannot be written, the deploy is refused
+    // and no app exists, so no crash can leave an app whose token may still create it.
+    let (t, minted) = mint(&n, json!({"app": "crash"}));
+    let id = minted["id"].as_str().unwrap().to_string();
+    let blocker = n.data.join(format!("tokens/.{id}.json.tmp"));
+    std::fs::create_dir(&blocker).unwrap();
+    let (st, v) = deploy_as(&n, &t, "crash", "crash");
+    n.kill9();
+    std::fs::remove_dir(&blocker).unwrap();
+    n.spawn();
+    let exists = call(&n, &n.token, "GET", "/v1/apps/crash", b"").0 == 200;
+    assert!(
+        !(exists && may_create_of(&n, "crash") == vec![json!(true)]),
+        "the app exists and its token may still create it (deploy said {st} {v})"
+    );
+    assert!(
+        !exists,
+        "the deploy went ahead without recording the flag: {st} {v}"
+    );
+    // Once the disk takes the write, the token creates its app, once.
+    assert_eq!(deploy_as(&n, &t, "crash", "crash").0, 200);
+    assert_eq!(may_create_of(&n, "crash"), vec![json!(false)]);
+}
+
+#[test]
+fn an_app_tokens_deploy_does_not_say_whether_another_app_runs_the_same_code() {
+    let s = scratch("tok-reused");
+    let n = Node::start(&s.0, "n", vec![], vec![]);
+    let (t, _) = mint(&n, json!({"app": "mine"}));
+    // Someone else's app runs the component this token is about to deploy.
+    let (st, v) = deploy_as(&n, &n.token, "theirs", "theirs");
+    assert_eq!(
+        (st, v["component_reused"].clone()),
+        (200, json!(false)),
+        "{v}"
+    );
+    for round in ["create", "redeploy"] {
+        let (st, v) = deploy_as(&n, &t, "mine", "mine");
+        assert_eq!(st, 200, "{round}: {v}");
+        assert!(
+            v.get("component_reused").is_none(),
+            "{round}: an app token learns the code is shared: {v}"
+        );
+        // The hash is of the bytes the caller sent itself, so it says nothing about other apps.
+        assert!(v["component_sha256"].is_string(), "{round}: {v}");
+    }
+    // The admin token still sees it.
+    let (st, v) = deploy_as(&n, &n.token, "third", "third");
+    assert_eq!(
+        (st, v["component_reused"].clone()),
+        (200, json!(true)),
+        "{v}"
+    );
+}
+
+#[test]
+fn an_app_token_thaws_only_a_freeze_it_made() {
+    let s = scratch("tok-freeze-kinds");
+    let mut n = Node::start(&s.0, "n", vec![], vec![]);
+    n.deploy("mine");
+    let (t, _) = mint(&n, json!({"app": "mine", "scopes": ["freeze", "read"]}));
+    let freeze_of = |n: &Node| {
+        let (st, v) = call(n, &n.token, "GET", "/v1/apps/mine", b"");
+        assert_eq!(st, 200, "{v}");
+        v["freeze"]["kind"].as_str().map(str::to_string)
+    };
+
+    // Its own freeze: kind app, and it thaws it.
+    let (st, v) = call(&n, &t, "POST", "/v1/apps/mine/freeze", b"");
+    assert_eq!(
+        (st, v["freeze"]["kind"].clone()),
+        (200, json!("app")),
+        "{v}"
+    );
+    let (st, v) = call(&n, &t, "POST", "/v1/apps/mine/thaw", b"");
+    assert_eq!((st, v["thawed"].clone()), (200, json!(true)), "{v}");
+    assert_eq!(freeze_of(&n), None);
+
+    // It cannot name an operator's kind.
+    for kind_sent in ["move", "manual", "remote_superseded", "app2"] {
+        let body = json!({"kind": kind_sent}).to_string();
+        let (st, v) = call(&n, &t, "POST", "/v1/apps/mine/freeze", body.as_bytes());
+        assert!([400, 403].contains(&st), "kind {kind_sent}: {st} {v}");
+        assert_eq!(freeze_of(&n), None, "kind {kind_sent}");
+    }
+
+    // An operator's freeze, of each kind, stays until the admin token lifts it.
+    for (how, kind_want) in [
+        ("manual", "manual"),
+        ("move", "move"),
+        ("superseded", "remote_superseded"),
+        ("damaged", "unknown"),
+    ] {
+        match how {
+            "manual" => assert_eq!(
+                call(&n, &n.token, "POST", "/v1/apps/mine/freeze", b"").0,
+                200
+            ),
+            "move" => {
+                let body = br#"{"kind":"move","reason":"moving"}"#;
+                assert_eq!(
+                    call(&n, &n.token, "POST", "/v1/apps/mine/freeze", body).0,
+                    200
+                );
+            }
+            _ => {
+                let marker = if how == "damaged" {
+                    "not json".to_string()
+                } else {
+                    json!({"kind": "remote_superseded", "reason": "newer epoch", "at": "x"})
+                        .to_string()
+                };
+                n.kill9();
+                std::fs::write(n.data.join("apps/mine/frozen"), marker).unwrap();
+                n.spawn();
+            }
+        }
+        assert_eq!(freeze_of(&n).as_deref(), Some(kind_want), "{how}");
+        for body in [&b""[..], br#"{"if_kind":"move"}"#, br#"{"if_kind":"app"}"#] {
+            let (st, v) = call(&n, &t, "POST", "/v1/apps/mine/thaw", body);
+            assert!(
+                st == 403 && kind(&v) == "wrong_scope" || v["thawed"] == false,
+                "{how}: a token thawed it: {st} {v}"
+            );
+            assert_eq!(freeze_of(&n).as_deref(), Some(kind_want), "{how}");
+        }
+        // Its own freeze on top does not take the operator's over.
+        let (st, v) = call(&n, &t, "POST", "/v1/apps/mine/freeze", b"");
+        assert_eq!(st, 200, "{v}");
+        assert_eq!(freeze_of(&n).as_deref(), Some(kind_want), "{how}");
+        let (st, v) = call(&n, &n.token, "POST", "/v1/apps/mine/thaw", b"");
+        assert_eq!((st, v["thawed"].clone()), (200, json!(true)), "{how}: {v}");
+    }
+}
+
+/// Whether `text` holds any 16 hex digits in a row of `hexpart`: an echo cut short still counts.
+fn leaks(text: &str, hexpart: &str) -> bool {
+    (0..=hexpart.len() - 16).any(|i| text.contains(&hexpart[i..i + 16]))
+}
+
+#[test]
+fn a_token_sent_where_an_id_belongs_is_echoed_nowhere() {
+    let s = scratch("tok-echo");
+    let n = Node::start(&s.0, "n", vec![], vec![]);
+    let (secret, _) = mint(&n, json!({"app": "blog"}));
+    let (other, _) = mint(&n, json!({"app": "blog", "scopes": ["read"]}));
+    let hexpart = secret.strip_prefix("spt_").unwrap();
+    let mut bodies = vec![];
+    for (token, method, path) in [
+        (n.token.as_str(), "DELETE", format!("/v1/tokens/{secret}")),
+        (
+            n.token.as_str(),
+            "DELETE",
+            format!("/v1/tokens/spt%5F{hexpart}"),
+        ),
+        (n.token.as_str(), "DELETE", format!("/v1/tokens/{hexpart}")),
+        (n.token.as_str(), "GET", format!("/v1/tokens/{secret}")),
+        (n.token.as_str(), "DELETE", format!("/v1/tokens/{secret}/x")),
+        (other.as_str(), "DELETE", format!("/v1/tokens/{secret}")),
+    ] {
+        let (st, raw) = call_raw(&n, token, method, &path, &[], b"");
+        let body = String::from_utf8_lossy(&raw).to_string();
+        assert!([403, 404].contains(&st), "{method} {path}: {st} {body}");
+        assert!(
+            !leaks(&body, hexpart),
+            "{method} {path} echoed the token: {body}"
+        );
+        bodies.push(body);
+    }
+    // The token still works: nothing revoked it.
+    assert_eq!(call(&n, &secret, "GET", "/v1/apps", b"").0, 200);
+    let log = n.log_text();
+    assert!(log.contains("/v1/tokens/<redacted>"), "{log}");
+    assert!(
+        !leaks(&log, hexpart),
+        "the server's output holds part of the token: {log}"
+    );
+    let extra: Vec<&str> = bodies.iter().map(String::as_str).collect();
+    assert_nowhere(&n, &secret, &extra);
+}
+
 #[test]
 fn wrong_tokens_are_limited_per_address() {
     let s = scratch("tok-limit");
@@ -752,4 +965,54 @@ fn wrong_tokens_are_limited_per_address() {
     assert_eq!(st, 200, "{v}");
     // The public listener is not affected.
     assert_eq!(http(n.public, "GET", "/healthz", "", &[], b"").0, 200);
+}
+
+#[test]
+fn review_a_frozen_move_deploy_over_an_app_freeze_is_not_the_tokens_to_lift() {
+    let s = scratch("rev-move-deploy");
+    let n = Node::start(&s.0, "n", vec![], vec![]);
+    n.deploy("mine");
+    let (t, _) = mint(&n, json!({"app": "mine", "scopes": ["freeze"]}));
+    assert_eq!(call(&n, &t, "POST", "/v1/apps/mine/freeze", b"").0, 200);
+    let (m, wasm) = deploy_body("mine");
+    let (st, _) = call_raw(
+        &n,
+        &n.token,
+        "PUT",
+        "/v1/apps/mine?frozen=move",
+        &[("x-spared-manifest", &m)],
+        &wasm,
+    );
+    assert_eq!(st, 200);
+    let (st, v) = call(&n, &t, "POST", "/v1/apps/mine/thaw", b"");
+    assert!(
+        st == 403 && v["thawed"] != true,
+        "an app token thawed the target of a move: {st} {v}"
+    );
+}
+
+#[test]
+fn review_a_token_in_an_app_path_is_echoed_nowhere() {
+    let s = scratch("rev-echo");
+    let n = Node::start(&s.0, "n", vec![], vec![]);
+    let (secret, _) = mint(&n, json!({"app": "blog"}));
+    let hexpart = secret.strip_prefix("spt_").unwrap();
+    for (token, method, path) in [
+        (secret.as_str(), "GET", format!("/v1/apps/{secret}")),
+        (secret.as_str(), "GET", format!("/v1/apps/{secret}/logs")),
+        (n.token.as_str(), "GET", format!("/v1/apps/{secret}")),
+        (n.token.as_str(), "DELETE", format!("/v1/apps/{secret}")),
+        (n.token.as_str(), "DELETE", format!("//v1/tokens/{hexpart}")),
+    ] {
+        let (st, raw) = call_raw(&n, token, method, &path, &[], b"");
+        let body = String::from_utf8_lossy(&raw).to_string();
+        assert!(
+            !leaks(&body, hexpart),
+            "{method} {path} echoed the token: {st} {body}"
+        );
+    }
+    assert!(
+        !leaks(&n.log_text(), hexpart),
+        "the access log holds the token"
+    );
 }

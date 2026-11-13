@@ -63,7 +63,7 @@ Each benchmark has a script in `bench/` and writes raw JSON to `bench/results/`.
 | `bench/request-cost.sh` | cost per realistic request (latency and CPU) | lab host, `apps/bench3b-*` |
 | `bench/wake.sh` | wake to first query | lab host, `apps/shared-list` |
 | `spared bench-density` | density: 10,000 deployed, 500 hot (`--deployed`, `--hot`, `--rows`) | lab host, a component |
-| `bench/escape-tests.sh` | the sandbox escape suite (51 cases) | lab host, `probes/escape-probe` |
+| `bench/escape-tests.sh` | the sandbox escape suite (54 cases) | lab host, `probes/escape-probe` |
 | `bench/demo/measure.sh` | same-app comparison: spared against workerd | workerd from npm, `bench/demo/loadgen`, `taskset` |
 
 Rules for benchmark changes:

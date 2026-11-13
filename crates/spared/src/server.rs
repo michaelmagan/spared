@@ -381,7 +381,7 @@ fn no_such_app(name: &str) -> Resp {
     err_resp(
         StatusCode::NOT_FOUND,
         "no_such_app",
-        format!("no app '{name}'"),
+        format!("no app '{}'", tokens::redact_name(name)),
         "list apps with `spared ps`",
     )
 }
@@ -607,7 +607,7 @@ fn check_name(name: &str) -> std::result::Result<(), DeployError> {
     Err(DeployError::new(
         StatusCode::BAD_REQUEST,
         "bad_name",
-        format!("invalid app name '{name}'"),
+        format!("invalid app name '{}'", tokens::redact_name(name)),
         "use 1 to 40 lowercase letters, digits and dashes",
     ))
 }
@@ -1005,9 +1005,12 @@ fn sync_dir(p: &Path) {
 
 /// The marker in an app directory that keeps the app frozen across restarts and redeploys.
 const FROZEN_MARKER: &str = "frozen";
-/// What can freeze an app, as the marker records it: `spared freeze`, `spared move`, or an upload
-/// that found a newer epoch in the bucket.
-const FREEZE_KINDS: [&str; 3] = ["manual", "move", "remote_superseded"];
+/// The kinds of freeze the admin token may ask for: `spared freeze` and `spared move`. A marker can
+/// also say `remote_superseded` (an upload found a newer epoch in the bucket), `app` (an app token
+/// froze its own app) or `unknown` (the marker could not be read).
+const ADMIN_FREEZE_KINDS: [&str; 2] = ["manual", "move"];
+/// The only kind of freeze an app token makes, and the only one it may lift.
+const APP_FREEZE_KIND: &str = "app";
 /// What a client of a frozen app is told to wait before it tries again, in seconds.
 const FROZEN_RETRY_AFTER: &str = "30";
 
@@ -2685,7 +2688,11 @@ impl Server {
             }
         };
         // Before the commit and before the new app is in the table, so it never serves unfrozen.
-        let marked = frozen_for_move && read_freeze_marker(&dir).is_none();
+        let prior_marker = read_freeze_marker(&dir);
+        let marked = frozen_for_move
+            && prior_marker
+                .as_ref()
+                .is_none_or(|m| m["kind"] == APP_FREEZE_KIND);
         if marked {
             let info = serde_json::json!({"kind": "move", "reason": "deployed frozen by spared move", "at": now_text()});
             if let Err(e) = write_freeze_marker(&dir, &info) {
@@ -2696,7 +2703,10 @@ impl Server {
         manifest.limits.clamp(&self.cfg.max);
         let unmark = || {
             if marked {
-                let _ = remove_freeze_marker(&dir);
+                let _ = match &prior_marker {
+                    Some(m) => write_freeze_marker(&dir, m),
+                    None => remove_freeze_marker(&dir),
+                };
             }
         };
         let app = match self.make_app(name, dir.clone(), manifest, shared, version) {
@@ -2727,10 +2737,33 @@ impl Server {
             }
             None => None,
         };
+        // A new app: before the commit, no token of its name may create it any more, on disk, so a
+        // crash after the commit never leaves a token that could create it again.
+        let flipped = if prev.is_none() {
+            let (ids, err) = self.tokens.lock().unwrap().app_created(name);
+            if let Some(e) = err {
+                self.tokens.lock().unwrap().creation_undone(&ids);
+                unmark();
+                self.abandon_release(&dir, &hash, created);
+                return Err(DeployError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "token_write_failed",
+                    format!(
+                        "cannot record under <data-dir>/{} that '{name}' now exists: {e}. Nothing was deployed",
+                        tokens::DIR
+                    ),
+                    "check disk space and permissions under the data directory, then deploy again",
+                ));
+            }
+            ids
+        } else {
+            vec![]
+        };
         if let Err(e) = commit_release(&dir) {
             if let Some(old) = &prev {
                 old.retired.store(false, Ordering::Release);
             }
+            self.tokens.lock().unwrap().creation_undone(&flipped);
             unmark();
             self.abandon_release(&dir, &hash, created);
             return Err(write_failed(e));
@@ -2743,12 +2776,14 @@ impl Server {
         if let Some(old) = &prev {
             self.release_component(&old.shared.hash);
         }
-        if let (None, Creator::Token(id)) = (&prev, creator) {
-            self.tokens.lock().unwrap().created_app(id);
-        }
         let mut info = self.one_app_json(app).await;
         info["data_kept"] = data_kept.into();
-        info["component_reused"] = reused.into();
+        // Whether the store already held this component says whether some app, maybe another
+        // tenant's, runs the same code: only the admin token is told. The hash stays, since it is
+        // of the bytes the caller sent.
+        if matches!(creator, Creator::Admin) {
+            info["component_reused"] = reused.into();
+        }
         if data_kept {
             info["note"] = format!(
                 "redeploy keeps the existing data/ of '{name}'; run `spared rm {name} --yes` first for a fresh start"
@@ -2882,15 +2917,16 @@ impl Server {
         }
         let removed = tokio::task::spawn_blocking(move || backup::remove_tree(&doomed)).await;
         self.release_component(&a.shared.hash);
-        // The counters go with the app. An operator's override stays: it is server policy for the
-        // name, and an app token with the rm scope must not be a way to shed it.
+        // An operator's override stays, and so does what the app used under it: both are server
+        // policy for the name, and removing and deploying the app again must not hand out a fresh
+        // CPU or egress budget. Without an override the counters go with the app.
         let kept_limits = {
             let mut qs = self.quotas.lock().unwrap();
-            let over = qs.remove(name).and_then(|q| q.override_now());
-            if let Some(o) = &over {
-                qs.insert(name.to_string(), Arc::new(AppQuota::new(Some(o.clone()))));
+            let kept = qs.get(name).is_some_and(|q| q.override_now().is_some());
+            if !kept {
+                qs.remove(name);
             }
-            over.is_some()
+            kept
         };
         let mut out = serde_json::json!({"deleted": name});
         if kept_limits {
@@ -2983,9 +3019,13 @@ impl Server {
 
     /// Freeze `name`: under its name lock and its instance lock, drop the instance, write the
     /// marker and set the flag, so no request runs after this returns and none runs after a
-    /// restart. An app that is already frozen keeps its freeze when `kind` is `move` (a move never
-    /// takes over a freeze something else made, so it never thaws one) or when that freeze came
-    /// from a newer epoch in the bucket; otherwise the new freeze replaces it.
+    /// restart. An app that is already frozen keeps its freeze when `kind` is `app` (an app token
+    /// never replaces a freeze, so it never gets one it may lift), when `kind` is `move` (a move
+    /// never takes over a freeze something else made, so it never thaws one) or when that freeze
+    /// came from a newer epoch in the bucket; otherwise the new freeze replaces it. One exception:
+    /// a move over an `app` freeze turns it into a `move` freeze, so the app token cannot lift it
+    /// while the app may be live elsewhere, and reports it as already frozen, so a failed move
+    /// leaves it frozen.
     async fn freeze_app(
         &self,
         name: &str,
@@ -2996,12 +3036,20 @@ impl Server {
         let lock = self.name_lock(name);
         let _serial = lock.lock().await;
         let (app, _instance) = self.lock_idle(name).await?;
+        let mut already = false;
         if let Some(info) = app.freeze_info() {
-            if kind == "move" || info["kind"] == kind || info["kind"] == "remote_superseded" {
+            let move_over_app = kind == "move" && info["kind"] == APP_FREEZE_KIND;
+            if !move_over_app
+                && (kind == APP_FREEZE_KIND
+                    || kind == "move"
+                    || info["kind"] == kind
+                    || info["kind"] == "remote_superseded")
+            {
                 return Ok(serde_json::json!({
                     "name": name, "frozen": true, "already_frozen": true, "freeze": info,
                 }));
             }
+            already = move_over_app;
         }
         let info = serde_json::json!({"kind": kind, "reason": reason, "at": now_text()});
         write_freeze_marker(&app.dir, &info).map_err(|e| {
@@ -3010,16 +3058,19 @@ impl Server {
         app.set_freeze(Some(info.clone()));
         eprintln!("app {name}: frozen ({kind}): {reason}");
         Ok(serde_json::json!({
-            "name": name, "frozen": true, "already_frozen": false, "freeze": info,
+            "name": name, "frozen": true, "already_frozen": already, "freeze": info,
         }))
     }
 
     /// Thaw `name`: remove the marker and clear the flag. With `only_kind`, only a freeze of
-    /// that kind is lifted (the move's own clean-up), and any other is reported and kept.
+    /// that kind is lifted (the move's own clean-up), and any other is reported and kept. For an
+    /// app token (`by_token`) only an `app` freeze is lifted: any other is the operator's, and the
+    /// answer is 403 `wrong_scope`.
     async fn thaw_app(
         &self,
         name: &str,
         only_kind: Option<&str>,
+        by_token: bool,
     ) -> std::result::Result<serde_json::Value, Resp> {
         check_name(name).map_err(DeployError::into_resp)?;
         let lock = self.name_lock(name);
@@ -3028,6 +3079,17 @@ impl Server {
         let Some(info) = app.freeze_info() else {
             return Ok(serde_json::json!({"name": name, "frozen": false, "was_frozen": false}));
         };
+        if by_token && info["kind"] != APP_FREEZE_KIND {
+            return Err(err_resp(
+                StatusCode::FORBIDDEN,
+                "wrong_scope",
+                format!(
+                    "app '{name}' is frozen by the operator or the server (kind {}), and an app token lifts only a freeze an app token made (kind {APP_FREEZE_KIND})",
+                    info["kind"].as_str().unwrap_or("unknown")
+                ),
+                &format!("ask the operator to run `spared thaw {name}` with the admin token"),
+            ));
+        }
         if only_kind.is_some_and(|k| info["kind"] != k) {
             return Ok(serde_json::json!({
                 "name": name, "frozen": true, "thawed": false, "freeze": info,
@@ -3047,14 +3109,28 @@ impl Server {
         Ok(v)
     }
 
-    async fn freeze_route(&self, name: &str, req: Request<Incoming>) -> Resp {
+    /// `POST /v1/apps/{name}/freeze`. The admin token freezes with kind `manual` (the default)
+    /// or `move`. An app token always freezes with kind `app`, and naming any other kind is 403.
+    async fn freeze_route(&self, name: &str, req: Request<Incoming>, by_token: bool) -> Resp {
         let usage = r#"send nothing, or {"reason":"<text>"}"#;
         let body = match self.small_json_body(req, usage).await {
             Ok(b) => b,
             Err(r) => return r,
         };
         let reason = body["reason"].as_str().unwrap_or("frozen by spared freeze");
-        let kind = body["kind"].as_str().unwrap_or("manual");
+        let kind = if by_token {
+            if !(body["kind"].is_null() || body["kind"] == APP_FREEZE_KIND) {
+                return err_resp(
+                    StatusCode::FORBIDDEN,
+                    "wrong_scope",
+                    format!("an app token freezes with kind {APP_FREEZE_KIND} only"),
+                    "leave kind out. Only the admin token freezes for a move (spared move)",
+                );
+            }
+            APP_FREEZE_KIND
+        } else {
+            body["kind"].as_str().unwrap_or("manual")
+        };
         if reason.chars().count() > 200 || reason.chars().any(char::is_control) {
             return err_resp(
                 StatusCode::BAD_REQUEST,
@@ -3063,7 +3139,7 @@ impl Server {
                 usage,
             );
         }
-        if !FREEZE_KINDS.contains(&kind) || kind == "remote_superseded" {
+        if !by_token && !ADMIN_FREEZE_KINDS.contains(&kind) {
             return err_resp(
                 StatusCode::BAD_REQUEST,
                 "bad_request",
@@ -3080,13 +3156,16 @@ impl Server {
         }
     }
 
-    async fn thaw_route(&self, name: &str, req: Request<Incoming>) -> Resp {
+    async fn thaw_route(&self, name: &str, req: Request<Incoming>, by_token: bool) -> Resp {
         let usage = r#"send nothing, or {"if_kind":"move"}"#;
         let body = match self.small_json_body(req, usage).await {
             Ok(b) => b,
             Err(r) => return r,
         };
-        match self.thaw_app(name, body["if_kind"].as_str()).await {
+        match self
+            .thaw_app(name, body["if_kind"].as_str(), by_token)
+            .await
+        {
             Ok(v) => json_resp(StatusCode::OK, v),
             Err(r) => r,
         }
@@ -3476,6 +3555,10 @@ impl Server {
                 );
             }
         };
+        // Under the name lock, so a deploy that is creating the app either has flipped every token
+        // of the name (and this one sees the app) or has not started its commit.
+        let lock = self.name_lock(app);
+        let _serial = lock.lock().await;
         let may_create = !self.apps.read().unwrap().contains_key(app);
         let minted = self
             .tokens
@@ -3527,15 +3610,19 @@ impl Server {
             None
         };
         let Some((rec, already, written)) = done else {
-            return err_resp(
-                StatusCode::NOT_FOUND,
-                "no_such_token",
-                format!(
-                    "no token with id '{}'",
-                    id.chars().take(40).collect::<String>()
-                ),
-                "list tokens with `spared token list` and pass an id from it",
-            );
+            // Only a well-formed id is repeated back: anything else may be a token pasted by mistake.
+            let (message, fix) = if tokens::valid_id(id) {
+                (
+                    format!("no token with id '{id}'"),
+                    "list tokens with `spared token list` and pass an id from it",
+                )
+            } else {
+                (
+                    "no token has that id: an id is 12 hex digits, and the value sent is not one (it is not repeated here, in case it is a token)".to_string(),
+                    "list tokens with `spared token list` and pass an id from it. If you sent a token itself, `spared token revoke <token>` turns it into its id locally",
+                )
+            };
+            return err_resp(StatusCode::NOT_FOUND, "no_such_token", message, fix);
         };
         if let Err(e) = written {
             return err_resp(
@@ -4073,10 +4160,10 @@ impl Server {
         match tokens::need(method.as_str(), segs, frozen) {
             Need::Admin => wrong(
                 format!(
-                    "app token {} (for app '{}') cannot use {method} /{}",
+                    "app token {} (for app '{}') cannot use {method} {}",
                     p.id,
                     p.app,
-                    segs.join("/")
+                    tokens::redact_path(&format!("/{}", segs.join("/")))
                 ),
                 fix_admin,
             ),
@@ -4085,15 +4172,18 @@ impl Server {
                 "ask the operator for a token with the read scope (`spared token create <app> --scope deploy,read,evict`)",
             ),
             Need::OwnList => None,
-            Need::App(name, _) if name != p.app => wrong(
-                format!(
-                    "app token {} is for app '{}' and cannot act on '{name}'",
-                    p.id, p.app
-                ),
-                &format!(
-                    "use a token made for '{name}' (the operator runs `spared token create {name}`), or the admin token"
-                ),
-            ),
+            Need::App(name, _) if name != p.app => {
+                let name = tokens::redact_name(&name);
+                wrong(
+                    format!(
+                        "app token {} is for app '{}' and cannot act on '{name}'",
+                        p.id, p.app
+                    ),
+                    &format!(
+                        "use a token made for '{name}' (the operator runs `spared token create {name}`), or the admin token"
+                    ),
+                )
+            }
             Need::App(_, scope) if !p.scopes.contains(&scope) => wrong(
                 format!(
                     "app token {} has no {} scope (it has: {})",
@@ -4241,11 +4331,13 @@ impl Server {
             (Method::GET, ["v1", "apps", name, "remote-backups"]) => self.list_remote(name).await,
             (Method::POST, ["v1", "apps", name, "freeze"]) => {
                 let name = name.to_string();
-                detached(async move { self.freeze_route(&name, req).await }).await
+                let by_token = matches!(caller, Caller::App(_));
+                detached(async move { self.freeze_route(&name, req, by_token).await }).await
             }
             (Method::POST, ["v1", "apps", name, "thaw"]) => {
                 let name = name.to_string();
-                detached(async move { self.thaw_route(&name, req).await }).await
+                let by_token = matches!(caller, Caller::App(_));
+                detached(async move { self.thaw_route(&name, req, by_token).await }).await
             }
             (Method::GET, ["v1", "apps", name, "code"]) => self.export_code(name).await,
             (Method::GET, ["v1", "apps", name, "limits"]) => self.show_limits(name).await,
@@ -4283,7 +4375,7 @@ impl Server {
             _ => err_resp(
                 StatusCode::NOT_FOUND,
                 "no_route",
-                format!("no admin route {path}"),
+                format!("no admin route {}", tokens::redact_path(path)),
                 "the admin API lives under /v1/ (for example GET /v1/apps); see AGENTS.md",
             ),
         }
@@ -4299,7 +4391,11 @@ impl Server {
     ) -> Resp {
         let (started, time) = (Instant::now(), SystemTime::now());
         let method: String = req.method().as_str().chars().take(16).collect();
-        let path = req.uri().path().to_string();
+        // An admin path can hold a token pasted where an id belongs: the log never repeats one.
+        let path = match listener {
+            Listener::Admin => tokens::redact_path(req.uri().path()),
+            Listener::Public => req.uri().path().to_string(),
+        };
         let id = self.ids.next();
         let (app, token_id, mut resp) = match listener {
             Listener::Public => {

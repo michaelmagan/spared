@@ -74,7 +74,7 @@
     },
     {
       "control": false,
-      "detail": "stopped after 255 ms: Some(\"error while executing at wasm backtrace:\\n    0:   0x1e47 - fs_probe-d59f001766a8dc87.wasm!fs_probe[cee5f9832d1b3b67]::main\\n    1:   0x1768 - fs_probe-d59f001766a8dc87.wasm!std[b824c4e46a9b9730]::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>\\n    2:   0x3d08 - fs_probe-d59f001766a8dc87.wasm!__main_void\\n    3:   0x1750 - fs_probe-d59f001766a8dc87.wasm!_start: wasm trap: interrupt\")",
+      "detail": "stopped after 267 ms: Some(\"error while executing at wasm backtrace:\\n    0:   0x1e47 - fs_probe-d59f001766a8dc87.wasm!fs_probe[cee5f9832d1b3b67]::main\\n    1:   0x1768 - fs_probe-d59f001766a8dc87.wasm!std[b824c4e46a9b9730]::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>\\n    2:   0x3d08 - fs_probe-d59f001766a8dc87.wasm!__main_void\\n    3:   0x1750 - fs_probe-d59f001766a8dc87.wasm!_start: wasm trap: interrupt\")",
       "pass": true,
       "test": "infinite loop under a 200 ms CPU cap"
     },
@@ -121,6 +121,24 @@
       "test": "control: files within the caps are written and renamed"
     },
     {
+      "control": true,
+      "detail": "BACKTRACES on",
+      "pass": true,
+      "test": "control: with SPARED_ALLOW_HOST_BACKTRACE=1 and RUST_BACKTRACE=1 the host captures backtraces"
+    },
+    {
+      "control": false,
+      "detail": "DEBUG the host operation failed (the host keeps its error details) None",
+      "pass": true,
+      "test": "debug text of a failed stream holds no host backtrace, paths or frames (host backtraces on)"
+    },
+    {
+      "control": false,
+      "detail": "BACKTRACES off | DEBUG the host operation failed (the host keeps its error details) None | ",
+      "pass": true,
+      "test": "RUST_BACKTRACE=1 without SPARED_ALLOW_HOST_BACKTRACE: the host captures no backtrace"
+    },
+    {
       "control": false,
       "detail": "Some(\"refused: ungranted imports [\\\"wasi:sockets/network@0.2.12\\\", \\\"wasi:sockets/instance-network@0.2.12\\\", \\\"wasi:sockets/udp@0.2.12\\\", \\\"wasi:sockets/udp-create-socket@0.2.12\\\", \\\"wasi:sockets/tcp@0.2.12\\\", \\\"wasi:sockets/tcp-create-socket@0.2.12\\\", \\\"wasi:sockets/ip-name-lookup@0.2.12\\\"]\")",
       "pass": true,
@@ -164,13 +182,13 @@
     },
     {
       "control": false,
-      "detail": "http://127.0.0.1:36579/ ERR ErrorCode::DestinationIpProhibited",
+      "detail": "http://127.0.0.1:36427/ ERR ErrorCode::DestinationIpProhibited",
       "pass": true,
       "test": "fetch loopback 127.0.0.1 on a live local listener"
     },
     {
       "control": false,
-      "detail": "http://localhost:36579/ ERR ErrorCode::DestinationIpProhibited",
+      "detail": "http://localhost:36427/ ERR ErrorCode::DestinationIpProhibited",
       "pass": true,
       "test": "fetch localhost by name"
     },
@@ -200,7 +218,7 @@
     },
     {
       "control": false,
-      "detail": "http://[::1]:36579/ ERR ErrorCode::DestinationIpProhibited",
+      "detail": "http://[::1]:36427/ ERR ErrorCode::DestinationIpProhibited",
       "pass": true,
       "test": "fetch IPv6 loopback [::1]"
     },
@@ -236,37 +254,37 @@
     },
     {
       "control": false,
-      "detail": "http://127.1:36579/ ERR ErrorCode::DestinationIpProhibited",
+      "detail": "http://127.1:36427/ ERR ErrorCode::DestinationIpProhibited",
       "pass": true,
       "test": "fetch loopback in short form 127.1 on the live listener's port"
     },
     {
       "control": false,
-      "detail": "http://0.0.0.0:36579/ ERR ErrorCode::DestinationIpProhibited",
+      "detail": "http://0.0.0.0:36427/ ERR ErrorCode::DestinationIpProhibited",
       "pass": true,
       "test": "fetch 0.0.0.0 on the live listener's port"
     },
     {
       "control": false,
-      "detail": "http://localhost.:36579/ ERR ErrorCode::DestinationIpProhibited",
+      "detail": "http://localhost.:36427/ ERR ErrorCode::DestinationIpProhibited",
       "pass": true,
       "test": "fetch localhost with a trailing dot"
     },
     {
       "control": false,
-      "detail": "http://LOCALHOST:36579/ ERR ErrorCode::DestinationIpProhibited",
+      "detail": "http://LOCALHOST:36427/ ERR ErrorCode::DestinationIpProhibited",
       "pass": true,
       "test": "fetch LOCALHOST in upper case"
     },
     {
       "control": false,
-      "detail": "http://[::127.0.0.1]:36579/ ERR ErrorCode::DestinationIpProhibited",
+      "detail": "http://[::127.0.0.1]:36427/ ERR ErrorCode::DestinationIpProhibited",
       "pass": true,
       "test": "fetch IPv4-compatible IPv6 loopback [::127.0.0.1]"
     },
     {
       "control": false,
-      "detail": "http://[::ffff:7f00:1]:36579/ ERR ErrorCode::DestinationIpProhibited",
+      "detail": "http://[::ffff:7f00:1]:36427/ ERR ErrorCode::DestinationIpProhibited",
       "pass": true,
       "test": "fetch IPv4-mapped IPv6 loopback in hex [::ffff:7f00:1]"
     },
@@ -284,7 +302,7 @@
     },
     {
       "control": false,
-      "detail": "http://example.com@127.0.0.1:36579/ ERR ErrorCode::HttpRequestUriInvalid",
+      "detail": "http://example.com@127.0.0.1:36427/ ERR ErrorCode::HttpRequestUriInvalid",
       "pass": true,
       "test": "fetch userinfo in front of loopback"
     },
@@ -308,5 +326,5 @@
     }
   ],
   "failures": 0,
-  "total": 51
+  "total": 54
 }

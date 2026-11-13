@@ -12,11 +12,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
-use wasmtime::component::{Component, Linker, ResourceTable};
+use wasmtime::component::{Component, Linker, Resource, ResourceTable};
 use wasmtime::{
     Config, Engine, ResourceLimiter, Store, StoreLimits, StoreLimitsBuilder, Trap, UpdateDeadline,
 };
 use wasmtime_wasi::cli::StdoutStream;
+use wasmtime_wasi::p2::bindings::io::error as wasi_io_error;
 use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 use wasmtime_wasi_http::p2::bindings::http::types::Scheme;
 use wasmtime_wasi_http::p2::bindings::{Proxy, ProxyPre};
@@ -122,9 +123,54 @@ pub fn linker(engine: &Engine) -> wasmtime::Result<Linker<Guarded>> {
     wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
     linker.allow_shadowing(true);
     crate::fsguard::shadow_filesystem(&mut linker)?;
+    wasi_io_error::add_to_linker::<Guarded, ErrorTextData>(&mut linker, |g| {
+        ErrorText(&mut g.table)
+    })?;
     linker.allow_shadowing(false);
     wasmtime_wasi_http::p2::add_only_http_to_linker_async(&mut linker)?;
     Ok(linker)
+}
+
+/// What a guest reads from `wasi:io/error.to-debug-string` for any host error that is not an HTTP
+/// error code. wasmtime-wasi gives the error's debug text, which holds its causes and, when the
+/// server captures backtraces, a host stack trace: host symbol names, and file paths in a build
+/// with debug info. A guest gets this fixed line instead.
+pub const GUEST_ERROR_TEXT: &str = "the host operation failed (the host keeps its error details)";
+
+/// The text a guest gets for `err`: an HTTP error code as its debug text (the same value
+/// `wasi:http/types.http-error-code` hands the guest), the egress refusal that cut a body as its
+/// own text, and anything else as [`GUEST_ERROR_TEXT`].
+fn guest_error_text(err: &wasmtime::Error) -> String {
+    use wasmtime_wasi_http::p2::bindings::http::types::ErrorCode;
+    if let Some(code) = err.downcast_ref::<ErrorCode>() {
+        return format!("{code:?}");
+    }
+    match err.downcast_ref::<HttpError>() {
+        Some(e @ HttpError::InternalError(Some(m))) if m == EGRESS_REFUSED => format!("{e:?}"),
+        _ => GUEST_ERROR_TEXT.to_string(),
+    }
+}
+
+/// `wasi:io/error` with [`guest_error_text`] in place of wasmtime-wasi's debug text.
+struct ErrorText<'a>(&'a mut ResourceTable);
+
+struct ErrorTextData;
+
+impl wasmtime::component::HasData for ErrorTextData {
+    type Data<'a> = ErrorText<'a>;
+}
+
+impl wasi_io_error::Host for ErrorText<'_> {}
+
+impl wasi_io_error::HostError for ErrorText<'_> {
+    fn drop(&mut self, err: Resource<wasi_io_error::Error>) -> wasmtime::Result<()> {
+        self.0.delete(err)?;
+        Ok(())
+    }
+
+    fn to_debug_string(&mut self, err: Resource<wasi_io_error::Error>) -> wasmtime::Result<String> {
+        Ok(guest_error_text(self.0.get(&err)?))
+    }
 }
 
 /// EXPERIMENTAL: the linker for wasip3-experimental instances. The wasip2 interfaces std uses
@@ -911,6 +957,22 @@ impl WasiHttpView for Guarded {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_guest_reads_no_host_error_text_but_http_codes_and_the_egress_refusal() {
+        let io = wasmtime::Error::from(std::io::Error::other("cannot open /home/op/secret.rs"));
+        assert_eq!(guest_error_text(&io), GUEST_ERROR_TEXT);
+        let ctx = wasmtime::format_err!("at /root/build/src/x.rs:12").context("more host text");
+        assert_eq!(guest_error_text(&ctx), GUEST_ERROR_TEXT);
+        let cut = wasmtime::Error::from(egress_refused());
+        assert!(guest_error_text(&cut).contains("egress_budget_exhausted"));
+        let other = wasmtime::Error::from(HttpError::InternalError(Some("/home/op".into())));
+        assert_eq!(guest_error_text(&other), GUEST_ERROR_TEXT);
+        let code = wasmtime::Error::from(
+            wasmtime_wasi_http::p2::bindings::http::types::ErrorCode::ConnectionRefused,
+        );
+        assert_eq!(guest_error_text(&code), "ErrorCode::ConnectionRefused");
+    }
 
     fn req(uri: &str, host: Option<&str>) -> http::Request<WasiBody> {
         let mut b = http::Request::builder().uri(uri);
