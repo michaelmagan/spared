@@ -89,6 +89,7 @@ jobs:
             probes/sqlite-probe/target
             probes/escape-probe/target
             probes/hostile-app/target
+            probes/p3-probe/target
             target/examples
             apps/shared-list/target
             apps/demo-spared/target

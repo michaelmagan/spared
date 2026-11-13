@@ -13,6 +13,8 @@ cargo build --release -p spared        # host and CLI: target/release/spared
 cargo test -p spared                   # unit tests in the host crate
 ```
 
+The tests of the EXPERIMENTAL wasip3 runtime build the guest in `probes/p3-probe` for `wasm32-wasip2` on first use, so `cargo test` needs that target (`rustup target add wasm32-wasip2`). The probe has no C code and needs no wasi-sdk.
+
 The release binary is the product: it has `serve` and the CLI and nothing else. The commands that reproduce the published numbers and run the sandbox escape suite (`run-probe`, `compile`, `bench-wake`, `bench-density`, `bench-3b`, `escape-test`), the native SQLite they use, and the `SPARED_NO_EPOCH` and `SPARED_PROBE_LEGACY_IO` switches exist only in a lab build, `--features lab`. The `bench/` scripts build it on first use into its own directory so it never replaces the release binary:
 
 ```sh
