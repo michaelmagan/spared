@@ -9,6 +9,7 @@ mod grants;
 mod lab;
 mod logcap;
 mod obs;
+mod p3;
 mod pinned_send;
 mod prefetch;
 mod quota;
@@ -136,6 +137,15 @@ enum Cmd {
         /// Retry-After, so a slow app cannot use up every connection.
         #[arg(long, env = "SPARED_MAX_APP_QUEUE", default_value_t = fsguard::AppCaps::default().max_queue)]
         max_app_queue: usize,
+        /// EXPERIMENTAL: serve apps whose spared.toml says runtime = "wasip3-experimental" (apps
+        /// without data only). One such instance serves several requests at once, so one crash
+        /// or timeout fails every request in flight in it. Off by default; see docs/wasip3.md.
+        #[arg(long, env = "SPARED_EXPERIMENTAL_WASIP3", value_parser = clap::builder::BoolishValueParser::new())]
+        experimental_wasip3: bool,
+        /// Requests one wasip3-experimental instance may have in flight (1 to 64); an app's
+        /// limits.concurrency may ask for fewer, never more.
+        #[arg(long, env = "SPARED_MAX_APP_CONCURRENCY", default_value_t = grants::DEFAULT_CONCURRENCY, value_parser = clap::value_parser!(u32).range(1..=grants::MAX_CONCURRENCY as i64))]
+        max_app_concurrency: u32,
         /// Largest component upload, in MB.
         #[arg(long, env = "SPARED_MAX_COMPONENT_MB", default_value_t = compile::CompileLimits::default().max_component_bytes >> 20)]
         max_component_mb: usize,
@@ -209,6 +219,8 @@ enum Cmd {
         memory_mb: u64,
         #[arg(long)]
         cpu_secs: u64,
+        #[arg(long)]
+        wasip3: bool,
     },
 }
 
@@ -222,9 +234,10 @@ fn main() -> Result<()> {
     if let Cmd::CompileWorker {
         memory_mb,
         cpu_secs,
+        wasip3,
     } = cli.cmd
     {
-        compile::worker_main(memory_mb, cpu_secs);
+        compile::worker_main(memory_mb, cpu_secs, wasip3);
     }
     // The server runs apps on all cores so one app's compute cannot hold up the others or the
     // admin API. Benchmarks and one-shot commands keep the single-thread runtime they measured.
@@ -296,6 +309,8 @@ async fn run(cli: Cli) -> Result<std::convert::Infallible> {
             max_log_kb_per_request,
             max_log_kb_per_sec,
             max_app_queue,
+            experimental_wasip3,
+            max_app_concurrency,
             max_component_mb,
             max_function_kb,
             max_function_locals,
@@ -407,7 +422,11 @@ async fn run(cli: Cli) -> Result<std::convert::Infallible> {
                         max_outbound,
                         request_mb: max_request_mb,
                         response_mb: max_response_mb,
+                        concurrency: max_app_concurrency,
                     },
+                    wasip3: experimental_wasip3,
+                    #[cfg(test)]
+                    test_loopback: false,
                     admin_token,
                     client_timeout: std::time::Duration::from_secs(client_timeout_secs.max(1)),
                     max_connections,

@@ -1,4 +1,4 @@
-use crate::grants::{Grants, Limits, Manifest, ungranted_imports};
+use crate::grants::{Grants, Limits, Manifest, Runtime, ungranted_imports};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -53,7 +53,7 @@ async fn run_cmd_with(
         Ok(c) => c,
         Err(e) => return fail(format!("load: {e:#}")),
     };
-    let bad = ungranted_imports(engine, &comp, &m.grants);
+    let bad = ungranted_imports(engine, &comp, &m.grants, Runtime::Wasip2);
     if !bad.is_empty() {
         return fail(format!("refused: ungranted imports {bad:?}"));
     }

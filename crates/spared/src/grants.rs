@@ -7,11 +7,45 @@ use wasmtime::component::Component;
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub name: String,
+    /// Which WASI the component targets. `wasip3-experimental` serves several requests at once in
+    /// one instance; it is off unless the operator turns it on (`--experimental-wasip3`).
+    #[serde(default)]
+    pub runtime: Runtime,
     #[serde(default)]
     pub grants: Grants,
     #[serde(default)]
     pub limits: Limits,
 }
+
+/// The WASI an app is built for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+pub enum Runtime {
+    /// One request at a time per instance, through `wasi:http/incoming-handler@0.2`.
+    #[default]
+    #[serde(rename = "wasip2")]
+    Wasip2,
+    /// EXPERIMENTAL: `wasi:http/handler@0.3`, several requests in flight in one instance.
+    #[serde(rename = "wasip3-experimental")]
+    Wasip3Experimental,
+}
+
+impl Runtime {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Runtime::Wasip2 => "wasip2",
+            Runtime::Wasip3Experimental => "wasip3-experimental",
+        }
+    }
+
+    pub fn is_p3(self) -> bool {
+        self == Runtime::Wasip3Experimental
+    }
+}
+
+/// Requests one wasip3-experimental instance may have in flight when the operator sets nothing.
+pub const DEFAULT_CONCURRENCY: u32 = 4;
+/// The highest `--max-app-concurrency` an operator may set.
+pub const MAX_CONCURRENCY: u32 = 64;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -39,7 +73,7 @@ pub const MANIFEST_SCHEMA: u32 = 1;
 pub const FETCH_ENTRY_FIX: &str =
     "fetch takes host names, for example example.com or *.example.com";
 
-pub const MANIFEST_KEYS_FIX: &str = "valid keys: schema, name, [grants] data, fetch, [limits] memory_mb, cpu_ms, deadline_ms, max_outbound";
+pub const MANIFEST_KEYS_FIX: &str = "valid keys: schema, name, runtime, [grants] data, fetch, [limits] memory_mb, cpu_ms, deadline_ms, max_outbound, concurrency";
 
 /// Why a spared.toml cannot be used, with the same kind, message and fix the CLI and the server
 /// both report.
@@ -65,7 +99,30 @@ impl Manifest {
     pub fn parse(text: &str) -> Result<Manifest, ManifestError> {
         let manifest = Manifest::parse_unchecked(text)?;
         manifest.grants.check_fetch()?;
+        manifest.check_runtime()?;
         Ok(manifest)
+    }
+
+    /// The rules of `runtime = "wasip3-experimental"`: no data, and `concurrency` only there.
+    pub fn check_runtime(&self) -> Result<(), ManifestError> {
+        match (self.runtime, self.limits.concurrency) {
+            (Runtime::Wasip3Experimental, _) if self.grants.data => Err(ManifestError {
+                kind: "wasip3_data_refused",
+                message: "runtime = \"wasip3-experimental\" is only for apps without data, and this spared.toml has data = true (the default)".into(),
+                fix: "set `data = false` under [grants], or remove the runtime line to run the app as wasip2. Requests in flight in one wasip3 instance share one SQLite connection, so a database app is refused".into(),
+            }),
+            (Runtime::Wasip3Experimental, Some(0)) => Err(ManifestError {
+                kind: "bad_manifest",
+                message: "limits.concurrency must be at least 1".into(),
+                fix: "set limits.concurrency to 1 or more, or leave it out for the server's default".into(),
+            }),
+            (Runtime::Wasip2, Some(_)) => Err(ManifestError {
+                kind: "bad_manifest",
+                message: "limits.concurrency applies only to runtime = \"wasip3-experimental\"; a wasip2 instance runs one request at a time".into(),
+                fix: "remove limits.concurrency".into(),
+            }),
+            _ => Ok(()),
+        }
     }
 
     fn parse_unchecked(text: &str) -> Result<Manifest, ManifestError> {
@@ -221,6 +278,10 @@ pub struct Limits {
     pub deadline_ms: u64,
     #[serde(default = "d_out")]
     pub max_outbound: u32,
+    /// wasip3-experimental only: requests one instance may have in flight. `None` takes the
+    /// server's `--max-app-concurrency`; a manifest may ask for less, never more.
+    #[serde(default)]
+    pub concurrency: Option<u32>,
 }
 
 impl Default for Limits {
@@ -230,6 +291,7 @@ impl Default for Limits {
             cpu_ms: d_cpu(),
             deadline_ms: d_deadline(),
             max_outbound: d_out(),
+            concurrency: None,
         }
     }
 }
@@ -244,6 +306,8 @@ pub struct Maxima {
     pub max_outbound: u32,
     pub request_mb: usize,
     pub response_mb: usize,
+    /// Requests one wasip3-experimental instance may have in flight (`--max-app-concurrency`).
+    pub concurrency: u32,
 }
 
 impl Default for Maxima {
@@ -255,6 +319,7 @@ impl Default for Maxima {
             max_outbound: 1000,
             request_mb: 8,
             response_mb: 16,
+            concurrency: DEFAULT_CONCURRENCY,
         }
     }
 }
@@ -286,7 +351,25 @@ impl Limits {
 
     /// The first limit above the server's maximum: (field, asked, maximum, serve flag).
     pub fn over(&self, max: &Maxima) -> Option<(&'static str, u64, u64, &'static str)> {
-        self.fields(max).into_iter().find(|(_, v, m, _)| v > m)
+        self.fields(max)
+            .into_iter()
+            .find(|(_, v, m, _)| v > m)
+            .or_else(|| {
+                let c = self.concurrency?;
+                (c > max.concurrency).then_some((
+                    "concurrency",
+                    c as u64,
+                    max.concurrency as u64,
+                    "--max-app-concurrency",
+                ))
+            })
+    }
+
+    /// Requests one wasip3-experimental instance may have in flight under `max`.
+    pub fn concurrency_in(&self, max: &Maxima) -> u32 {
+        self.concurrency
+            .unwrap_or(max.concurrency)
+            .clamp(1, max.concurrency.max(1))
     }
 
     /// Lower every limit to the maximum. Returns true if anything changed.
@@ -296,6 +379,7 @@ impl Limits {
         self.cpu_ms = self.cpu_ms.min(max.cpu_ms);
         self.deadline_ms = self.deadline_ms.min(max.deadline_ms);
         self.max_outbound = self.max_outbound.min(max.max_outbound);
+        self.concurrency = self.concurrency.map(|c| c.min(max.concurrency));
         over
     }
 }
@@ -323,30 +407,54 @@ pub fn valid_name(n: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
-/// Imports the component asks for that the manifest does not grant. Empty means loadable.
-pub fn ungranted_imports(engine: &Engine, comp: &Component, grants: &Grants) -> Vec<String> {
-    let mut bad = vec![];
-    for (name, _) in comp.component_type().imports(engine) {
-        let iface = name.split('@').next().unwrap_or(name);
-        let ok = if iface.starts_with("wasi:cli/")
-            || iface.starts_with("wasi:clocks/")
-            || iface.starts_with("wasi:random/")
-            || iface.starts_with("wasi:io/")
-            || iface == "wasi:http/types"
-        {
-            true
-        } else if iface.starts_with("wasi:filesystem/") {
-            grants.data
-        } else if iface == "wasi:http/outgoing-handler" {
-            !grants.fetch.is_empty()
-        } else {
-            false
+/// Imports the component asks for that the manifest and runtime do not grant. Empty means
+/// loadable. Each import is matched with its version: a `wasi:filesystem@0.3` import is not the
+/// `wasi:filesystem@0.2` that `data = true` grants, and an import without a version is refused.
+pub fn ungranted_imports(
+    engine: &Engine,
+    comp: &Component,
+    grants: &Grants,
+    runtime: Runtime,
+) -> Vec<String> {
+    comp.component_type()
+        .imports(engine)
+        .filter(|(name, _)| !import_granted(name, grants, runtime))
+        .map(|(name, _)| name.to_string())
+        .collect()
+}
+
+fn import_granted(name: &str, grants: &Grants, runtime: Runtime) -> bool {
+    let Some((iface, version)) = name.split_once('@') else {
+        return false;
+    };
+    let p2 = version.starts_with("0.2.");
+    let p3 = version.starts_with("0.3.") && runtime.is_p3();
+    let any = |prefixes: &[&str]| prefixes.iter().any(|p| iface.starts_with(p));
+    if p2 {
+        if any(&["wasi:cli/", "wasi:clocks/", "wasi:random/", "wasi:io/"]) {
+            return true;
+        }
+        if iface.starts_with("wasi:filesystem/") {
+            return grants.data;
+        }
+        // A wasip3 app gets HTTP through wasi:http 0.3 only.
+        return match iface {
+            "wasi:http/types" => !runtime.is_p3(),
+            "wasi:http/outgoing-handler" => !runtime.is_p3() && !grants.fetch.is_empty(),
+            _ => false,
         };
-        if !ok {
-            bad.push(name.to_string());
+    }
+    if p3 {
+        // Never wasi:filesystem, wasi:sockets or wasi:cli at 0.3: the host does not link them
+        // (std's file and console calls use the 0.2 interfaces above).
+        if any(&["wasi:clocks/", "wasi:random/"]) || iface == "wasi:http/types" {
+            return true;
+        }
+        if iface == "wasi:http/client" {
+            return !grants.fetch.is_empty();
         }
     }
-    bad
+    false
 }
 
 pub fn ip_denied(ip: IpAddr) -> bool {
@@ -520,6 +628,44 @@ mod tests {
         let m: Manifest =
             toml::from_str("name = \"x\"\n[limits]\nmax_outbound = 4000000000\n").unwrap();
         assert_eq!(m.limits.over(&max).map(|o| o.0), Some("max_outbound"));
+    }
+
+    #[test]
+    fn wasip3_is_named_by_runtime_and_refused_for_data_apps() {
+        let m = Manifest::parse("name = \"x\"\n").unwrap();
+        assert_eq!(m.runtime, Runtime::Wasip2);
+        let p3 = "name = \"x\"\nruntime = \"wasip3-experimental\"\n";
+        let e = Manifest::parse(p3).unwrap_err();
+        assert_eq!(e.kind, "wasip3_data_refused");
+        assert!(e.fix.contains("data = false"), "{}", e.fix);
+        let m = Manifest::parse(&format!("{p3}[grants]\ndata = false\n")).unwrap();
+        assert_eq!(m.runtime, Runtime::Wasip3Experimental);
+        assert_eq!(m.limits.concurrency, None);
+        assert!(Manifest::parse("name = \"x\"\nruntime = \"wasip3\"\n").is_err());
+        let e = Manifest::parse("name = \"x\"\n[limits]\nconcurrency = 2\n").unwrap_err();
+        assert!(e.message.contains("only to runtime"), "{}", e.message);
+        let e = Manifest::parse(&format!(
+            "{p3}[grants]\ndata = false\n[limits]\nconcurrency = 0\n"
+        ))
+        .unwrap_err();
+        assert_eq!(e.kind, "bad_manifest");
+    }
+
+    #[test]
+    fn concurrency_may_ask_for_less_than_the_operator_allows_never_more() {
+        let max = Maxima::default();
+        let mut l = Limits::default();
+        assert_eq!(l.concurrency_in(&max), DEFAULT_CONCURRENCY);
+        l.concurrency = Some(2);
+        assert_eq!(l.over(&max), None);
+        assert_eq!(l.concurrency_in(&max), 2);
+        l.concurrency = Some(9);
+        assert_eq!(
+            l.over(&max),
+            Some(("concurrency", 9, 4, "--max-app-concurrency"))
+        );
+        assert!(l.clamp(&max));
+        assert_eq!(l.concurrency_in(&max), 4);
     }
 
     #[test]

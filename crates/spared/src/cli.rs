@@ -548,6 +548,9 @@ fn trap_message(kind: TrapKind, text: &str, limits: &crate::grants::Limits) -> S
     }
 }
 
+/// Printed whenever the CLI runs or deploys a `runtime = "wasip3-experimental"` app.
+const WASIP3_NOTE: &str = "note: runtime wasip3-experimental is EXPERIMENTAL: one instance serves several requests at once, so one crash or timeout fails every request in flight in it, and it runs on wasmtime code its authors mark not ready for production (docs/wasip3.md)";
+
 fn trap_fix(kind: TrapKind) -> &'static str {
     match kind {
         TrapKind::CpuLimit => "reduce work per request or raise limits.cpu_ms in spared.toml",
@@ -3470,9 +3473,23 @@ struct PathResult {
     failure: Option<(String, String, String)>,
 }
 
+/// What `spared test` runs: a wasip2 component, or an EXPERIMENTAL wasip3 one.
+enum TestPre {
+    P2(ProxyPre<Guarded>),
+    P3(wasmtime_wasi_http::p3::bindings::ServicePre<Guarded>),
+}
+
+enum TestLive {
+    P2(
+        wasmtime::Store<Guarded>,
+        wasmtime_wasi_http::p2::bindings::Proxy,
+    ),
+    P3(std::sync::Arc<crate::p3::Instance>),
+}
+
 async fn request_once(
     engine: &Engine,
-    pre: &ProxyPre<Guarded>,
+    pre: &TestPre,
     m: &Manifest,
     data: &Path,
     path: &str,
@@ -3487,34 +3504,59 @@ async fn request_once(
     let fail = |res: &mut PathResult, kind: &str, msg: String, fix: &str| {
         res.failure = Some((kind.into(), msg, fix.into()))
     };
-    let mut store = match crate::sandbox::app_store(
-        engine,
-        m,
-        data,
-        log,
-        &crate::fsguard::AppCaps::default(),
-        None,
-    )
-    .await
-    {
-        Ok(s) => s,
-        Err(e) => {
-            fail(
-                &mut res,
-                "wake_failed",
-                format!("{e:#}"),
-                "check the temp dir is writable",
-            );
-            return res;
-        }
+    let wake = |res: &mut PathResult, e: wasmtime::Error| {
+        let msg = format!("{e:#}");
+        let fix = wake_failed_fix(&msg);
+        res.failure = Some(("wake_failed".into(), msg, fix));
     };
-    let proxy = match pre.instantiate_async(&mut store).await {
-        Ok(p) => p,
-        Err(e) => {
-            let msg = format!("{e:#}");
-            let fix = wake_failed_fix(&msg);
-            fail(&mut res, "wake_failed", msg, &fix);
-            return res;
+    let live = match pre {
+        TestPre::P2(pre) => {
+            let mut store = match crate::sandbox::app_store(
+                engine,
+                m,
+                data,
+                log,
+                &crate::fsguard::AppCaps::default(),
+                None,
+            )
+            .await
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    fail(
+                        &mut res,
+                        "wake_failed",
+                        format!("{e:#}"),
+                        "check the temp dir is writable",
+                    );
+                    return res;
+                }
+            };
+            match pre.instantiate_async(&mut store).await {
+                Ok(p) => TestLive::P2(store, p),
+                Err(e) => {
+                    wake(&mut res, e);
+                    return res;
+                }
+            }
+        }
+        TestPre::P3(pre) => {
+            let wasi = match crate::sandbox::wasi_builder(m, data, log) {
+                Ok(mut b) => b.build(),
+                Err(e) => {
+                    wake(&mut res, e);
+                    return res;
+                }
+            };
+            let store = crate::p3::store(engine, m, wasi, None, None, u64::MAX);
+            let deadline = Duration::from_millis(m.limits.deadline_ms);
+            match crate::p3::Instance::start(pre, store, 1, deadline, None).await {
+                Ok(i) => TestLive::P3(i),
+                Err(e) => {
+                    wake(&mut res, e);
+                    return res;
+                }
+            }
         }
     };
     let uri = format!(
@@ -3544,7 +3586,17 @@ async fn request_once(
     };
     let deadline = Duration::from_millis(m.limits.deadline_ms);
     let max = Maxima::default().response_mb << 20;
-    match call_handler(&mut store, &proxy, req, deadline, max).await {
+    let outcome = match live {
+        TestLive::P2(mut store, proxy) => {
+            call_handler(&mut store, &proxy, req, deadline, max).await
+        }
+        TestLive::P3(instance) => {
+            let r = instance.call(req, deadline, max).await;
+            instance.drain().await;
+            r
+        }
+    };
+    match outcome {
         Ok(resp) => {
             res.status = Some(resp.status().as_u16());
             let bytes = resp.body();
@@ -3601,9 +3653,12 @@ async fn cmd_test(paths: Vec<String>, json: bool) -> R<()> {
     }
     m.limits.clamp(&Maxima::default());
     let wasm = build(&dir, json)?;
-    let engine =
-        crate::sandbox::engine().map_err(|e| err("engine", format!("{e:#}"), "report this"))?;
+    let engine = crate::sandbox::engine_for(m.runtime)
+        .map_err(|e| err("engine", format!("{e:#}"), "report this"))?;
     crate::sandbox::start_epoch_ticker(&engine);
+    if m.runtime.is_p3() && !json {
+        eprintln!("{WASIP3_NOTE}");
+    }
     let comp = Component::from_file(&engine, &wasm).map_err(|e| {
         err(
             "invalid_component",
@@ -3611,10 +3666,19 @@ async fn cmd_test(paths: Vec<String>, json: bool) -> R<()> {
             "build for wasm32-wasip2 as a component: use `#[wstd::http_server]` and a bin crate",
         )
     })?;
-    crate::sandbox::check_component(&engine, &comp, &m.grants)
+    crate::sandbox::check_component(&engine, &comp, &m.grants, m.runtime)
         .map_err(|r| err(r.kind, r.message, r.fix))?;
-    let pre = crate::sandbox::link(&engine, &comp)
-        .map_err(|e| err("link", format!("{e:#}"), "report this"))?;
+    let pre = if m.runtime.is_p3() {
+        TestPre::P3(
+            crate::p3::link(&engine, &comp)
+                .map_err(|e| err("link", format!("{e:#}"), "report this"))?,
+        )
+    } else {
+        TestPre::P2(
+            crate::sandbox::link(&engine, &comp)
+                .map_err(|e| err("link", format!("{e:#}"), "report this"))?,
+        )
+    };
 
     let nanos = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -3708,7 +3772,10 @@ fn newest_mtime(dir: &Path) -> SystemTime {
 
 async fn cmd_dev(json: bool) -> R<()> {
     let dir = PathBuf::from(".");
-    read_manifest(&dir)?;
+    let dev_wasip3 = read_manifest(&dir)?.0.runtime.is_p3();
+    if dev_wasip3 && !json {
+        eprintln!("{WASIP3_NOTE}");
+    }
     let data_dir = std::fs::canonicalize(".")
         .map_err(|e| io_err("resolve .", e))?
         .join(".spared");
@@ -3754,6 +3821,11 @@ async fn cmd_dev(json: bool) -> R<()> {
         caps: Default::default(),
         compile: crate::compile::CompileLimits::isolated(),
         remote: None,
+        // `spared dev` runs a wasip3-experimental app when its spared.toml asks for one: the
+        // developer chose it for their own app on their own machine.
+        wasip3: dev_wasip3,
+        #[cfg(test)]
+        test_loopback: false,
     };
     let server = tokio::spawn(crate::server::serve(
         cfg,
