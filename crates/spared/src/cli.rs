@@ -562,7 +562,11 @@ fn trap_fix(kind: TrapKind) -> &'static str {
 }
 
 fn lock_for(name: &str) -> String {
-    let text = include_str!("../templates/Cargo.lock.template");
+    lock_from(include_str!("../templates/Cargo.lock.template"), name)
+}
+
+/// A template's pinned lock file with the app's name in it, the packages kept in name order.
+fn lock_from(text: &str, name: &str) -> String {
     let (head, rest) = text.split_once("[[package]]").unwrap_or((text, ""));
     let mut blocks: Vec<String> = rest
         .split("[[package]]")
@@ -597,8 +601,16 @@ struct Template {
     name: &'static str,
     about: &'static str,
     routes: &'static [&'static str],
+    /// `src/main.rs`, or `src/lib.rs` for a wasip3 template.
     main: &'static str,
     manifest: &'static str,
+    /// An EXPERIMENTAL wasip3 template: its own Cargo.toml and lock, no `src/spared.rs`.
+    wasip3: Option<Wasip3Files>,
+}
+
+struct Wasip3Files {
+    cargo_toml: &'static str,
+    lock: &'static str,
 }
 
 macro_rules! app_template {
@@ -625,12 +637,14 @@ const TEMPLATES: &[Template] = &[
         ],
         main: include_str!("../templates/main.rs.tmpl"),
         manifest: include_str!("../templates/spared.toml.tmpl"),
+        wasip3: None,
     },
     Template {
         name: "counter",
         about: "An atomic counter: a page with a button and a JSON API",
         routes: &["GET /", "GET /api/count", "POST /api/increment"],
         main: app_template!("counter").0,
+        wasip3: None,
         manifest: app_template!("counter").1,
     },
     Template {
@@ -644,6 +658,7 @@ const TEMPLATES: &[Template] = &[
             "DELETE /api/todos/<id>",
         ],
         main: app_template!("todo").0,
+        wasip3: None,
         manifest: app_template!("todo").1,
     },
     Template {
@@ -651,6 +666,7 @@ const TEMPLATES: &[Template] = &[
         about: "Guestbook with HTML-escaped messages, newest first",
         routes: &["GET /", "POST /api/messages"],
         main: app_template!("guestbook").0,
+        wasip3: None,
         manifest: app_template!("guestbook").1,
     },
     Template {
@@ -664,6 +680,7 @@ const TEMPLATES: &[Template] = &[
             "DELETE /kv/<key>",
         ],
         main: app_template!("kv").0,
+        wasip3: None,
         manifest: app_template!("kv").1,
     },
     Template {
@@ -677,6 +694,7 @@ const TEMPLATES: &[Template] = &[
             "GET /<code>",
         ],
         main: app_template!("shortener").0,
+        wasip3: None,
         manifest: app_template!("shortener").1,
     },
     Template {
@@ -684,6 +702,7 @@ const TEMPLATES: &[Template] = &[
         about: "Webhook receiver: stores any JSON with a timestamp, lists the last 50, shared-secret header",
         routes: &["GET /", "POST /hook", "GET /events"],
         main: app_template!("webhook").0,
+        wasip3: None,
         manifest: app_template!("webhook").1,
     },
     Template {
@@ -691,6 +710,7 @@ const TEMPLATES: &[Template] = &[
         about: "Outbound HTTPS call to a host you grant in spared.toml, returns status and size",
         routes: &["GET /", "GET /fetch"],
         main: app_template!("fetcher").0,
+        wasip3: None,
         manifest: app_template!("fetcher").1,
     },
     Template {
@@ -698,7 +718,19 @@ const TEMPLATES: &[Template] = &[
         about: "Blog: HTML list and post pages, bearer-token protected publish endpoint",
         routes: &["GET /", "GET /posts/<slug>", "POST /api/posts"],
         main: app_template!("blog").0,
+        wasip3: None,
         manifest: app_template!("blog").1,
+    },
+    Template {
+        name: "fetcher3",
+        about: "EXPERIMENTAL wasip3: the fetcher, with several requests at once in one instance (needs a server with --experimental-wasip3)",
+        routes: &["GET /", "GET /fetch"],
+        main: include_str!("../templates/apps/fetcher3/lib.rs"),
+        manifest: include_str!("../templates/apps/fetcher3/spared.toml"),
+        wasip3: Some(Wasip3Files {
+            cargo_toml: include_str!("../templates/apps/fetcher3/Cargo.toml.tmpl"),
+            lock: include_str!("../templates/apps/fetcher3/Cargo.lock.template"),
+        }),
     },
 ];
 
@@ -749,6 +781,18 @@ fn helper_warning(dir: &Path) -> Option<String> {
 
 fn new_files(name: &str, t: &Template) -> Vec<(&'static str, String)> {
     let sub = |text: &str| text.replace("__NAME__", name);
+    if let Some(p3) = &t.wasip3 {
+        return vec![
+            ("Cargo.toml", sub(p3.cargo_toml)),
+            ("Cargo.lock", lock_from(p3.lock, name)),
+            ("spared.toml", sub(t.manifest)),
+            (
+                ".gitignore",
+                sub(include_str!("../templates/gitignore.tmpl")),
+            ),
+            ("src/lib.rs", sub(t.main)),
+        ];
+    }
     vec![
         (
             "Cargo.toml",
@@ -815,7 +859,13 @@ fn cmd_new(name: &str, template: Option<&str>, json: bool) -> R<()> {
         std::fs::write(&p, content).map_err(|e| io_err(&format!("write {}", p.display()), e))?;
         written.push(rel);
     }
-    let steps = next_steps(name);
+    let mut steps = next_steps(name);
+    if t.wasip3.is_some() {
+        steps[2] = "spared serve --data-dir ./data --experimental-wasip3   # in another terminal, once; EXPERIMENTAL (docs/wasip3.md)".to_string();
+        if !json {
+            eprintln!("{WASIP3_NOTE}");
+        }
+    }
     if json {
         out_json(
             json!({"created": name, "path": dir, "files": written, "template": t.name, "routes": t.routes, "next": steps}),
@@ -1369,7 +1419,9 @@ fn build(dir: &Path, json: bool) -> R<PathBuf> {
     };
     release_unit_from_other_dir(dir, &target_dir)?;
     if !json {
-        if sqlite_compiled(&target_dir) || sqlite_cache_has_entry(&sdk) {
+        let uses_sqlite =
+            std::fs::read_to_string(dir.join("Cargo.toml")).is_ok_and(|t| t.contains("rusqlite"));
+        if !uses_sqlite || sqlite_compiled(&target_dir) || sqlite_cache_has_entry(&sdk) {
             eprintln!("building {}", dir.display());
         } else {
             eprintln!(
@@ -1692,7 +1744,9 @@ fn deploy_hints(name: &str) -> Vec<String> {
 async fn cmd_deploy(server: Option<String>, json: bool) -> R<()> {
     let server = server_url(server);
     let dir = PathBuf::from(".");
-    read_manifest(&dir)?;
+    if read_manifest(&dir)?.0.runtime.is_p3() && !json {
+        eprintln!("{WASIP3_NOTE}");
+    }
     match admin(&server, "", "GET", "/v1/apps", &[], Bytes::new()).await {
         Err(e) if e.kind != "unauthorized" => return Err(e),
         _ => {}
@@ -4052,6 +4106,21 @@ mod template_tests {
             let m: Manifest = toml::from_str(&t.manifest.replace("__NAME__", "demo"))
                 .unwrap_or_else(|e| panic!("{}: {e}", t.name));
             assert_eq!(m.name, "demo");
+            if t.wasip3.is_some() {
+                let m = Manifest::parse(&t.manifest.replace("__NAME__", "demo"))
+                    .unwrap_or_else(|e| panic!("{}: {e}", t.name));
+                assert!(m.runtime.is_p3() && !m.grants.data, "{}", t.name);
+                assert!(
+                    t.main.contains("wasip3::http::service::export!"),
+                    "{} has no handler",
+                    t.name
+                );
+                let files = new_files("demo", t);
+                assert!(files.iter().all(|(p, _)| *p != "src/spared.rs"));
+                let lock = &files.iter().find(|(p, _)| *p == "Cargo.lock").unwrap().1;
+                assert!(lock.contains("name = \"demo\"") && lock.contains("name = \"wasip3\""));
+                continue;
+            }
             assert!(t.main.contains("const SCHEMA"), "{} has no SCHEMA", t.name);
             assert!(
                 t.main.contains("#[wstd::http_server]"),

@@ -1,0 +1,20 @@
+[package]
+name = "__NAME__"
+version = "0.1.0"
+edition = "2024"
+
+# A wasip3 handler is a library that exports wasi:http/handler@0.3; `spared deploy` builds it
+# for wasm32-wasip2 like any app.
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wasip3 = { version = "=0.10.0", features = ["async-spawn"] }
+
+[profile.release]
+opt-level = 2
+lto = false
+codegen-units = 16
+strip = true
+
+[workspace]

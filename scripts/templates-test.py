@@ -67,9 +67,11 @@ class Server:
         for var, default in (("RUSTUP_HOME", "~/.rustup"), ("CARGO_HOME", "~/.cargo")):
             self.env.setdefault(var, os.path.expanduser(default))
         self.log = open(os.path.join(tmp, "serve.log"), "w")
+        # --experimental-wasip3 for the fetcher3 template; the other templates are wasip2 apps.
         self.proc = subprocess.Popen(
             [BIN, "serve", "--data-dir", os.path.join(tmp, "data"),
-             "--listen", f"127.0.0.1:{self.pub}", "--admin-listen", f"127.0.0.1:{self.adm}"],
+             "--listen", f"127.0.0.1:{self.pub}", "--admin-listen", f"127.0.0.1:{self.adm}",
+             "--experimental-wasip3"],
             env=self.env, stdout=self.log, stderr=subprocess.STDOUT)
         token_file = os.path.join(tmp, "data", "admin-token")
         for _ in range(100):
@@ -224,6 +226,17 @@ def check_fetcher(a):
         print("      note: no outbound network, /fetch returned the app's 502 error JSON", flush=True)
 
 
+def check_fetcher3(a):
+    info = a.json("GET", "/")
+    expect(info.get("runtime") == "wasip3-experimental", f"/ names the runtime: {info}")
+    check_fetcher(a)
+    # Several requests at once on one instance: all of them answer.
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(4) as pool:
+        statuses = list(pool.map(lambda _: a.call("GET", "/")[0], range(8)))
+    expect(statuses == [200] * 8, f"8 requests at once answered {statuses}")
+
+
 def check_blog_refuses_shipped_token(a):
     shipped = {"Authorization": "Bearer " + SHIPPED_TOKEN}
     for headers in ({}, shipped):
@@ -260,6 +273,7 @@ CHECKS = {
     "shortener": (["/", "/api/links"], check_shortener),
     "webhook": (["/"], check_webhook),
     "fetcher": (["/"], check_fetcher),
+    "fetcher3": (["/"], check_fetcher3),
     "blog": (["/"], check_blog),
 }
 
