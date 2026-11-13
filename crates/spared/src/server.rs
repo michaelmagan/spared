@@ -2470,10 +2470,33 @@ impl Server {
             }
             None => None,
         };
+        // A new app: before the commit, no token of its name may create it any more, on disk, so a
+        // crash after the commit never leaves a token that could create it again.
+        let flipped = if prev.is_none() {
+            let (ids, err) = self.tokens.lock().unwrap().app_created(name);
+            if let Some(e) = err {
+                self.tokens.lock().unwrap().creation_undone(&ids);
+                unmark();
+                self.abandon_release(&dir, &hash, created);
+                return Err(DeployError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "token_write_failed",
+                    format!(
+                        "cannot record under <data-dir>/{} that '{name}' now exists: {e}. Nothing was deployed",
+                        tokens::DIR
+                    ),
+                    "check disk space and permissions under the data directory, then deploy again",
+                ));
+            }
+            ids
+        } else {
+            vec![]
+        };
         if let Err(e) = commit_release(&dir) {
             if let Some(old) = &prev {
                 old.retired.store(false, Ordering::Release);
             }
+            self.tokens.lock().unwrap().creation_undone(&flipped);
             unmark();
             self.abandon_release(&dir, &hash, created);
             return Err(write_failed(e));
@@ -2485,9 +2508,6 @@ impl Server {
         drop(old_live);
         if let Some(old) = &prev {
             self.release_component(&old.shared.hash);
-        }
-        if let (None, Creator::Token(id)) = (&prev, creator) {
-            self.tokens.lock().unwrap().created_app(id);
         }
         let mut info = self.one_app_json(app).await;
         info["data_kept"] = data_kept.into();
@@ -3247,6 +3267,10 @@ impl Server {
                 );
             }
         };
+        // Under the name lock, so a deploy that is creating the app either has flipped every token
+        // of the name (and this one sees the app) or has not started its commit.
+        let lock = self.name_lock(app);
+        let _serial = lock.lock().await;
         let may_create = !self.apps.read().unwrap().contains_key(app);
         let minted = self
             .tokens

@@ -717,6 +717,62 @@ fn an_app_token_deploys_only_its_own_app() {
     assert_eq!(rc, 0, "{v}");
 }
 
+/// `may_create` of every token of `app`, as `GET /v1/tokens?app=` lists them.
+fn may_create_of(n: &Node, app: &str) -> Vec<Value> {
+    let (st, v) = call(n, &n.token, "GET", &format!("/v1/tokens?app={app}"), b"");
+    assert_eq!(st, 200, "{v}");
+    v["tokens"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["may_create"].clone())
+        .collect()
+}
+
+#[test]
+fn may_create_ends_when_the_app_is_created_by_anyone() {
+    let s = scratch("tok-may-create");
+    let mut n = Node::start(&s.0, "n", vec![], vec![]);
+
+    // The admin token creates the app: tokens minted before it may no longer create it.
+    mint(&n, json!({"app": "byadmin"}));
+    assert_eq!(may_create_of(&n, "byadmin"), vec![json!(true)]);
+    assert_eq!(deploy_as(&n, &n.token, "byadmin", "byadmin").0, 200);
+    assert_eq!(may_create_of(&n, "byadmin"), vec![json!(false)]);
+
+    // One token creates it: so do the others.
+    let (first, _) = mint(&n, json!({"app": "bytoken"}));
+    mint(&n, json!({"app": "bytoken"}));
+    assert_eq!(deploy_as(&n, &first, "bytoken", "bytoken").0, 200);
+    assert_eq!(
+        may_create_of(&n, "bytoken"),
+        vec![json!(false), json!(false)]
+    );
+
+    // The flag is on disk before the app is: when it cannot be written, the deploy is refused
+    // and no app exists, so no crash can leave an app whose token may still create it.
+    let (t, minted) = mint(&n, json!({"app": "crash"}));
+    let id = minted["id"].as_str().unwrap().to_string();
+    let blocker = n.data.join(format!("tokens/.{id}.json.tmp"));
+    std::fs::create_dir(&blocker).unwrap();
+    let (st, v) = deploy_as(&n, &t, "crash", "crash");
+    n.kill9();
+    std::fs::remove_dir(&blocker).unwrap();
+    n.spawn();
+    let exists = call(&n, &n.token, "GET", "/v1/apps/crash", b"").0 == 200;
+    assert!(
+        !(exists && may_create_of(&n, "crash") == vec![json!(true)]),
+        "the app exists and its token may still create it (deploy said {st} {v})"
+    );
+    assert!(
+        !exists,
+        "the deploy went ahead without recording the flag: {st} {v}"
+    );
+    // Once the disk takes the write, the token creates its app, once.
+    assert_eq!(deploy_as(&n, &t, "crash", "crash").0, 200);
+    assert_eq!(may_create_of(&n, "crash"), vec![json!(false)]);
+}
+
 #[test]
 fn an_app_tokens_deploy_does_not_say_whether_another_app_runs_the_same_code() {
     let s = scratch("tok-reused");

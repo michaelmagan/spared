@@ -475,17 +475,37 @@ impl Store {
         })
     }
 
-    /// The token `id` has created its app: it may not create it again.
-    pub fn created_app(&mut self, id: &str) {
-        if let Some(rec) = self.records.iter_mut().find(|r| r.id == id)
-            && rec.may_create
-        {
-            rec.may_create = false;
-            if let Err(e) = write_record(&self.dir, rec) {
-                eprintln!(
-                    "token {}: cannot record that it created its app: {e}",
-                    rec.id
-                );
+    /// `app` is about to be created, by any token or the admin token: no token of it may create
+    /// it again. Returns the ids changed and the first write error. The caller commits the app
+    /// only when every write succeeded, so no crash leaves an app whose token may still create
+    /// it; on an error it calls [`Store::creation_undone`] and gives up.
+    pub fn app_created(&mut self, app: &str) -> (Vec<String>, Option<std::io::Error>) {
+        let (mut ids, mut first_err) = (vec![], None);
+        for rec in self.records.iter_mut() {
+            if rec.app == app && rec.may_create {
+                rec.may_create = false;
+                ids.push(rec.id.clone());
+                if let Err(e) = write_record(&self.dir, rec) {
+                    first_err.get_or_insert(e);
+                }
+            }
+        }
+        (ids, first_err)
+    }
+
+    /// The creation [`Store::app_created`] prepared did not happen: the tokens `ids` may create
+    /// their app again. A write that fails here leaves a token unable to create its app after a
+    /// restart, which is the safe side.
+    pub fn creation_undone(&mut self, ids: &[String]) {
+        for rec in self.records.iter_mut() {
+            if ids.contains(&rec.id) && rec.revoked.is_none() {
+                rec.may_create = true;
+                if let Err(e) = write_record(&self.dir, rec) {
+                    eprintln!(
+                        "token {}: cannot record that it may create its app again: {e}",
+                        rec.id
+                    );
+                }
             }
         }
     }
@@ -732,10 +752,27 @@ mod tests {
         let (t, rec) = s
             .mint("a", DEFAULT_SCOPES.to_vec(), None, None, true, 1)
             .unwrap();
-        s.created_app(&rec.id);
+        let (t2, _) = s
+            .mint("a", DEFAULT_SCOPES.to_vec(), None, None, true, 1)
+            .unwrap();
+        let (other, _) = s
+            .mint("b", DEFAULT_SCOPES.to_vec(), None, None, true, 1)
+            .unwrap();
+        let (ids, err) = s.app_created("a");
+        assert!(err.is_none());
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&rec.id));
         let mut again = Store::open(&d).unwrap();
-        match again.authenticate(&t, 2) {
-            Auth::Valid(p) => assert!(!p.may_create),
+        for (tok, may) in [(&t, false), (&t2, false), (&other, true)] {
+            match again.authenticate(tok, 2) {
+                Auth::Valid(p) => assert_eq!(p.may_create, may),
+                other => panic!("{other:?}"),
+            }
+        }
+        again.creation_undone(&ids);
+        let mut third = Store::open(&d).unwrap();
+        match third.authenticate(&t, 3) {
+            Auth::Valid(p) => assert!(p.may_create),
             other => panic!("{other:?}"),
         }
         std::fs::remove_dir_all(&d).unwrap();
