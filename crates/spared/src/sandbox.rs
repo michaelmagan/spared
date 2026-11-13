@@ -854,6 +854,23 @@ mod tests {
     }
 
     #[test]
+    fn imports_are_matched_with_their_version() {
+        for name in [
+            "wasi:filesystem/types@0.3.0",
+            "wasi:filesystem/preopens@0.3.2",
+            "wasi:sockets/types@0.3.0",
+            "wasi:filesystem/types",
+            "wasi:cli/stdout",
+            "wasi:filesystem/types@1.0.0",
+        ] {
+            let wat = format!(r#"(component (import "{name}" (instance)))"#);
+            let r = refusal(&wat, &grants(true, &["example.com"])).expect(name);
+            assert_eq!(r.kind, "ungranted_import", "{name}");
+            assert!(r.message.contains(name), "{}", r.message);
+        }
+    }
+
+    #[test]
     fn a_component_without_an_http_handler_is_refused() {
         let r = refusal("(component)", &grants(false, &[])).expect("refused");
         assert_eq!(r.kind, "no_http_handler");
