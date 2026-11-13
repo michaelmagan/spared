@@ -142,6 +142,10 @@ pub enum UserCmd {
     /// revoking them needs the admin token.
     #[command(subcommand)]
     Token(TokenCmd),
+    /// Per-app limits the operator sets: data size, entries, a CPU budget over time and an
+    /// outbound HTTP budget. Each can only lower the server's caps. Needs the admin token.
+    #[command(subcommand)]
+    Limits(LimitsCmd),
     /// Stop serving an app on this server and keep it stopped across restarts: public requests
     /// get 503 app_frozen. Admin commands (backup, restore, logs, rm) keep working; a deploy is
     /// refused until `spared thaw`.
@@ -243,6 +247,49 @@ pub enum TokenCmd {
     /// turned into its id here, so the secret is never sent.
     Revoke {
         id: String,
+        /// Admin URL of the server to talk to. Default: $SPARED_URL, then http://127.0.0.1:8081.
+        #[arg(long, value_name = "URL")]
+        server: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum LimitsCmd {
+    /// Set limits for one app. Flags not given keep the app's current override. The app need not
+    /// exist yet, so a platform can set them before the first deploy. The server's caps still
+    /// apply: the smaller number is in force.
+    Set {
+        app: String,
+        /// MB the app may keep under /data (at most --max-app-data-mb).
+        #[arg(long, value_name = "MB")]
+        data_mb: Option<u64>,
+        /// Files, directories and links the app may keep under /data (at most --max-app-entries).
+        #[arg(long, value_name = "N")]
+        entries: Option<u64>,
+        /// CPU budget as a share of one core over time, 1 to 100.
+        #[arg(long, value_name = "P", conflicts_with = "cpu_ms_per_min")]
+        cpu_percent: Option<u64>,
+        /// CPU budget in milliseconds of compute per minute (60000 is one core).
+        #[arg(long, value_name = "MS")]
+        cpu_ms_per_min: Option<u64>,
+        /// Outbound HTTP budget: request and response body bytes per hour, in MB (fractions
+        /// allowed, such as 0.5).
+        #[arg(long, value_name = "MB")]
+        egress_mb_per_hour: Option<f64>,
+        /// Admin URL of the server to talk to. Default: $SPARED_URL, then http://127.0.0.1:8081.
+        #[arg(long, value_name = "URL")]
+        server: Option<String>,
+    },
+    /// Show an app's override, the limits in force and what it has used since the server started.
+    Show {
+        app: String,
+        /// Admin URL of the server to talk to. Default: $SPARED_URL, then http://127.0.0.1:8081.
+        #[arg(long, value_name = "URL")]
+        server: Option<String>,
+    },
+    /// Remove an app's override: the server's caps apply again.
+    Clear {
+        app: String,
         /// Admin URL of the server to talk to. Default: $SPARED_URL, then http://127.0.0.1:8081.
         #[arg(long, value_name = "URL")]
         server: Option<String>,
@@ -352,6 +399,30 @@ async fn dispatch(cmd: UserCmd, json: bool) -> R<()> {
         UserCmd::Token(TokenCmd::List { app, server }) => cmd_token_list(app, server, json).await,
         UserCmd::Token(TokenCmd::Revoke { id, server }) => {
             cmd_token_revoke(&id, server, json).await
+        }
+        UserCmd::Limits(LimitsCmd::Set {
+            app,
+            data_mb,
+            entries,
+            cpu_percent,
+            cpu_ms_per_min,
+            egress_mb_per_hour,
+            server,
+        }) => {
+            let asked = LimitFlags {
+                data_mb,
+                entries,
+                cpu_percent,
+                cpu_ms_per_min,
+                egress_mb_per_hour,
+            };
+            cmd_limits_set(&app, asked, server, json).await
+        }
+        UserCmd::Limits(LimitsCmd::Show { app, server }) => {
+            cmd_limits_show(&app, server, json).await
+        }
+        UserCmd::Limits(LimitsCmd::Clear { app, server }) => {
+            cmd_limits_clear(&app, server, json).await
         }
         UserCmd::Freeze {
             name,
@@ -1764,8 +1835,12 @@ async fn cmd_rm(name: &str, yes: bool, server: Option<String>, json: bool) -> R<
     let answer = serde_json::from_slice::<Value>(&r.body).unwrap_or_default();
     let kept = answer["backups_kept"].as_u64().unwrap_or(0);
     let revoked = answer["tokens_revoked"].as_u64().unwrap_or(0);
+    let limits_kept = answer["limits_kept"] == true;
     if json {
         let mut v = json!({"deleted": name});
+        if limits_kept {
+            v["limits_kept"] = true.into();
+        }
         if kept > 0 {
             v["backups_kept"] = kept.into();
         }
@@ -1791,8 +1866,248 @@ async fn cmd_rm(name: &str, yes: bool, server: Option<String>, json: bool) -> R<
                 "note: {kept} backup(s) of {name} remain under <data-dir>/backups/{name}/; deploy the name again and `spared restore` brings them back"
             );
         }
+        if limits_kept {
+            println!(
+                "note: the limits set for {name} stay and apply to an app deployed under this name again; `spared limits clear {name}` removes them"
+            );
+        }
     }
     Ok(())
+}
+
+/// What `spared limits set` was given.
+struct LimitFlags {
+    data_mb: Option<u64>,
+    entries: Option<u64>,
+    cpu_percent: Option<u64>,
+    cpu_ms_per_min: Option<u64>,
+    egress_mb_per_hour: Option<f64>,
+}
+
+const LIMITS_FIX: &str = "pass at least one of --data-mb, --entries, --cpu-percent (1 to 100) or --cpu-ms-per-min, --egress-mb-per-hour, each above 0";
+
+impl LimitFlags {
+    /// The fields to send, as the server names them, checked here so a typo never reaches it.
+    fn fields(&self) -> R<serde_json::Map<String, Value>> {
+        let bad = |m: String| err("bad_limits", m, LIMITS_FIX);
+        let mut m = serde_json::Map::new();
+        for (k, v) in [("data_mb", self.data_mb), ("entries", self.entries)] {
+            match v {
+                Some(0) => {
+                    return Err(bad(format!("--{} must be at least 1", k.replace('_', "-"))));
+                }
+                Some(n) => {
+                    m.insert(k.into(), n.into());
+                }
+                None => {}
+            }
+        }
+        let cpu = match (self.cpu_percent, self.cpu_ms_per_min) {
+            (Some(p), _) if !(1..=100).contains(&p) => {
+                return Err(bad(format!("--cpu-percent is {p}; it takes 1 to 100")));
+            }
+            (Some(p), _) => Some(p * 600),
+            (None, Some(0)) => return Err(bad("--cpu-ms-per-min must be at least 1".into())),
+            (None, ms) => ms,
+        };
+        if let Some(c) = cpu {
+            m.insert("cpu_ms_per_min".into(), c.into());
+        }
+        if let Some(mb) = self.egress_mb_per_hour {
+            let bytes = (mb * 1_048_576.0).round();
+            if !mb.is_finite() || bytes < 1.0 {
+                return Err(bad(format!(
+                    "--egress-mb-per-hour is {mb}; it takes a number above 0, such as 50 or 0.5"
+                )));
+            }
+            m.insert("egress_bytes_per_hour".into(), (bytes as u64).into());
+        }
+        if m.is_empty() {
+            return Err(bad("no limit given".into()));
+        }
+        Ok(m)
+    }
+}
+
+/// The server's answer for an app's limits; a server without the route predates them.
+async fn limits_call(base: &str, method: &str, name: &str, body: Option<Value>) -> R<Value> {
+    let (headers, bytes) = match &body {
+        Some(b) => (
+            vec![("content-type", "application/json".to_string())],
+            Bytes::from(b.to_string()),
+        ),
+        None => (vec![], Bytes::new()),
+    };
+    let r = admin(
+        base,
+        &token()?,
+        method,
+        &format!("/v1/apps/{name}/limits"),
+        &headers,
+        bytes,
+    )
+    .await
+    .map_err(|mut e| {
+        if e.kind == "no_route" {
+            e = err(
+                "limits_unsupported",
+                format!("the server at {base} is a spared version without per-app limits"),
+                "upgrade spared on that server to this CLI's version",
+            );
+        } else if e.kind == "wrong_scope" {
+            e.fix = "per-app limits take the admin token: an app token can never read or change them. Run this with the server's <data-dir>/admin-token in SPARED_TOKEN".into();
+        }
+        e
+    })?;
+    json_body(&r)
+}
+
+async fn cmd_limits_set(
+    name: &str,
+    asked: LimitFlags,
+    server: Option<String>,
+    json: bool,
+) -> R<()> {
+    check_app_name(name)?;
+    let fields = asked.fields()?;
+    let base = server_url(server);
+    // A PUT replaces the whole override, so start from the one stored and change what was given.
+    let now = limits_call(&base, "GET", name, None).await?;
+    let mut body = match &now["override"] {
+        Value::Object(o) => o.clone(),
+        _ => serde_json::Map::new(),
+    };
+    body.extend(fields);
+    let v = limits_call(&base, "PUT", name, Some(Value::Object(body))).await?;
+    if json {
+        out_json(v);
+    } else {
+        println!("set limits for {name}");
+        print_limits(&v);
+    }
+    Ok(())
+}
+
+async fn cmd_limits_show(name: &str, server: Option<String>, json: bool) -> R<()> {
+    check_app_name(name)?;
+    let v = limits_call(&server_url(server), "GET", name, None).await?;
+    if json {
+        out_json(v);
+    } else {
+        print_limits(&v);
+    }
+    Ok(())
+}
+
+async fn cmd_limits_clear(name: &str, server: Option<String>, json: bool) -> R<()> {
+    check_app_name(name)?;
+    let v = limits_call(&server_url(server), "DELETE", name, None).await?;
+    if json {
+        out_json(v);
+    } else {
+        if v["cleared"] == true {
+            println!("cleared the limits of {name}: the server's caps apply again");
+        } else {
+            println!("{name} had no limits of its own: the server's caps apply");
+        }
+        print_limits(&v);
+    }
+    Ok(())
+}
+
+fn print_limits(v: &Value) {
+    let name = v["name"].as_str().unwrap_or("");
+    let eff = &v["effective"];
+    let caps = &v["server_caps"];
+    let u = &v["usage"];
+    let set: Vec<&str> = v["overridden"]
+        .as_array()
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let clamped: Vec<&str> = v["clamped"]
+        .as_array()
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let whence = |k: &str, cap: &Value| {
+        if clamped.contains(&k) {
+            format!("the override is above the server's cap of {cap}, so the cap")
+        } else if set.contains(&k) {
+            format!("override; server cap {cap}")
+        } else {
+            "the server's cap".to_string()
+        }
+    };
+    println!(
+        "{name}: {}",
+        if v["app_exists"] == true {
+            "deployed"
+        } else {
+            "no app deployed under this name"
+        }
+    );
+    if let Some(d) = v["damaged"].as_str() {
+        println!(
+            "  the stored override cannot be read ({d}); the app is not served until it is set or cleared"
+        );
+    }
+    match v["set_at"].as_str() {
+        Some(at) => println!("  override set at {at}"),
+        None => println!("  no override: the server's caps apply"),
+    }
+    let used_data = match (u["data_bytes"].as_u64(), u["data_entries"].as_u64()) {
+        (Some(b), Some(e)) => format!(", used {} and {e} entries", size_text(b)),
+        _ => String::new(),
+    };
+    println!(
+        "  data      {} MB ({}){used_data}",
+        eff["data_mb"],
+        whence("data_mb", &caps["data_mb"])
+    );
+    println!(
+        "  entries   {} ({})",
+        eff["entries"],
+        whence("entries", &caps["entries"])
+    );
+    match eff["cpu_ms_per_min"].as_u64() {
+        Some(c) => println!(
+            "  cpu       {c} ms per minute, {:.1}% of a core ({}); used {} ms of the {} s bucket, {} ms left, {} requests refused, {} ms since start",
+            c as f64 / 600.0,
+            whence("cpu_ms_per_min", &caps["cpu_ms_per_min"]),
+            u["cpu_ms_in_window"],
+            u["cpu_window_secs"],
+            u["cpu_ms_left"],
+            u["cpu_refused"],
+            u["cpu_ms_total"]
+        ),
+        None => println!(
+            "  cpu       no budget over time (each request is still held to its cpu_ms); {} ms since start",
+            u["cpu_ms_total"]
+        ),
+    }
+    match eff["egress_bytes_per_hour"].as_u64() {
+        Some(b) => println!(
+            "  egress    {} per hour; used {} of it, {} calls or bodies refused, {} since start",
+            size_text(b),
+            size_text(u["egress_bytes_in_window"].as_u64().unwrap_or(0)),
+            u["egress_refused"],
+            size_text(u["egress_bytes_total"].as_u64().unwrap_or(0))
+        ),
+        None => println!(
+            "  egress    no budget; {} since start",
+            size_text(u["egress_bytes_total"].as_u64().unwrap_or(0))
+        ),
+    }
+    println!("  counters start over when the server restarts or the app is removed");
+}
+
+/// A byte count for a person: B, KiB, MiB or GiB.
+fn size_text(b: u64) -> String {
+    match b {
+        b if b >= 1 << 30 => format!("{:.1} GiB", b as f64 / (1u64 << 30) as f64),
+        b if b >= 1 << 20 => format!("{:.1} MiB", b as f64 / (1u64 << 20) as f64),
+        b if b >= 1 << 10 => format!("{:.1} KiB", b as f64 / 1024.0),
+        b => format!("{b} B"),
+    }
 }
 
 fn check_app_name(name: &str) -> R<()> {
