@@ -1,0 +1,21 @@
+[package]
+name = "p3-probe"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+# A wasip3 test guest for runtime = "wasip3-experimental". It builds for wasm32-wasip2 with the
+# wasip3 crate, as that crate's README says. crates/spared/tests/wasip3.rs builds and deploys it.
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wasip3 = { version = "=0.10.0", features = ["async-spawn"] }
+
+[profile.release]
+opt-level = 2
+debug = 0
+strip = true
+
+[workspace]

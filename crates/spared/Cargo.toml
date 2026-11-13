@@ -8,11 +8,12 @@ description.workspace = true
 publish.workspace = true
 
 [dependencies]
-wasmtime = "50.0.1"
+wasmtime = { version = "50.0.1", features = ["task-group-hook"] }
 wasmtime-wasi = "50.0.1"
 clap = { version = "4", features = ["derive", "env"] }
 serde_json = "1"
 wasmtime-wasi-http = "50.0.1"
+futures = { version = "0.3", default-features = false, features = ["std"] }
 tokio = { version = "1.54.1", features = ["rt", "rt-multi-thread", "macros", "time", "net", "io-util"] }
 hyper = { version = "1", features = ["client", "http1", "server"] }
 http-body-util = "0.1.5"

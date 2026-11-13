@@ -33,6 +33,7 @@ spared deploy                  # prints http://my-links.localhost:8080/
 | `webhook` | Receive any JSON, store it with a timestamp, list the last 50 (newest first). `POST /hook` and `GET /events` need the `x-webhook-secret` header. | `GET /` (a one-line help text), `POST /hook`, `GET /events` |
 | `fetcher` | An outbound HTTPS call to a host you grant, returning its status and size. | `GET /`, `GET /fetch` |
 | `blog` | A posts table, list and single-post pages as HTML, and a bearer-token publish endpoint. | `GET /`, `GET /posts/<slug>`, `POST /api/posts` |
+| `fetcher3` | EXPERIMENTAL. The `fetcher` call on the wasip3 runtime: one instance serves several requests at once. No database, and the server needs `--experimental-wasip3`. | `GET /`, `GET /fetch` |
 
 ### Two constants you must change
 
@@ -49,6 +50,10 @@ curl -X POST -H 'authorization: Bearer <your TOKEN>' \
 ### The `fetcher` grant
 
 `fetcher` calls `https://example.com/`. Two edits point it elsewhere: the `HOST` constant in `src/main.rs` and the `fetch = ["example.com"]` line in `spared.toml`. Keep them equal. A request to a host that is not in `fetch` is refused, and so is a listed host whose name resolves to a private, loopback, link-local or metadata address. `spared test` only requests `/`, which makes no outbound call, so it passes offline. Hit `/fetch` on a deployed app to make the call. If the network rewrites HTTPS certificates, set `SPARED_EXTRA_CA_FILE` for `spared serve` (see the troubleshooting table in AGENTS.md).
+
+### `fetcher3` is EXPERIMENTAL
+
+`fetcher3` is not like the others. Its `spared.toml` says `runtime = "wasip3-experimental"` and `data = false`, its handler in `src/lib.rs` uses the `wasip3` crate instead of wstd, and it has no `src/spared.rs` and no database. It deploys only to a server started with `--experimental-wasip3`. One crash or timeout fails every request in flight in its instance. [docs/wasip3.md](wasip3.md) has what it gives up. The `HOST` constant and the `fetch` line work as in `fetcher`.
 
 ## Start from one and adapt it
 

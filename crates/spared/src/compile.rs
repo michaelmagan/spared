@@ -6,6 +6,8 @@ use std::time::{Duration, Instant};
 use wasmparser::{Parser, Payload};
 use wasmtime::Engine;
 
+use crate::grants::Runtime;
+
 const WORKER_FAILED: i32 = 2;
 const STDERR_KEPT: usize = 8 << 10;
 
@@ -103,24 +105,32 @@ pub fn prescan(wasm: &[u8], l: &CompileLimits) -> Result<(), CompileError> {
     Ok(())
 }
 
-pub fn compile(
+/// Compile for `runtime`: `engine` must be [`crate::sandbox::engine_for`] that runtime, and the
+/// compile process builds its own engine the same way.
+pub fn compile_for(
     engine: &Engine,
     l: &CompileLimits,
     wasm: &[u8],
     scan: bool,
+    runtime: Runtime,
 ) -> Result<Vec<u8>, CompileError> {
     if scan {
         prescan(wasm, l)?;
     }
     match &l.exe {
-        Some(exe) => isolated(exe, l, wasm),
+        Some(exe) => isolated(exe, l, wasm, runtime),
         None => engine
             .precompile_component(wasm)
             .map_err(|e| CompileError::Invalid(format!("{e:#}"))),
     }
 }
 
-fn isolated(exe: &PathBuf, l: &CompileLimits, wasm: &[u8]) -> Result<Vec<u8>, CompileError> {
+fn isolated(
+    exe: &PathBuf,
+    l: &CompileLimits,
+    wasm: &[u8],
+    runtime: Runtime,
+) -> Result<Vec<u8>, CompileError> {
     let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     let failed = |what: &str, e: std::io::Error| CompileError::Failed(format!("{what}: {e}"));
     let mut cmd = Command::new(exe);
@@ -129,6 +139,7 @@ fn isolated(exe: &PathBuf, l: &CompileLimits, wasm: &[u8]) -> Result<Vec<u8>, Co
         .arg((l.memory_bytes >> 20).to_string())
         .arg("--cpu-secs")
         .arg((l.timeout.as_secs() * l.threads.max(1) as u64 + 5).to_string())
+        .args(runtime.is_p3().then_some("--wasip3"))
         .env_clear()
         .env("RAYON_NUM_THREADS", l.threads.max(1).to_string())
         .stdin(Stdio::piped())
@@ -194,7 +205,7 @@ fn isolated(exe: &PathBuf, l: &CompileLimits, wasm: &[u8]) -> Result<Vec<u8>, Co
     }
 }
 
-pub fn worker_main(memory_mb: u64, cpu_secs: u64) -> ! {
+pub fn worker_main(memory_mb: u64, cpu_secs: u64, wasip3: bool) -> ! {
     #[cfg(target_os = "linux")]
     unsafe {
         libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
@@ -215,9 +226,13 @@ pub fn worker_main(memory_mb: u64, cpu_secs: u64) -> ! {
         .read_to_end(&mut wasm)
         .map_err(|e| e.to_string())
         .and_then(|_| {
-            crate::sandbox::engine()
-                .and_then(|e| e.precompile_component(&wasm))
-                .map_err(|e| format!("{e:#}"))
+            crate::sandbox::engine_for(if wasip3 {
+                Runtime::Wasip3Experimental
+            } else {
+                Runtime::Wasip2
+            })
+            .and_then(|e| e.precompile_component(&wasm))
+            .map_err(|e| format!("{e:#}"))
         });
     match result {
         Ok(cwasm) => {
@@ -318,10 +333,23 @@ mod tests {
     fn without_a_worker_process_the_engine_compiles_in_place() {
         let engine = crate::sandbox::engine().unwrap();
         let wasm = function(3, 3);
-        let cwasm = compile(&engine, &CompileLimits::default(), &wasm, true).unwrap();
+        let cwasm = compile_for(
+            &engine,
+            &CompileLimits::default(),
+            &wasm,
+            true,
+            Runtime::Wasip2,
+        )
+        .unwrap();
         assert!(!cwasm.is_empty());
         assert!(matches!(
-            compile(&engine, &CompileLimits::default(), b"junk", true),
+            compile_for(
+                &engine,
+                &CompileLimits::default(),
+                b"junk",
+                true,
+                Runtime::Wasip2
+            ),
             Err(CompileError::Invalid(_))
         ));
     }
@@ -334,7 +362,7 @@ mod tests {
         };
         let engine = crate::sandbox::engine().unwrap();
         assert!(matches!(
-            compile(&engine, &l, &function(1, 1), true),
+            compile_for(&engine, &l, &function(1, 1), true, Runtime::Wasip2),
             Err(CompileError::Failed(_))
         ));
     }

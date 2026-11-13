@@ -1,0 +1,19 @@
+name = "__NAME__"
+# EXPERIMENTAL: several requests at once in one instance. The server must run with
+# --experimental-wasip3, and the app may not have data. Read docs/wasip3.md first.
+runtime = "wasip3-experimental"
+
+[grants]
+data = false
+# Outbound HTTPS is allowed only to the hosts listed here, and keep it in step with HOST in
+# src/lib.rs. "*.example.com" would match subdomains only. Private addresses are refused anyway.
+fetch = ["example.com"]
+
+[limits]
+memory_mb = 64
+cpu_ms = 1000
+deadline_ms = 5000
+max_outbound = 10
+# Requests one instance may have in flight. Leave it out for the server's --max-app-concurrency
+# (4 unless the operator changed it). It may ask for less, never more.
+concurrency = 4

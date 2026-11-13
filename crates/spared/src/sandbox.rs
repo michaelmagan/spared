@@ -1,5 +1,7 @@
 use crate::fsguard::{AppCaps, FsGuard};
-use crate::grants::{Grants, Manifest, host_allowed, ip_denied, norm_host, ungranted_imports};
+use crate::grants::{
+    Grants, Manifest, Runtime, host_allowed, ip_denied, norm_host, ungranted_imports,
+};
 use crate::quota::{AppQuota, EGRESS_REFUSED};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, LengthLimitError, Limited};
@@ -58,6 +60,46 @@ pub fn engine_config() -> Config {
 
 pub fn engine() -> wasmtime::Result<Engine> {
     Engine::new(&engine_config())
+}
+
+/// EXPERIMENTAL: the engine for `runtime = "wasip3-experimental"` apps. The same as
+/// [`engine_config`] with component-model async on, and nothing else: stackful async, threading
+/// and error contexts stay off. wasip2 apps never run on it, so they keep today's engine.
+pub fn engine_config_p3() -> Config {
+    let mut c = engine_config();
+    c.wasm_component_model_async(true);
+    c
+}
+
+pub fn engine_p3() -> wasmtime::Result<Engine> {
+    Engine::new(&engine_config_p3())
+}
+
+/// The process's one wasip3 engine, with its epoch ticker, made the first time it is asked for. A
+/// server without `--experimental-wasip3` never asks.
+pub fn shared_engine_p3() -> wasmtime::Result<&'static Engine> {
+    static ENGINE: std::sync::OnceLock<Engine> = std::sync::OnceLock::new();
+    if let Some(e) = ENGINE.get() {
+        return Ok(e);
+    }
+    let made = engine_p3()?;
+    let mut first = false;
+    let e = ENGINE.get_or_init(|| {
+        first = true;
+        made
+    });
+    if first {
+        start_epoch_ticker(e);
+    }
+    Ok(e)
+}
+
+/// The engine that compiles and runs components of `runtime`.
+pub fn engine_for(runtime: Runtime) -> wasmtime::Result<Engine> {
+    match runtime {
+        Runtime::Wasip2 => engine(),
+        Runtime::Wasip3Experimental => engine_p3(),
+    }
 }
 
 /// Advance the engine's epoch about every millisecond, on a thread of its own. The epoch is the
@@ -129,6 +171,18 @@ impl wasi_io_error::HostError for ErrorText<'_> {
     fn to_debug_string(&mut self, err: Resource<wasi_io_error::Error>) -> wasmtime::Result<String> {
         Ok(guest_error_text(self.0.get(&err)?))
     }
+}
+
+/// EXPERIMENTAL: the linker for wasip3-experimental instances. The wasip2 interfaces std uses
+/// (cli, clocks, random, io, and the guarded filesystem, which the import check refuses because
+/// these apps have no data), plus wasi:clocks and wasi:random 0.3 and wasi:http 0.3 types and
+/// client. wasi:filesystem, wasi:sockets and wasi:cli 0.3 are never linked.
+pub fn linker_p3(engine: &Engine) -> wasmtime::Result<Linker<Guarded>> {
+    let mut linker = linker(engine)?;
+    wasmtime_wasi::p3::clocks::add_to_linker(&mut linker)?;
+    wasmtime_wasi::p3::random::add_to_linker(&mut linker)?;
+    wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
+    Ok(linker)
 }
 
 /// Link `component` against [`linker`]: the step that rejects a component whose imports or
@@ -214,12 +268,37 @@ pub fn import_fix(bad: &[String]) -> String {
     {
         fix.push_str("the app makes outbound HTTP calls: add `fetch = [\"api.example.com\"]` under [grants] in spared.toml. ");
     }
-    if bad.iter().any(|b| b.starts_with("wasi:sockets")) {
+    if bad.iter().any(|b| b.starts_with("wasi:http/client")) {
+        fix.push_str("the app makes outbound HTTP calls: add `fetch = [\"api.example.com\"]` under [grants] in spared.toml. ");
+    }
+    let p3_only = |b: &String| {
+        ["wasi:filesystem/", "wasi:sockets/", "wasi:cli/"]
+            .iter()
+            .any(|p| b.starts_with(p))
+            && b.contains("@0.3.")
+    };
+    if bad.iter().any(p3_only) {
+        fix.push_str("wasi:filesystem, wasi:sockets and wasi:cli 0.3 are never granted: a wasip3-experimental app has no files or sockets, and its console output goes through std (wasi:cli 0.2). ");
+    } else if bad.iter().any(|b| b.contains("@0.3.")) {
+        fix.push_str("wasi 0.3 interfaces need `runtime = \"wasip3-experimental\"` in spared.toml, on a server started with --experimental-wasip3. ");
+    }
+    if bad.iter().any(|b| !b.contains('@')) {
+        fix.push_str(
+            "every import must name a WASI version, as the wasm32-wasip2 toolchain writes it. ",
+        );
+    }
+    if bad
+        .iter()
+        .any(|b| b.starts_with("wasi:sockets") && !b.contains("@0.3."))
+    {
         fix.push_str(
             "raw sockets cannot be granted: use HTTP through the wstd client instead of std::net. ",
         );
     }
-    if bad.iter().any(|b| b.starts_with("wasi:filesystem")) {
+    if bad
+        .iter()
+        .any(|b| b.starts_with("wasi:filesystem") && b.contains("@0.2."))
+    {
         fix.push_str("the app uses files: set `data = true` under [grants]. ");
     }
     if fix.is_empty() {
@@ -234,8 +313,9 @@ pub fn check_component(
     engine: &Engine,
     component: &Component,
     grants: &Grants,
+    runtime: Runtime,
 ) -> Result<(), Refusal> {
-    let bad = ungranted_imports(engine, component, grants);
+    let bad = ungranted_imports(engine, component, grants, runtime);
     if !bad.is_empty() {
         return Err(Refusal {
             kind: "ungranted_import",
@@ -245,6 +325,16 @@ pub fn check_component(
             ),
             fix: import_fix(&bad),
         });
+    }
+    if runtime.is_p3() {
+        if crate::p3::handler_export(engine, component).is_none() {
+            return Err(Refusal {
+                kind: "no_http_handler",
+                message: "component does not export wasi:http/handler@0.3".into(),
+                fix: "export the handler with wasip3::http::service::export!(...) from a cdylib built for wasm32-wasip2 (the fetcher3 template shows how)".into(),
+            });
+        }
+        return Ok(());
     }
     if !component
         .component_type()
@@ -267,6 +357,9 @@ pub struct PolicyHooks {
     pub per_request: u32,
     /// The app's egress budget and byte count, kept by the server outside the instance.
     pub quota: Option<Arc<AppQuota>>,
+    /// wasip3-experimental: the per-request budgets by task group. `max_outbound` is taken from
+    /// the running request's there instead of from `remaining`.
+    pub p3: Option<Arc<crate::p3::Attribution>>,
     /// Unit tests only: reach a loopback test server, which [`ip_denied`] always refuses.
     #[cfg(test)]
     pub test_loopback: bool,
@@ -398,8 +491,14 @@ impl WasiHttpHooks for PolicyHooks {
                     443
                 });
         let listed = host_allowed(&self.allow, &host);
-        let budget = self.remaining > 0;
-        self.remaining = self.remaining.saturating_sub(1);
+        let budget = match &self.p3 {
+            Some(a) => a.take_outbound(),
+            None => {
+                let left = self.remaining > 0;
+                self.remaining = self.remaining.saturating_sub(1);
+                left
+            }
+        };
         let loopback_ok = self.loopback_allowed();
         let quota = self.quota.clone();
         let req_head = request.method().as_str().len() as u64
@@ -607,6 +706,8 @@ pub struct Guarded {
     pub cpu_used: u64,
     /// Time the guest's calls have been polled this request; [`call_handler`] drives it.
     pub clock: Arc<PollClock>,
+    /// wasip3-experimental: the per-request budgets by task group.
+    pub p3: Option<Arc<crate::p3::Attribution>>,
 }
 
 /// Host-side caps that wasmtime does not count against `memory_mb`.
@@ -651,6 +752,7 @@ impl Guarded {
                     remaining: m.limits.max_outbound,
                     per_request: m.limits.max_outbound,
                     quota,
+                    p3: None,
                     #[cfg(test)]
                     test_loopback: false,
                 },
@@ -660,6 +762,7 @@ impl Guarded {
                 cpu_budget: m.limits.cpu_ms,
                 cpu_used: 0,
                 clock: Arc::new(PollClock::new()),
+                p3: None,
             },
         );
         store.limiter(|s| &mut s.limits);
@@ -722,7 +825,7 @@ impl TrapKind {
 
 /// Classify a trap from the error's type, not its text: `Trap::Interrupt` is the CPU budget, and
 /// a trap after `memory_mb` refused a growth (`memory_denied`) is the memory limit.
-fn trap_kind(error: &wasmtime::Error, memory_denied: bool) -> TrapKind {
+pub(crate) fn trap_kind(error: &wasmtime::Error, memory_denied: bool) -> TrapKind {
     if error.downcast_ref::<Trap>() == Some(&Trap::Interrupt) {
         TrapKind::CpuLimit
     } else if memory_denied {
@@ -888,7 +991,7 @@ mod tests {
         let engine = engine().unwrap();
         let wasm = wat::parse_str(wat).unwrap();
         let comp = Component::new(&engine, wasm).unwrap();
-        check_component(&engine, &comp, grants).err()
+        check_component(&engine, &comp, grants, Runtime::Wasip2).err()
     }
 
     fn grants(data: bool, fetch: &[&str]) -> Grants {
@@ -913,6 +1016,72 @@ mod tests {
         let wat = r#"(component (import "wasi:filesystem/types@0.2.0" (instance)))"#;
         let r = refusal(wat, &grants(false, &[])).expect("refused without data");
         assert!(r.fix.contains("data = true"), "{}", r.fix);
+    }
+
+    #[test]
+    fn imports_are_matched_with_their_version() {
+        for name in [
+            "wasi:filesystem/types@0.3.0",
+            "wasi:filesystem/preopens@0.3.2",
+            "wasi:sockets/types@0.3.0",
+            "wasi:filesystem/types",
+            "wasi:cli/stdout",
+            "wasi:filesystem/types@1.0.0",
+        ] {
+            let wat = format!(r#"(component (import "{name}" (instance)))"#);
+            let r = refusal(&wat, &grants(true, &["example.com"])).expect(name);
+            assert_eq!(r.kind, "ungranted_import", "{name}");
+            assert!(r.message.contains(name), "{}", r.message);
+        }
+    }
+
+    #[test]
+    fn a_wasip3_app_never_gets_filesystem_sockets_or_cli_0_3() {
+        let engine = engine_p3().unwrap();
+        let check = |name: &str| {
+            let wat = format!(r#"(component (import "{name}" (instance)))"#);
+            let comp = Component::new(&engine, wat::parse_str(&wat).unwrap()).unwrap();
+            check_component(
+                &engine,
+                &comp,
+                &grants(true, &["example.com"]),
+                Runtime::Wasip3Experimental,
+            )
+            .err()
+        };
+        for name in [
+            "wasi:filesystem/types@0.3.0",
+            "wasi:filesystem/preopens@0.3.2",
+            "wasi:sockets/types@0.3.0",
+            "wasi:sockets/ip-name-lookup@0.3.0",
+            "wasi:cli/stdout@0.3.0",
+            "wasi:http/outgoing-handler@0.2.4",
+        ] {
+            let r = check(name).expect(name);
+            assert_eq!(r.kind, "ungranted_import", "{name}");
+            assert!(r.message.contains(name), "{}", r.message);
+        }
+        let r = check("wasi:sockets/types@0.3.0").unwrap();
+        assert!(r.fix.contains("never granted"), "{}", r.fix);
+        for granted in [
+            "wasi:http/types@0.3.0",
+            "wasi:http/client@0.3.2",
+            "wasi:clocks/monotonic-clock@0.3.2",
+            "wasi:cli/stdout@0.2.9",
+        ] {
+            assert_eq!(check(granted).unwrap().kind, "no_http_handler", "{granted}");
+        }
+    }
+
+    #[test]
+    fn a_wasip2_app_cannot_import_wasi_0_3() {
+        let r = refusal(
+            r#"(component (import "wasi:http/types@0.3.0" (instance)))"#,
+            &grants(false, &[]),
+        )
+        .expect("refused");
+        assert_eq!(r.kind, "ungranted_import");
+        assert!(r.fix.contains("wasip3-experimental"), "{}", r.fix);
     }
 
     #[test]
@@ -1038,6 +1207,7 @@ mod tests {
             remaining: 100,
             per_request: 100,
             quota: Some(quota.clone()),
+            p3: None,
             test_loopback: true,
         }
     }

@@ -35,7 +35,19 @@ impl Default for LogCaps {
     }
 }
 
+/// Where a request's log allowance is kept when it is not this log's own: a wasip3-experimental
+/// instance has several requests in flight and keeps one allowance per request.
+pub trait RequestLog: Send + Sync {
+    /// Bytes the running request may still write.
+    fn left(&self) -> u64;
+    fn spend(&self, n: u64);
+    /// True the first time the running request has output dropped.
+    fn first_drop(&self) -> bool;
+}
+
 struct State {
+    /// Set for a wasip3-experimental instance, and `request_left` and `noted` are then unused.
+    request: Option<Arc<dyn RequestLog>>,
     file: std::fs::File,
     size: u64,
     request_left: u64,
@@ -70,6 +82,7 @@ impl AppLog {
             path,
             caps,
             state: Arc::new(Mutex::new(State {
+                request: None,
                 file,
                 size,
                 request_left: caps.per_request,
@@ -88,6 +101,11 @@ impl AppLog {
         s.noted = false;
     }
 
+    /// Keep the per-request allowance in `request` from now on.
+    pub fn attach(&self, request: Arc<dyn RequestLog>) {
+        self.state.lock().unwrap().request = Some(request);
+    }
+
     /// Bytes dropped over the life of this instance.
     #[cfg(test)]
     pub fn dropped(&self) -> u64 {
@@ -100,13 +118,21 @@ impl AppLog {
             s.window_start = Instant::now();
             s.window_left = self.caps.per_second;
         }
-        let allowed = (bytes.len() as u64).min(s.request_left).min(s.window_left);
+        let request = s.request.clone();
+        let request_left = match &request {
+            Some(r) => r.left(),
+            None => s.request_left,
+        };
+        let allowed = (bytes.len() as u64).min(request_left).min(s.window_left);
         let kept = &bytes[..allowed as usize];
         if allowed < bytes.len() as u64 {
             s.dropped += bytes.len() as u64 - allowed;
-            if !s.noted {
-                s.noted = true;
-                let why = if s.request_left == 0 || allowed == s.request_left {
+            let first = match &request {
+                Some(r) => r.first_drop(),
+                None => !std::mem::replace(&mut s.noted, true),
+            };
+            if first {
+                let why = if request_left == 0 || allowed == request_left {
                     "this request wrote more than the per-request log limit"
                 } else {
                     "this app wrote more than the per-second log limit"
@@ -115,7 +141,10 @@ impl AppLog {
                 let _ = Self::write_rotating(&mut s, &self.path, note.as_bytes());
             }
         }
-        s.request_left -= allowed;
+        match &request {
+            Some(r) => r.spend(allowed),
+            None => s.request_left -= allowed,
+        }
         s.window_left -= allowed;
         if kept.is_empty() {
             return Ok(());

@@ -21,7 +21,7 @@ The deployed wasm is stored beside its compiled file (`components/<sha256>.wasm`
 
 ## One instance per app
 
-Requests to one app go through a single instance, guarded by a lock in the host (`crates/spared/src/server.rs`). Requests to the same app run one after another. Different apps run concurrently on the host's async runtime.
+Requests to one app go through a single instance, guarded by a lock in the host (`crates/spared/src/server.rs`). Requests to the same app run one after another. The EXPERIMENTAL `wasip3-experimental` runtime is the exception: its instance has up to `concurrency` requests in flight ([wasip3.md](wasip3.md)). Different apps run concurrently on the host's async runtime.
 
 Consequences:
 
@@ -122,7 +122,7 @@ The engine turns on only what the guest toolchain (Rust for `wasm32-wasip2`, was
 | Multiple memories | off | each module has one memory |
 | Tail calls | off | not emitted by the toolchain |
 | Wide arithmetic, extended constant expressions, stack switching, custom page sizes | off | not emitted by the toolchain |
-| Component-model async, threading, error contexts, extra proposals | off | the WASI 0.2 interfaces apps use are synchronous |
+| Component-model async, threading, error contexts, extra proposals | off | the WASI 0.2 interfaces apps use are synchronous. EXPERIMENTAL: `wasip3-experimental` apps run on a second engine that turns component-model async on and nothing else ([wasip3.md](wasip3.md)) |
 
 ## Compiling an upload
 
@@ -134,7 +134,7 @@ The limits apply to new uploads. A component already in the store is not scanned
 
 A deploy validates everything first: manifest, component, imports, handler export, and that the host can link the component (the step that used to run only when the app was loaded afterwards). Only then does it write files: the stored component, then the new manifest, hash, version and component links as synced `*.tmp` files, then a synced `release.pending` marker, then the renames into place. The marker is the commit point. A crash before it leaves the previous version; a crash after it is finished at the next start, so the app directory never settles with a new manifest beside an old component. The new in-memory app is built before the commit and swapped into the app table after it, then the old instance is dropped. The app's data directory is untouched, so state survives a redeploy.
 
-Limits of this claim: it relies on `fsync` and `rename` doing what the file system says, and no power-loss test has been run. Requests already running on the old instance are not shown to be drained.
+Limits of this claim: it relies on `fsync` and `rename` doing what the file system says, and no power-loss test has been run. Requests already running on the old instance are not shown to be drained, except for `wasip3-experimental` apps, where a test shows a redeploy waiting for the requests in flight.
 
 ## Backups
 

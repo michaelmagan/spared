@@ -2,7 +2,7 @@ use crate::backup;
 use crate::compile::{self, CompileError, CompileLimits};
 use crate::datadir;
 use crate::fsguard::AppCaps;
-use crate::grants::{Manifest, Maxima, ungranted_imports, valid_name};
+use crate::grants::{Manifest, Maxima, Runtime, ungranted_imports, valid_name};
 use crate::logcap::AppLog;
 use crate::obs::{AccessLine, ErrorKind, Evicted, Gauges, Listener, Metrics, RequestIds};
 use crate::prefetch;
@@ -58,6 +58,12 @@ pub struct Config {
     pub compile: CompileLimits,
     /// Off-machine backups (`--backup-to`), checked at start; `None` when not configured.
     pub remote: Option<crate::remote::Settings>,
+    /// EXPERIMENTAL: serve apps with `runtime = "wasip3-experimental"` (`--experimental-wasip3`).
+    pub wasip3: bool,
+    /// Unit tests only: let wasip3 apps reach a loopback test server, which [`crate::grants::ip_denied`]
+    /// always refuses.
+    #[cfg(test)]
+    pub test_loopback: bool,
 }
 
 const ADMIN_CONNECTIONS: usize = 32;
@@ -69,19 +75,67 @@ const DEPLOY_BODY_TIMEOUT: Duration = Duration::from_secs(120);
 const LOG_TAIL_BYTES: u64 = 1 << 20;
 /// Response header that carries the request's id, the `request_id` of its access-log line.
 const REQUEST_ID_HEADER: &str = "x-spared-request-id";
+/// What `spared ps` says about every wasip3-experimental app.
+const WASIP3_WARNING: &str = "EXPERIMENTAL runtime wasip3-experimental: one crash or timeout fails every request in flight in the instance, compute in one request holds up the others, and it runs on wasmtime code whose authors mark it not ready for production (docs/wasip3.md)";
 const PATH_ROUTING_WARNING: &str = "path routing (/_/<app>/) is on: every app is served from one browser origin, so any app's pages can read and change other apps' data in a visitor's browser. Use it only for the bundled examples; give each app its own host (<app>.<domain>) for anything else";
 
-struct Live {
-    store: Store<Guarded>,
-    proxy: Proxy,
+enum Live {
+    P2 {
+        store: Store<Guarded>,
+        proxy: Proxy,
+    },
+    /// EXPERIMENTAL: a wasip3 instance, which requests use without holding the instance lock.
+    P3(Arc<crate::p3::Instance>),
+}
+
+impl Live {
+    /// Release the instance. A wasip3 instance takes no more requests and finishes the ones in
+    /// flight first, for at most the app's `deadline_ms`. Whoever holds the instance lock while
+    /// this runs keeps new requests waiting, as a wasip2 request in flight does.
+    async fn retire(self) {
+        if let Live::P3(i) = self {
+            i.drain().await;
+        }
+    }
+
+    /// Whether requests are in flight that do not hold the instance lock (wasip3 only).
+    fn busy(&self) -> bool {
+        matches!(self, Live::P3(i) if i.in_flight() > 0)
+    }
+}
+
+/// How instances of a component are made: the wasip2 proxy, or the EXPERIMENTAL wasip3 service.
+enum Pre {
+    P2(ProxyPre<Guarded>),
+    P3(wasmtime_wasi_http::p3::bindings::ServicePre<Guarded>),
+}
+
+/// The component cache and store key: a wasip3 component is compiled by another engine, so the
+/// same wasm deployed as both runtimes is two compiled files.
+fn cache_key(hash: &str, runtime: Runtime) -> String {
+    match runtime {
+        Runtime::Wasip2 => hash.to_string(),
+        Runtime::Wasip3Experimental => format!("{hash}.p3"),
+    }
+}
+
+/// The refusal of a wasip3-experimental app on a server that does not serve them.
+fn wasip3_off() -> DeployError {
+    DeployError::new(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "experimental_runtime_off",
+        "spared.toml says runtime = \"wasip3-experimental\", and this server does not serve that EXPERIMENTAL runtime".into(),
+        "the operator can start the server with `spared serve --experimental-wasip3` (read docs/wasip3.md first: one crash or timeout fails every request in flight in an instance), or remove the runtime line and build the app for wasip2",
+    )
 }
 
 /// A compiled component and its pre-linked instance template, shared by every app that deployed
 /// the same bytes. Per-app state (manifest, limits, store, data) never lives here.
 struct SharedComponent {
     hash: String,
+    runtime: Runtime,
     component: Component,
-    pre: ProxyPre<Guarded>,
+    pre: Pre,
     /// Set at the first wake of the component in this process, which checks the compiled file
     /// against the page cache once.
     warmed: Arc<AtomicBool>,
@@ -1349,11 +1403,19 @@ impl Server {
             .join(format!("{hash}.wasm"))
     }
 
-    fn component_path(&self, hash: &str) -> PathBuf {
+    fn component_path(&self, hash: &str, runtime: Runtime) -> PathBuf {
         self.cfg
             .data_dir
             .join("components")
-            .join(format!("{hash}.cwasm"))
+            .join(format!("{}.cwasm", cache_key(hash, runtime)))
+    }
+
+    /// The engine that runs components of `runtime`.
+    fn engine_of(&self, runtime: Runtime) -> Result<&Engine> {
+        match runtime {
+            Runtime::Wasip2 => Ok(&self.engine),
+            Runtime::Wasip3Experimental => crate::sandbox::shared_engine_p3(),
+        }
     }
 
     /// Whether a loaded app runs the component with this `hash`.
@@ -1396,7 +1458,11 @@ impl Server {
     fn release_component(&self, hash: &str) {
         let mut cache = self.components.lock().unwrap();
         if !self.component_in_use(hash) {
-            for path in [self.component_path(hash), self.wasm_path(hash)] {
+            for path in [
+                self.component_path(hash, Runtime::Wasip2),
+                self.component_path(hash, Runtime::Wasip3Experimental),
+                self.wasm_path(hash),
+            ] {
                 if std::fs::metadata(&path).is_ok_and(|m| m.nlink() <= 1) {
                     let _ = std::fs::remove_file(&path);
                 }
@@ -1407,8 +1473,8 @@ impl Server {
 
     /// Put a store file back from the app directory's own copy when the store lost it: a store
     /// on a file system without hard links keeps one file per app directory and nothing else.
-    fn reseed_store(&self, hash: &str, app_file: &Path, app_wasm: &Path) {
-        let (stored, stored_wasm) = (self.component_path(hash), self.wasm_path(hash));
+    fn reseed_store(&self, hash: &str, runtime: Runtime, app_file: &Path, app_wasm: &Path) {
+        let (stored, stored_wasm) = (self.component_path(hash, runtime), self.wasm_path(hash));
         if !stored_wasm.is_file()
             && let Ok(w) = std::fs::read(app_wasm)
             && sha256_hex(&w) == hash
@@ -1425,7 +1491,7 @@ impl Server {
     /// The shared compiled component behind `<dir>/component.cwasm`, keyed by the recorded
     /// `component.sha256` (the hash of the deployed wasm). The app directory is pointed at the
     /// stored files, which a recompile may have replaced.
-    fn attach_component(&self, dir: &Path) -> Result<Arc<SharedComponent>> {
+    fn attach_component(&self, dir: &Path, runtime: Runtime) -> Result<Arc<SharedComponent>> {
         let mut cache = self.components.lock().unwrap();
         let (app_file, app_wasm) = (dir.join("component.cwasm"), dir.join("component.wasm"));
         let hash = std::fs::read_to_string(dir.join("component.sha256"))
@@ -1437,9 +1503,9 @@ impl Server {
                     "no valid component.sha256 in the app directory. Fix: redeploy the app",
                 )
             })?;
-        let (stored, stored_wasm) = (self.component_path(&hash), self.wasm_path(&hash));
-        self.reseed_store(&hash, &app_file, &app_wasm);
-        let shared = self.shared_component(&mut cache, &hash)?;
+        let (stored, stored_wasm) = (self.component_path(&hash, runtime), self.wasm_path(&hash));
+        self.reseed_store(&hash, runtime, &app_file, &app_wasm);
+        let shared = self.shared_component(&mut cache, &hash, runtime)?;
         if !same_file(&stored, &app_file) {
             link_replace(&stored, &app_file)?;
         }
@@ -1453,7 +1519,7 @@ impl Server {
     /// renamed into place: the old file may still be mapped). Used when the compiled file was
     /// made by another wasmtime version or engine configuration, which `deserialize_file`
     /// refuses. The wasm is checked against its hash first.
-    fn recompile(&self, hash: &str) -> Result<()> {
+    fn recompile(&self, hash: &str, runtime: Runtime) -> Result<()> {
         let wasm = std::fs::read(self.wasm_path(hash)).map_err(|_| {
             wasmtime::Error::msg(
                 "the stored wasm to recompile from is missing. Fix: redeploy the app",
@@ -1464,9 +1530,15 @@ impl Server {
                 "the stored wasm for {hash} does not match its hash; not compiling it. Fix: redeploy the app"
             )));
         }
-        let cwasm = compile::compile(&self.engine, &self.cfg.compile, &wasm, false)
-            .map_err(|e| wasmtime::Error::msg(compile_error_text(e)))?;
-        let path = self.component_path(hash);
+        let cwasm = compile::compile_for(
+            self.engine_of(runtime)?,
+            &self.cfg.compile,
+            &wasm,
+            false,
+            runtime,
+        )
+        .map_err(|e| wasmtime::Error::msg(compile_error_text(e)))?;
+        let path = self.component_path(hash, runtime);
         let tmp = path.with_extension("cwasm.tmp");
         write_private(&tmp, &cwasm)?;
         std::fs::rename(&tmp, &path)?;
@@ -1497,23 +1569,31 @@ impl Server {
     }
 
     /// Link `component` against the host's WASI and WASI HTTP interfaces.
-    fn link(&self, component: &Component) -> Result<ProxyPre<Guarded>> {
-        crate::sandbox::link(&self.engine, component)
+    fn link(&self, component: &Component, runtime: Runtime) -> Result<Pre> {
+        match runtime {
+            Runtime::Wasip2 => crate::sandbox::link(&self.engine, component).map(Pre::P2),
+            Runtime::Wasip3Experimental => {
+                crate::p3::link(self.engine_of(runtime)?, component).map(Pre::P3)
+            }
+        }
     }
 
     fn shared_component(
         &self,
         cache: &mut HashMap<String, Weak<SharedComponent>>,
         hash: &str,
+        runtime: Runtime,
     ) -> Result<Arc<SharedComponent>> {
-        if let Some(s) = cache.get(hash).and_then(Weak::upgrade) {
+        let key = cache_key(hash, runtime);
+        if let Some(s) = cache.get(&key).and_then(Weak::upgrade) {
             return Ok(s);
         }
-        let path = self.component_path(hash);
-        let component = match unsafe { Component::deserialize_file(&self.engine, &path) } {
+        let path = self.component_path(hash, runtime);
+        let engine = self.engine_of(runtime)?;
+        let component = match unsafe { Component::deserialize_file(engine, &path) } {
             Ok(c) => c,
             Err(e) => {
-                self.recompile(hash).map_err(|r| {
+                self.recompile(hash, runtime).map_err(|r| {
                     wasmtime::Error::msg(format!(
                         "the compiled component cannot be loaded ({e:#}) and recompiling failed: {r:#}"
                     ))
@@ -1521,18 +1601,19 @@ impl Server {
                 eprintln!(
                     "component {hash}: recompiled from the stored wasm (the compiled file was refused: {e:#})"
                 );
-                unsafe { Component::deserialize_file(&self.engine, &path)? }
+                unsafe { Component::deserialize_file(engine, &path)? }
             }
         };
-        let pre = self.link(&component)?;
+        let pre = self.link(&component, runtime)?;
         let s = Arc::new(SharedComponent {
             hash: hash.to_string(),
+            runtime,
             component,
             pre,
             warmed: Arc::new(AtomicBool::new(false)),
         });
         cache.retain(|_, w| w.strong_count() > 0);
-        cache.insert(hash.to_string(), Arc::downgrade(&s));
+        cache.insert(key, Arc::downgrade(&s));
         Ok(s)
     }
 
@@ -1586,7 +1667,23 @@ impl Server {
         shared: Arc<SharedComponent>,
         version: u64,
     ) -> Result<App> {
-        let bad = ungranted_imports(&self.engine, &shared.component, &manifest.grants);
+        let runtime = manifest.runtime;
+        if runtime.is_p3() && !self.cfg.wasip3 {
+            return Err(wasmtime::Error::msg(
+                "its spared.toml says runtime = \"wasip3-experimental\", which this server serves only with --experimental-wasip3. Fix: start the server with --experimental-wasip3 (docs/wasip3.md), or redeploy the app as wasip2",
+            ));
+        }
+        if runtime.is_p3() && manifest.grants.data {
+            return Err(wasmtime::Error::msg(
+                "a wasip3-experimental app cannot have data = true. Fix: redeploy it with data = false",
+            ));
+        }
+        let bad = ungranted_imports(
+            self.engine_of(runtime)?,
+            &shared.component,
+            &manifest.grants,
+            runtime,
+        );
         if !bad.is_empty() {
             return Err(wasmtime::Error::msg(format!(
                 "imports not granted by manifest.toml: {}",
@@ -1636,7 +1733,7 @@ impl Server {
         finish_interrupted_deploy(name, &dir);
         let manifest =
             self.parse_manifest(name, &std::fs::read_to_string(dir.join("manifest.toml"))?)?;
-        let shared = self.attach_component(&dir)?;
+        let shared = self.attach_component(&dir, manifest.runtime)?;
         let version = std::fs::read_to_string(dir.join("version"))
             .ok()
             .and_then(|v| v.trim().parse().ok())
@@ -1693,7 +1790,7 @@ impl Server {
             return;
         }
         let counter = self.metrics.prefetch_bytes.clone();
-        let path = self.component_path(&shared.hash);
+        let path = self.component_path(&shared.hash, shared.runtime);
         tokio::task::spawn_blocking(move || {
             counter.fetch_add(prefetch::read_ahead(&path), Ordering::Relaxed);
         });
@@ -1712,12 +1809,40 @@ impl Server {
         }
         let log = AppLog::open(log_path, self.cfg.caps.log)?;
         let caps = app.quota.caps(&self.cfg.caps);
+        if let Pre::P3(pre) = &app.shared.pre {
+            let wasi = crate::sandbox::wasi_builder(m, &data, &log)?.build();
+            #[allow(unused_mut)]
+            let mut store = crate::p3::store(
+                self.engine_of(Runtime::Wasip3Experimental)?,
+                m,
+                wasi,
+                Some(app.quota.clone()),
+                Some(log),
+                self.cfg.caps.log.per_request,
+            );
+            #[cfg(test)]
+            {
+                store.data_mut().hooks.test_loopback = self.cfg.test_loopback;
+            }
+            let instance = crate::p3::Instance::start(
+                pre,
+                store,
+                m.limits.concurrency_in(&self.cfg.max),
+                Duration::from_millis(m.limits.deadline_ms),
+                Some(app.quota.clone()),
+            )
+            .await?;
+            return Ok(Live::P3(instance));
+        }
+        let Pre::P2(pre) = &app.shared.pre else {
+            unreachable!("the wasip3 case returned above")
+        };
         let mut store =
             crate::sandbox::app_store(&self.engine, m, &data, &log, &caps, Some(app.quota.clone()))
                 .await?;
         store.data_mut().log = Some(log);
-        let proxy = app.shared.pre.instantiate_async(&mut store).await?;
-        Ok(Live { store, proxy })
+        let proxy = pre.instantiate_async(&mut store).await?;
+        Ok(Live::P2 { store, proxy })
     }
 
     async fn serve_app(
@@ -1860,6 +1985,61 @@ impl Server {
         }
     }
 
+    /// Wake the instance into `guard`, within `deadline`. The response to send when that fails.
+    async fn wake_into(
+        &self,
+        app: &App,
+        guard: &mut IdleGuard,
+        deadline: Duration,
+    ) -> Option<Resp> {
+        let limits = &app.manifest.limits;
+        self.hint_cold_component(&app.shared);
+        let woke_at = Instant::now();
+        let woke = tokio::time::timeout(deadline, self.wake(app)).await;
+        app.quota.cpu_charge(woke_at.elapsed().as_nanos() as u64);
+        match woke {
+            Ok(Ok(l)) => {
+                **guard = Some(l);
+                app.hot.store(true, Ordering::Relaxed);
+                app.wakes.fetch_add(1, Ordering::Relaxed);
+                self.metrics.wake();
+                None
+            }
+            Ok(Err(e)) => {
+                app.errors.fetch_add(1, Ordering::Relaxed);
+                note_in_app_log(&app.dir, &format!("wake failed: {e:#}"));
+                Some(err_resp(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "wake_failed",
+                    "the app could not start; the reason is in its log".into(),
+                    "check `spared logs <name>` and the manifest grants",
+                ))
+            }
+            Err(_) => {
+                app.errors.fetch_add(1, Ordering::Relaxed);
+                note_in_app_log(&app.dir, "wake took longer than deadline_ms");
+                Some(err_resp(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    "deadline",
+                    format!(
+                        "starting the app took longer than {} ms",
+                        limits.deadline_ms
+                    ),
+                    "make the app's start-up faster or raise limits.deadline_ms in spared.toml",
+                ))
+            }
+        }
+    }
+
+    /// The response to a request the app answered, after the path-routing fix-ups.
+    fn app_response(resp: http::Response<Bytes>, path_form: bool) -> Resp {
+        let (mut p, b) = resp.into_parts();
+        if path_form {
+            p.headers.remove("service-worker-allowed");
+        }
+        Response::from_parts(p, Full::new(b))
+    }
+
     /// Wake the instance if needed and run one request, both inside the app's `deadline_ms`.
     /// Any failure drops the instance. Details of a failure go to the app's log, not to the
     /// client, which may be anyone.
@@ -1870,66 +2050,33 @@ impl Server {
         req: http::Request<Bytes>,
         path_form: bool,
     ) -> Resp {
+        if app.manifest.runtime.is_p3() {
+            return self.run_request_p3(app, guard, req, path_form).await;
+        }
         let limits = &app.manifest.limits;
         let deadline = Duration::from_millis(limits.deadline_ms);
         let started = Instant::now();
-        if guard.is_none() {
-            self.hint_cold_component(&app.shared);
-            let woke_at = Instant::now();
-            let woke = tokio::time::timeout(deadline, self.wake(&app)).await;
-            app.quota.cpu_charge(woke_at.elapsed().as_nanos() as u64);
-            match woke {
-                Ok(Ok(l)) => {
-                    *guard = Some(l);
-                    app.hot.store(true, Ordering::Relaxed);
-                    app.wakes.fetch_add(1, Ordering::Relaxed);
-                    self.metrics.wake();
-                }
-                Ok(Err(e)) => {
-                    app.errors.fetch_add(1, Ordering::Relaxed);
-                    note_in_app_log(&app.dir, &format!("wake failed: {e:#}"));
-                    return err_resp(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "wake_failed",
-                        "the app could not start; the reason is in its log".into(),
-                        "check `spared logs <name>` and the manifest grants",
-                    );
-                }
-                Err(_) => {
-                    app.errors.fetch_add(1, Ordering::Relaxed);
-                    note_in_app_log(&app.dir, "wake took longer than deadline_ms");
-                    return err_resp(
-                        StatusCode::GATEWAY_TIMEOUT,
-                        "deadline",
-                        format!(
-                            "starting the app took longer than {} ms",
-                            limits.deadline_ms
-                        ),
-                        "make the app's start-up faster or raise limits.deadline_ms in spared.toml",
-                    );
-                }
-            }
+        if guard.is_none()
+            && let Some(r) = self.wake_into(&app, &mut guard, deadline).await
+        {
+            return r;
         }
-        let live = guard.as_mut().unwrap();
+        let Some(Live::P2 { store, proxy }) = guard.as_mut() else {
+            unreachable!("a wasip2 app has a wasip2 instance")
+        };
         let outcome = call_handler(
-            &mut live.store,
-            &live.proxy,
+            store,
+            proxy,
             req,
             deadline.saturating_sub(started.elapsed()),
             self.cfg.max.response_mb << 20,
         )
         .await;
-        app.quota.cpu_charge(live.store.data().clock.used_ns());
+        app.quota.cpu_charge(store.data().clock.used_ns());
         app.requests.fetch_add(1, Ordering::Relaxed);
         app.last_ms.store(self.now_ms(), Ordering::Relaxed);
         let e = match outcome {
-            Ok(resp) => {
-                let (mut p, b) = resp.into_parts();
-                if path_form {
-                    p.headers.remove("service-worker-allowed");
-                }
-                return Response::from_parts(p, Full::new(b));
-            }
+            Ok(resp) => return Self::app_response(resp, path_form),
             Err(CallError::BadRequest(msg)) => {
                 return err_resp(
                     StatusCode::BAD_REQUEST,
@@ -1944,7 +2091,95 @@ impl Server {
         *guard = None;
         app.hot.store(false, Ordering::Relaxed);
         self.metrics.eviction(Evicted::Error);
+        self.call_error(&app, e)
+    }
+
+    /// EXPERIMENTAL: one request to a wasip3 app. The instance lock is held only to wake the
+    /// instance and to wait for a place among its `concurrency` requests in flight, so requests
+    /// start in the order they took the lock. The request then runs without it.
+    async fn run_request_p3(
+        &self,
+        app: Arc<App>,
+        mut guard: IdleGuard,
+        req: http::Request<Bytes>,
+        path_form: bool,
+    ) -> Resp {
+        let limits = &app.manifest.limits;
+        let deadline = Duration::from_millis(limits.deadline_ms);
+        let started = Instant::now();
+        // An instance that trapped, or where a request passed its deadline, takes no more
+        // requests. It is replaced now and finishes what it holds in the background. A request
+        // that waited for a place checks again once it has one, since the instance can close
+        // meanwhile, and goes to a fresh instance if it did.
+        let (instance, slot) = loop {
+            if let Some(Live::P3(i)) = guard.as_ref()
+                && !i.is_open()
+                && let Some(old) = guard.take()
+            {
+                self.metrics.eviction(Evicted::Error);
+                tokio::spawn(old.retire());
+            }
+            if guard.is_none()
+                && let Some(r) = self.wake_into(&app, &mut guard, deadline).await
+            {
+                return r;
+            }
+            let Some(Live::P3(instance)) = guard.as_ref() else {
+                unreachable!("a wasip3 app has a wasip3 instance")
+            };
+            let instance = instance.clone();
+            let left = deadline.saturating_sub(started.elapsed());
+            let slot = match tokio::time::timeout(left, instance.slot()).await {
+                Ok(slot) => slot,
+                Err(_) => {
+                    return app_busy(
+                        &app.name,
+                        "did not get to this request within its deadline_ms",
+                    );
+                }
+            };
+            if let Some(slot) = slot
+                && instance.is_open()
+            {
+                break (instance, slot);
+            }
+        };
+        let pending = instance.send(
+            req,
+            slot,
+            deadline.saturating_sub(started.elapsed()),
+            self.cfg.max.response_mb << 20,
+        );
+        drop(guard);
+        let outcome = instance
+            .wait(pending, deadline.saturating_sub(started.elapsed()))
+            .await;
+        app.requests.fetch_add(1, Ordering::Relaxed);
+        app.last_ms.store(self.now_ms(), Ordering::Relaxed);
+        let e = match outcome {
+            Ok(resp) => return Self::app_response(resp, path_form),
+            Err(e) => e,
+        };
+        app.errors.fetch_add(1, Ordering::Relaxed);
+        if matches!(e, CallError::Deadline) {
+            note_in_app_log(
+                &app.dir,
+                "a request passed deadline_ms: the instance takes no more requests and is dropped within another deadline_ms (EXPERIMENTAL wasip3: the task of that request keeps running until then)",
+            );
+        }
+        self.call_error(&app, e)
+    }
+
+    /// The response to a request that failed in the app.
+    fn call_error(&self, app: &App, e: CallError) -> Resp {
+        let limits = &app.manifest.limits;
         match e {
+            CallError::BadRequest(msg) => err_resp(
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+                msg,
+                "send a request with a Host header",
+            ),
             CallError::Deadline => err_resp(
                 StatusCode::GATEWAY_TIMEOUT,
                 "deadline",
@@ -1973,6 +2208,13 @@ impl Server {
                         "the app crashed; run `spared logs` for the panic message",
                     ),
                 };
+                let message = if app.manifest.runtime.is_p3() {
+                    format!(
+                        "{message}. With runtime wasip3-experimental this stops every request in flight in the instance"
+                    )
+                } else {
+                    message
+                };
                 err_resp(status, kind.as_str(), message, fix)
             }
             CallError::ResponseTooLarge => err_resp(
@@ -1987,7 +2229,7 @@ impl Server {
                 msg,
                 "check the handler's response body",
             ),
-            CallError::NoResponse | CallError::BadRequest(_) => err_resp(
+            CallError::NoResponse => err_resp(
                 StatusCode::BAD_GATEWAY,
                 "no_response",
                 "the handler returned without sending a response".into(),
@@ -2157,10 +2399,16 @@ impl Server {
             "data_entries": serde_json::Value::Null,
             "grants": {"data": a.manifest.grants.data, "fetch": a.manifest.grants.fetch},
             "limits": {"memory_mb": a.manifest.limits.memory_mb, "cpu_ms": a.manifest.limits.cpu_ms, "deadline_ms": a.manifest.limits.deadline_ms, "max_outbound": a.manifest.limits.max_outbound},
+            "runtime": a.manifest.runtime.as_str(),
             "url": format!("http://{}.localhost:{}/", a.name, self.cfg.listen.port()),
         });
         if self.cfg.path_routing {
             v["path_url"] = format!("/_/{}/", a.name).into();
+        }
+        if a.manifest.runtime.is_p3() {
+            v["experimental"] = true.into();
+            v["limits"]["concurrency"] = a.manifest.limits.concurrency_in(&self.cfg.max).into();
+            v["warning"] = WASIP3_WARNING.into();
         }
         if let Some(f) = freeze {
             v["freeze"] = f;
@@ -2323,6 +2571,10 @@ impl Server {
                 "make the names match",
             ));
         }
+        let runtime = manifest.runtime;
+        if runtime.is_p3() && !self.cfg.wasip3 {
+            return Err(wasip3_off());
+        }
         if let Some((field, asked, max, flag)) = manifest.limits.over(&self.cfg.max) {
             return Err(DeployError::new(
                 StatusCode::BAD_REQUEST,
@@ -2337,12 +2589,20 @@ impl Server {
         // Everything that can reject the component happens here, before the name lock is taken
         // and before anything on disk changes: parse, imports, handler, and the link step that
         // used to run only when the app was loaded after its files were already replaced.
-        let reusable = if self.component_path(&hash).is_file() {
+        let engine = self.engine_of(runtime).map_err(|e| {
+            DeployError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "precompile_failed",
+                format!("{e:#}"),
+                "report this",
+            )
+        })?;
+        let reusable = if self.component_path(&hash, runtime).is_file() {
             let mut cache = self.components.lock().unwrap();
-            match self.shared_component(&mut cache, &hash) {
+            match self.shared_component(&mut cache, &hash, runtime) {
                 Ok(s) => Some(s),
                 Err(_) => {
-                    let _ = std::fs::remove_file(self.component_path(&hash));
+                    let _ = std::fs::remove_file(self.component_path(&hash, runtime));
                     None
                 }
             }
@@ -2354,9 +2614,9 @@ impl Server {
         let comp = match &reusable {
             Some(s) => s.component.clone(),
             None => {
-                let (server, bytes) = (self.clone(), wasm.to_vec());
+                let (server, bytes, eng) = (self.clone(), wasm.to_vec(), engine.clone());
                 let cwasm = tokio::task::spawn_blocking(move || {
-                    compile::compile(&server.engine, &server.cfg.compile, &bytes, true)
+                    compile::compile_for(&eng, &server.cfg.compile, &bytes, true, runtime)
                 })
                 .await
                 .map_err(|e| {
@@ -2368,20 +2628,19 @@ impl Server {
                     )
                 })?
                 .map_err(|e| self.compile_failure(e))?;
-                let comp =
-                    unsafe { Component::deserialize(&self.engine, &cwasm) }.map_err(|e| {
-                        DeployError::new(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            "precompile_failed",
-                            format!("the compiled component cannot be loaded: {e:#}"),
-                            "report this",
-                        )
-                    })?;
+                let comp = unsafe { Component::deserialize(engine, &cwasm) }.map_err(|e| {
+                    DeployError::new(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "precompile_failed",
+                        format!("the compiled component cannot be loaded: {e:#}"),
+                        "report this",
+                    )
+                })?;
                 compiled = Some(cwasm);
                 comp
             }
         };
-        if let Err(r) = crate::sandbox::check_component(&self.engine, &comp, &manifest.grants) {
+        if let Err(r) = crate::sandbox::check_component(engine, &comp, &manifest.grants, runtime) {
             return Err(DeployError::new(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 r.kind,
@@ -2390,7 +2649,7 @@ impl Server {
             ));
         }
         if !reused {
-            if let Err(e) = self.link(&comp) {
+            if let Err(e) = self.link(&comp, runtime) {
                 return Err(DeployError::new(
                     StatusCode::UNPROCESSABLE_ENTITY,
                     "invalid_component",
@@ -2420,7 +2679,7 @@ impl Server {
         let version = prev.as_ref().map(|a| a.version + 1).unwrap_or(1);
         // Stage the new release next to the old one, under temporary names. Until the commit
         // below, nothing the running or restarting server reads has changed.
-        let staged = self.stage_release(&dir, &hash, wasm, cwasm, manifest_text, version);
+        let staged = self.stage_release(&dir, &hash, runtime, wasm, cwasm, manifest_text, version);
         let shared = match staged {
             Ok(s) => s,
             Err(e) => {
@@ -2468,7 +2727,8 @@ impl Server {
         let old_live = match &prev {
             Some(old) => {
                 let mut g = old.live.lock().await;
-                if g.take().is_some() {
+                if let Some(l) = g.take() {
+                    l.retire().await;
                     self.metrics.eviction(Evicted::Deploy);
                 }
                 old.hot.store(false, Ordering::Relaxed);
@@ -2541,6 +2801,7 @@ impl Server {
         &self,
         dir: &Path,
         hash: &str,
+        runtime: Runtime,
         wasm: &[u8],
         cwasm: Option<Vec<u8>>,
         manifest_text: &str,
@@ -2549,26 +2810,38 @@ impl Server {
         create_private_dir(&dir.join("data")).map_err(write_failed)?;
         let shared = {
             let mut cache = self.components.lock().unwrap();
-            let stored = self.component_path(hash);
+            let stored = self.component_path(hash, runtime);
             if !stored.is_file() {
                 let cwasm = match cwasm {
                     Some(c) => c,
-                    None => compile::compile(&self.engine, &self.cfg.compile, wasm, false)
-                        .map_err(|e| self.compile_failure(e))?,
+                    None => {
+                        let engine = self.engine_of(runtime).map_err(|e| {
+                            DeployError::new(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "precompile_failed",
+                                format!("{e:#}"),
+                                "report this",
+                            )
+                        })?;
+                        compile::compile_for(engine, &self.cfg.compile, wasm, false, runtime)
+                            .map_err(|e| self.compile_failure(e))?
+                    }
                 };
                 Self::store_file(&stored, &cwasm).map_err(write_failed)?;
             }
             // The deployed wasm is kept too, so a wasmtime upgrade can recompile it.
             let stored_wasm = self.wasm_path(hash);
             Self::store_file(&stored_wasm, wasm).map_err(write_failed)?;
-            let shared = self.shared_component(&mut cache, hash).map_err(|e| {
-                DeployError::new(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "load_failed",
-                    format!("{e:#}"),
-                    "report this",
-                )
-            })?;
+            let shared = self
+                .shared_component(&mut cache, hash, runtime)
+                .map_err(|e| {
+                    DeployError::new(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "load_failed",
+                        format!("{e:#}"),
+                        "report this",
+                    )
+                })?;
             for (from, to) in [
                 (&stored, "component.cwasm.tmp"),
                 (&stored_wasm, "component.wasm.tmp"),
@@ -2622,7 +2895,8 @@ impl Server {
             );
         }
         let mut g = a.live.lock().await;
-        if g.take().is_some() {
+        if let Some(l) = g.take() {
+            l.retire().await;
             self.metrics.eviction(Evicted::Deploy);
         }
         a.retired.store(true, Ordering::Release);
@@ -2707,7 +2981,8 @@ impl Server {
                     _ => return Err(no_such_app(name)),
                 }
             }
-            if g.take().is_some() {
+            if let Some(l) = g.take() {
+                l.retire().await;
                 self.metrics.eviction(Evicted::Admin);
             }
             app.hot.store(false, Ordering::Relaxed);
@@ -3096,7 +3371,13 @@ impl Server {
         let app = self.apps.read().unwrap().get(name).cloned();
         if let Some(app) = app {
             let mut g = app.live.lock().await;
-            let had = g.take().is_some();
+            let had = match g.take() {
+                Some(l) => {
+                    l.retire().await;
+                    true
+                }
+                None => false,
+            };
             if had {
                 app.hot.store(false, Ordering::Relaxed);
                 self.metrics.eviction(Evicted::Admin);
@@ -4497,7 +4778,13 @@ pub async fn serve(
                     let idle_for = s.now_ms().saturating_sub(a.last_ms.load(Ordering::Relaxed));
                     if idle_for >= idle.as_millis() as u64 {
                         if let Ok(mut g) = a.live.try_lock() {
-                            if g.take().is_some() {
+                            // A wasip3 instance with requests in flight is not idle, although
+                            // they do not hold the lock.
+                            if g.as_ref().is_some_and(Live::busy) {
+                                continue;
+                            }
+                            if let Some(l) = g.take() {
+                                l.retire().await;
                                 s.metrics.eviction(Evicted::Idle);
                             }
                             a.hot.store(false, Ordering::Relaxed);
@@ -4654,7 +4941,8 @@ pub async fn serve(
     let mut stopped = 0;
     for a in apps {
         if let Ok(mut g) = tokio::time::timeout_at(deadline, a.live.lock()).await {
-            if g.take().is_some() {
+            if let Some(l) = g.take() {
+                let _ = tokio::time::timeout_at(deadline, l.retire()).await;
                 stopped += 1;
             }
             a.hot.store(false, Ordering::Relaxed);
@@ -4672,6 +4960,8 @@ pub async fn serve(
 
 #[cfg(test)]
 mod lifecycle_tests;
+#[cfg(test)]
+mod wasip3_tests;
 
 #[cfg(test)]
 mod tests {

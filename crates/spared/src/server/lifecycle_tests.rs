@@ -44,6 +44,7 @@ pub(super) struct Fixture {
     pub dir: PathBuf,
     pub server: Arc<Server>,
     prefetch_mb: u64,
+    loopback: bool,
 }
 
 impl Fixture {
@@ -52,6 +53,15 @@ impl Fixture {
     }
 
     pub fn with_prefetch(prefetch_mb: u64) -> Fixture {
+        Self::make(prefetch_mb, false)
+    }
+
+    /// A server whose wasip3 apps may reach loopback test servers.
+    pub fn with_loopback() -> Fixture {
+        Self::make(0, true)
+    }
+
+    fn make(prefetch_mb: u64, loopback: bool) -> Fixture {
         static N: AtomicUsize = AtomicUsize::new(0);
         let dir = std::env::temp_dir().join(format!(
             "spared-lifecycle-{}-{}",
@@ -60,20 +70,21 @@ impl Fixture {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let server = Self::open(&dir, prefetch_mb);
+        let server = Self::open(&dir, prefetch_mb, loopback);
         Fixture {
             dir,
             server,
             prefetch_mb,
+            loopback,
         }
     }
 
     /// A new server on the same data directory: what a restart sees.
     pub fn reopen(&self) -> Arc<Server> {
-        Self::open(&self.dir, self.prefetch_mb)
+        Self::open(&self.dir, self.prefetch_mb, self.loopback)
     }
 
-    fn config(dir: &Path, prefetch_mb: u64) -> Config {
+    fn config(dir: &Path, prefetch_mb: u64, loopback: bool) -> Config {
         Config {
             data_dir: dir.to_path_buf(),
             listen: "127.0.0.1:0".parse().unwrap(),
@@ -82,7 +93,10 @@ impl Fixture {
             domain: None,
             examples_dir: None,
             path_routing: false,
-            max: Maxima::default(),
+            max: Maxima {
+                concurrency: 8,
+                ..Maxima::default()
+            },
             admin_token: "test-token-0123456789".into(),
             client_timeout: Duration::from_secs(10),
             max_connections: 16,
@@ -92,12 +106,14 @@ impl Fixture {
             caps: Default::default(),
             compile: Default::default(),
             remote: None,
+            wasip3: true,
+            test_loopback: loopback,
         }
     }
 
-    fn open(dir: &Path, prefetch_mb: u64) -> Arc<Server> {
+    fn open(dir: &Path, prefetch_mb: u64, loopback: bool) -> Arc<Server> {
         Server::new(
-            Self::config(dir, prefetch_mb),
+            Self::config(dir, prefetch_mb, loopback),
             crate::sandbox::engine().unwrap(),
         )
         .unwrap()
@@ -254,6 +270,7 @@ async fn a_deploy_that_stopped_before_its_commit_leaves_the_old_release() {
         .stage_release(
             &fx.dir.join("apps/a"),
             &sha256_hex(&v2),
+            Runtime::Wasip2,
             &v2,
             None,
             &manifest("a"),
@@ -276,7 +293,7 @@ async fn a_deploy_that_stopped_after_its_commit_is_finished_at_start() {
     let hash = sha256_hex(&v2);
     let dir = fx.dir.join("apps/a");
     fx.server
-        .stage_release(&dir, &hash, &v2, None, &manifest("a"), 2)
+        .stage_release(&dir, &hash, Runtime::Wasip2, &v2, None, &manifest("a"), 2)
         .unwrap();
     std::fs::write(dir.join(RELEASE_PENDING), b"").unwrap();
     let restarted = fx.reopen();
@@ -317,7 +334,7 @@ async fn reading_ahead_after_a_restart_covers_each_distinct_component_once() {
         .iter()
         .map(|n| {
             let a = restarted.apps.read().unwrap().get(*n).cloned().unwrap();
-            std::fs::metadata(restarted.component_path(&a.shared.hash))
+            std::fs::metadata(restarted.component_path(&a.shared.hash, Runtime::Wasip2))
                 .unwrap()
                 .len()
         })
@@ -377,7 +394,7 @@ async fn serve_stops_promptly_while_the_prefetch_pass_is_running() {
             .await
             .unwrap();
     }
-    let mut cfg = Fixture::config(&fx.dir, 1024);
+    let mut cfg = Fixture::config(&fx.dir, 1024, false);
     cfg.listen = "127.0.0.1:0".parse().unwrap();
     cfg.admin = "127.0.0.1:0".parse().unwrap();
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();

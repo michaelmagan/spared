@@ -548,6 +548,9 @@ fn trap_message(kind: TrapKind, text: &str, limits: &crate::grants::Limits) -> S
     }
 }
 
+/// Printed whenever the CLI runs or deploys a `runtime = "wasip3-experimental"` app.
+const WASIP3_NOTE: &str = "note: runtime wasip3-experimental is EXPERIMENTAL: one instance serves several requests at once, so one crash or timeout fails every request in flight in it, and it runs on wasmtime code its authors mark not ready for production (docs/wasip3.md)";
+
 fn trap_fix(kind: TrapKind) -> &'static str {
     match kind {
         TrapKind::CpuLimit => "reduce work per request or raise limits.cpu_ms in spared.toml",
@@ -559,7 +562,11 @@ fn trap_fix(kind: TrapKind) -> &'static str {
 }
 
 fn lock_for(name: &str) -> String {
-    let text = include_str!("../templates/Cargo.lock.template");
+    lock_from(include_str!("../templates/Cargo.lock.template"), name)
+}
+
+/// A template's pinned lock file with the app's name in it, the packages kept in name order.
+fn lock_from(text: &str, name: &str) -> String {
     let (head, rest) = text.split_once("[[package]]").unwrap_or((text, ""));
     let mut blocks: Vec<String> = rest
         .split("[[package]]")
@@ -594,8 +601,16 @@ struct Template {
     name: &'static str,
     about: &'static str,
     routes: &'static [&'static str],
+    /// `src/main.rs`, or `src/lib.rs` for a wasip3 template.
     main: &'static str,
     manifest: &'static str,
+    /// An EXPERIMENTAL wasip3 template: its own Cargo.toml and lock, no `src/spared.rs`.
+    wasip3: Option<Wasip3Files>,
+}
+
+struct Wasip3Files {
+    cargo_toml: &'static str,
+    lock: &'static str,
 }
 
 macro_rules! app_template {
@@ -622,12 +637,14 @@ const TEMPLATES: &[Template] = &[
         ],
         main: include_str!("../templates/main.rs.tmpl"),
         manifest: include_str!("../templates/spared.toml.tmpl"),
+        wasip3: None,
     },
     Template {
         name: "counter",
         about: "An atomic counter: a page with a button and a JSON API",
         routes: &["GET /", "GET /api/count", "POST /api/increment"],
         main: app_template!("counter").0,
+        wasip3: None,
         manifest: app_template!("counter").1,
     },
     Template {
@@ -641,6 +658,7 @@ const TEMPLATES: &[Template] = &[
             "DELETE /api/todos/<id>",
         ],
         main: app_template!("todo").0,
+        wasip3: None,
         manifest: app_template!("todo").1,
     },
     Template {
@@ -648,6 +666,7 @@ const TEMPLATES: &[Template] = &[
         about: "Guestbook with HTML-escaped messages, newest first",
         routes: &["GET /", "POST /api/messages"],
         main: app_template!("guestbook").0,
+        wasip3: None,
         manifest: app_template!("guestbook").1,
     },
     Template {
@@ -661,6 +680,7 @@ const TEMPLATES: &[Template] = &[
             "DELETE /kv/<key>",
         ],
         main: app_template!("kv").0,
+        wasip3: None,
         manifest: app_template!("kv").1,
     },
     Template {
@@ -674,6 +694,7 @@ const TEMPLATES: &[Template] = &[
             "GET /<code>",
         ],
         main: app_template!("shortener").0,
+        wasip3: None,
         manifest: app_template!("shortener").1,
     },
     Template {
@@ -681,6 +702,7 @@ const TEMPLATES: &[Template] = &[
         about: "Webhook receiver: stores any JSON with a timestamp, lists the last 50, shared-secret header",
         routes: &["GET /", "POST /hook", "GET /events"],
         main: app_template!("webhook").0,
+        wasip3: None,
         manifest: app_template!("webhook").1,
     },
     Template {
@@ -688,6 +710,7 @@ const TEMPLATES: &[Template] = &[
         about: "Outbound HTTPS call to a host you grant in spared.toml, returns status and size",
         routes: &["GET /", "GET /fetch"],
         main: app_template!("fetcher").0,
+        wasip3: None,
         manifest: app_template!("fetcher").1,
     },
     Template {
@@ -695,7 +718,19 @@ const TEMPLATES: &[Template] = &[
         about: "Blog: HTML list and post pages, bearer-token protected publish endpoint",
         routes: &["GET /", "GET /posts/<slug>", "POST /api/posts"],
         main: app_template!("blog").0,
+        wasip3: None,
         manifest: app_template!("blog").1,
+    },
+    Template {
+        name: "fetcher3",
+        about: "EXPERIMENTAL wasip3: the fetcher, with several requests at once in one instance (needs a server with --experimental-wasip3)",
+        routes: &["GET /", "GET /fetch"],
+        main: include_str!("../templates/apps/fetcher3/lib.rs"),
+        manifest: include_str!("../templates/apps/fetcher3/spared.toml"),
+        wasip3: Some(Wasip3Files {
+            cargo_toml: include_str!("../templates/apps/fetcher3/Cargo.toml.tmpl"),
+            lock: include_str!("../templates/apps/fetcher3/Cargo.lock.template"),
+        }),
     },
 ];
 
@@ -746,6 +781,18 @@ fn helper_warning(dir: &Path) -> Option<String> {
 
 fn new_files(name: &str, t: &Template) -> Vec<(&'static str, String)> {
     let sub = |text: &str| text.replace("__NAME__", name);
+    if let Some(p3) = &t.wasip3 {
+        return vec![
+            ("Cargo.toml", sub(p3.cargo_toml)),
+            ("Cargo.lock", lock_from(p3.lock, name)),
+            ("spared.toml", sub(t.manifest)),
+            (
+                ".gitignore",
+                sub(include_str!("../templates/gitignore.tmpl")),
+            ),
+            ("src/lib.rs", sub(t.main)),
+        ];
+    }
     vec![
         (
             "Cargo.toml",
@@ -812,7 +859,13 @@ fn cmd_new(name: &str, template: Option<&str>, json: bool) -> R<()> {
         std::fs::write(&p, content).map_err(|e| io_err(&format!("write {}", p.display()), e))?;
         written.push(rel);
     }
-    let steps = next_steps(name);
+    let mut steps = next_steps(name);
+    if t.wasip3.is_some() {
+        steps[2] = "spared serve --data-dir ./data --experimental-wasip3   # in another terminal, once (EXPERIMENTAL, docs/wasip3.md)".to_string();
+        if !json {
+            eprintln!("{WASIP3_NOTE}");
+        }
+    }
     if json {
         out_json(
             json!({"created": name, "path": dir, "files": written, "template": t.name, "routes": t.routes, "next": steps}),
@@ -1366,7 +1419,9 @@ fn build(dir: &Path, json: bool) -> R<PathBuf> {
     };
     release_unit_from_other_dir(dir, &target_dir)?;
     if !json {
-        if sqlite_compiled(&target_dir) || sqlite_cache_has_entry(&sdk) {
+        let uses_sqlite =
+            std::fs::read_to_string(dir.join("Cargo.toml")).is_ok_and(|t| t.contains("rusqlite"));
+        if !uses_sqlite || sqlite_compiled(&target_dir) || sqlite_cache_has_entry(&sdk) {
             eprintln!("building {}", dir.display());
         } else {
             eprintln!(
@@ -1689,7 +1744,9 @@ fn deploy_hints(name: &str) -> Vec<String> {
 async fn cmd_deploy(server: Option<String>, json: bool) -> R<()> {
     let server = server_url(server);
     let dir = PathBuf::from(".");
-    read_manifest(&dir)?;
+    if read_manifest(&dir)?.0.runtime.is_p3() && !json {
+        eprintln!("{WASIP3_NOTE}");
+    }
     match admin(&server, "", "GET", "/v1/apps", &[], Bytes::new()).await {
         Err(e) if e.kind != "unauthorized" => return Err(e),
         _ => {}
@@ -1751,9 +1808,12 @@ async fn cmd_ps(server: Option<String>, json: bool) -> R<()> {
         "{:<20} {:<6} {:>4} {:>8} {:>6} {:>6} {:>10}  URL",
         "NAME", "STATE", "VER", "REQUESTS", "WAKES", "ERRORS", "DATA"
     );
+    let mut experimental = false;
     for a in apps {
+        let p3 = a["runtime"] == "wasip3-experimental";
+        experimental |= p3;
         println!(
-            "{:<20} {:<6} {:>4} {:>8} {:>6} {:>6} {:>10}  {}",
+            "{:<20} {:<6} {:>4} {:>8} {:>6} {:>6} {:>10}  {}{}",
             a["name"].as_str().unwrap_or(""),
             a["state"].as_str().unwrap_or(""),
             a["version"].to_string(),
@@ -1761,7 +1821,13 @@ async fn cmd_ps(server: Option<String>, json: bool) -> R<()> {
             a["wakes"].to_string(),
             a["errors"].to_string(),
             format!("{} B", a["data_bytes"]),
-            a["url"].as_str().unwrap_or("")
+            a["url"].as_str().unwrap_or(""),
+            if p3 { "  EXPERIMENTAL wasip3" } else { "" }
+        );
+    }
+    if experimental {
+        println!(
+            "EXPERIMENTAL wasip3: one crash or timeout fails every request in flight in that instance, compute in one request holds up the others, and wasmtime marks its wasip3 support not ready for production (docs/wasip3.md)"
         );
     }
     Ok(())
@@ -3470,9 +3536,23 @@ struct PathResult {
     failure: Option<(String, String, String)>,
 }
 
+/// What `spared test` runs: a wasip2 component, or an EXPERIMENTAL wasip3 one.
+enum TestPre {
+    P2(ProxyPre<Guarded>),
+    P3(wasmtime_wasi_http::p3::bindings::ServicePre<Guarded>),
+}
+
+enum TestLive {
+    P2(
+        wasmtime::Store<Guarded>,
+        wasmtime_wasi_http::p2::bindings::Proxy,
+    ),
+    P3(std::sync::Arc<crate::p3::Instance>),
+}
+
 async fn request_once(
     engine: &Engine,
-    pre: &ProxyPre<Guarded>,
+    pre: &TestPre,
     m: &Manifest,
     data: &Path,
     path: &str,
@@ -3487,34 +3567,59 @@ async fn request_once(
     let fail = |res: &mut PathResult, kind: &str, msg: String, fix: &str| {
         res.failure = Some((kind.into(), msg, fix.into()))
     };
-    let mut store = match crate::sandbox::app_store(
-        engine,
-        m,
-        data,
-        log,
-        &crate::fsguard::AppCaps::default(),
-        None,
-    )
-    .await
-    {
-        Ok(s) => s,
-        Err(e) => {
-            fail(
-                &mut res,
-                "wake_failed",
-                format!("{e:#}"),
-                "check the temp dir is writable",
-            );
-            return res;
-        }
+    let wake = |res: &mut PathResult, e: wasmtime::Error| {
+        let msg = format!("{e:#}");
+        let fix = wake_failed_fix(&msg);
+        res.failure = Some(("wake_failed".into(), msg, fix));
     };
-    let proxy = match pre.instantiate_async(&mut store).await {
-        Ok(p) => p,
-        Err(e) => {
-            let msg = format!("{e:#}");
-            let fix = wake_failed_fix(&msg);
-            fail(&mut res, "wake_failed", msg, &fix);
-            return res;
+    let live = match pre {
+        TestPre::P2(pre) => {
+            let mut store = match crate::sandbox::app_store(
+                engine,
+                m,
+                data,
+                log,
+                &crate::fsguard::AppCaps::default(),
+                None,
+            )
+            .await
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    fail(
+                        &mut res,
+                        "wake_failed",
+                        format!("{e:#}"),
+                        "check the temp dir is writable",
+                    );
+                    return res;
+                }
+            };
+            match pre.instantiate_async(&mut store).await {
+                Ok(p) => TestLive::P2(store, p),
+                Err(e) => {
+                    wake(&mut res, e);
+                    return res;
+                }
+            }
+        }
+        TestPre::P3(pre) => {
+            let wasi = match crate::sandbox::wasi_builder(m, data, log) {
+                Ok(mut b) => b.build(),
+                Err(e) => {
+                    wake(&mut res, e);
+                    return res;
+                }
+            };
+            let store = crate::p3::store(engine, m, wasi, None, None, u64::MAX);
+            let deadline = Duration::from_millis(m.limits.deadline_ms);
+            match crate::p3::Instance::start(pre, store, 1, deadline, None).await {
+                Ok(i) => TestLive::P3(i),
+                Err(e) => {
+                    wake(&mut res, e);
+                    return res;
+                }
+            }
         }
     };
     let uri = format!(
@@ -3544,7 +3649,17 @@ async fn request_once(
     };
     let deadline = Duration::from_millis(m.limits.deadline_ms);
     let max = Maxima::default().response_mb << 20;
-    match call_handler(&mut store, &proxy, req, deadline, max).await {
+    let outcome = match live {
+        TestLive::P2(mut store, proxy) => {
+            call_handler(&mut store, &proxy, req, deadline, max).await
+        }
+        TestLive::P3(instance) => {
+            let r = instance.call(req, deadline, max).await;
+            instance.drain().await;
+            r
+        }
+    };
+    match outcome {
         Ok(resp) => {
             res.status = Some(resp.status().as_u16());
             let bytes = resp.body();
@@ -3601,9 +3716,12 @@ async fn cmd_test(paths: Vec<String>, json: bool) -> R<()> {
     }
     m.limits.clamp(&Maxima::default());
     let wasm = build(&dir, json)?;
-    let engine =
-        crate::sandbox::engine().map_err(|e| err("engine", format!("{e:#}"), "report this"))?;
+    let engine = crate::sandbox::engine_for(m.runtime)
+        .map_err(|e| err("engine", format!("{e:#}"), "report this"))?;
     crate::sandbox::start_epoch_ticker(&engine);
+    if m.runtime.is_p3() && !json {
+        eprintln!("{WASIP3_NOTE}");
+    }
     let comp = Component::from_file(&engine, &wasm).map_err(|e| {
         err(
             "invalid_component",
@@ -3611,10 +3729,19 @@ async fn cmd_test(paths: Vec<String>, json: bool) -> R<()> {
             "build for wasm32-wasip2 as a component: use `#[wstd::http_server]` and a bin crate",
         )
     })?;
-    crate::sandbox::check_component(&engine, &comp, &m.grants)
+    crate::sandbox::check_component(&engine, &comp, &m.grants, m.runtime)
         .map_err(|r| err(r.kind, r.message, r.fix))?;
-    let pre = crate::sandbox::link(&engine, &comp)
-        .map_err(|e| err("link", format!("{e:#}"), "report this"))?;
+    let pre = if m.runtime.is_p3() {
+        TestPre::P3(
+            crate::p3::link(&engine, &comp)
+                .map_err(|e| err("link", format!("{e:#}"), "report this"))?,
+        )
+    } else {
+        TestPre::P2(
+            crate::sandbox::link(&engine, &comp)
+                .map_err(|e| err("link", format!("{e:#}"), "report this"))?,
+        )
+    };
 
     let nanos = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -3708,7 +3835,10 @@ fn newest_mtime(dir: &Path) -> SystemTime {
 
 async fn cmd_dev(json: bool) -> R<()> {
     let dir = PathBuf::from(".");
-    read_manifest(&dir)?;
+    let dev_wasip3 = read_manifest(&dir)?.0.runtime.is_p3();
+    if dev_wasip3 && !json {
+        eprintln!("{WASIP3_NOTE}");
+    }
     let data_dir = std::fs::canonicalize(".")
         .map_err(|e| io_err("resolve .", e))?
         .join(".spared");
@@ -3754,6 +3884,11 @@ async fn cmd_dev(json: bool) -> R<()> {
         caps: Default::default(),
         compile: crate::compile::CompileLimits::isolated(),
         remote: None,
+        // `spared dev` runs a wasip3-experimental app when its spared.toml asks for one: the
+        // developer chose it for their own app on their own machine.
+        wasip3: dev_wasip3,
+        #[cfg(test)]
+        test_loopback: false,
     };
     let server = tokio::spawn(crate::server::serve(
         cfg,
@@ -3971,6 +4106,21 @@ mod template_tests {
             let m: Manifest = toml::from_str(&t.manifest.replace("__NAME__", "demo"))
                 .unwrap_or_else(|e| panic!("{}: {e}", t.name));
             assert_eq!(m.name, "demo");
+            if t.wasip3.is_some() {
+                let m = Manifest::parse(&t.manifest.replace("__NAME__", "demo"))
+                    .unwrap_or_else(|e| panic!("{}: {e}", t.name));
+                assert!(m.runtime.is_p3() && !m.grants.data, "{}", t.name);
+                assert!(
+                    t.main.contains("wasip3::http::service::export!"),
+                    "{} has no handler",
+                    t.name
+                );
+                let files = new_files("demo", t);
+                assert!(files.iter().all(|(p, _)| *p != "src/spared.rs"));
+                let lock = &files.iter().find(|(p, _)| *p == "Cargo.lock").unwrap().1;
+                assert!(lock.contains("name = \"demo\"") && lock.contains("name = \"wasip3\""));
+                continue;
+            }
             assert!(t.main.contains("const SCHEMA"), "{} has no SCHEMA", t.name);
             assert!(
                 t.main.contains("#[wstd::http_server]"),
